@@ -443,12 +443,13 @@ def finish_table(frame: pd.DataFrame, options: dict) -> Data:
     frame: pd.DataFrame
         読み込んだ表
     options: dict
-        読み込みの設定 (time_column で日時の列を指定できる)
+        読み込みの設定 (time_column で日時の列, text_column で文の列,
+        kind: table で表として読むことを指定できる)
 
     Returns
     ----------
     data: Data
-        表か時系列のデータ
+        表, 時系列, 文のデータ
     """
     # 列の名前を重ならない文字にし, カンマ付きの数を数にする
     frame.columns = unique_names(list(frame.columns))
@@ -460,6 +461,11 @@ def finish_table(frame: pd.DataFrame, options: dict) -> Data:
             numbers = to_numbers(column)
             if numbers is not None:
                 frame[name] = numbers
+
+    # 文の列の指定があれば文のデータ (1 行が 1 つの文. 他の列も残す)
+    text_column = options.get("text_column")
+    if text_column:
+        return text_table(frame, text_column)
 
     # 日時の列の指定があればそれを, 無ければ推定
     time_column = options.get("time_column")
@@ -482,6 +488,46 @@ def finish_table(frame: pd.DataFrame, options: dict) -> Data:
         frame = frame.sort_values(roles["time"], kind="stable")
         frame = frame.reset_index(drop=True)
     data = Data(kind=kind, frame=frame, roles=roles)
+
+    return data
+
+
+def text_table(frame: pd.DataFrame, text_column: str) -> Data:
+    """
+    表の 1 つの列を文にした, 文のデータを作る関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        読み込んだ表
+    text_column: str
+        文の列
+
+    Returns
+    ----------
+    data: Data
+        文のデータ (元の列と, 文の長さ length と語の数 words を持つ.
+        欠損の文は空の文)
+
+    Raises
+    ----------
+    ValueError
+        文の列が無い場合
+    """
+    # 欠損は空の文にし, 分析と手順の数の決め方に使う長さと語の数を足す
+    if text_column not in frame.columns:
+        raise ValueError(f"文の列 {text_column} がありません")
+    frame[text_column] = frame[text_column].fillna("").astype(str)
+    names = unique_names([*frame.columns, "length", "words"])
+    length, words = names[-2], names[-1]
+    frame[length] = frame[text_column].str.len()
+    frame[words] = frame[text_column].str.split().map(len)
+    roles = {"text": text_column, "length": length, "words": words}
+    column = frame[text_column]
+    data = Data(
+        kind="text", frame=frame, roles=roles,
+        item_loader=lambda i: column.iloc[i]
+    )
 
     return data
 

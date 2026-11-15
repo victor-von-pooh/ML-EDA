@@ -1,5 +1,6 @@
 import math
 import re
+import unicodedata
 from typing import Any, Optional
 
 import numpy as np
@@ -102,7 +103,10 @@ def profile(
         # 配列にする) ので, 列の気付きは目的の列についてのものだけを残す
         kept = {"class_imbalance", "target_missing"}
         result["findings"] = result["items"].pop("findings") + [
-            item for item in result["findings"] if item["code"] in kept
+            item for item in result["findings"]
+            if item["code"] in kept or (
+                item["code"] == "mixed_forms" and target in item["columns"]
+            )
         ]
     result = to_json(result)
 
@@ -172,6 +176,8 @@ def infer_type(column: pd.Series, roles: dict) -> str:
     name = str(column.name)
     if values.empty:
         return "empty"
+    if name == roles.get("text"):
+        return "text"
     if name == roles.get("time") or pd.api.types.is_datetime64_any_dtype(
         column
     ):
@@ -330,7 +336,35 @@ def category_stats(values: pd.Series) -> dict:
         "top_ratio": float(counts.iloc[0] / len(values)) if len(values) else 0,
     }
 
+    # 全角と半角, 大文字と小文字, 前後の空白だけが違う値の組
+    groups: dict[str, list[str]] = {}
+    for value in counts.index[:1000]:
+        groups.setdefault(normal_form(value), []).append(value)
+    variants = [names for names in groups.values() if len(names) > 1]
+    if variants:
+        stats["variants"] = variants[:5]
+
     return stats
+
+
+def normal_form(value: str) -> str:
+    """
+    表記のゆれ (全角と半角, 大文字と小文字, 前後の空白) をそろえた文字を
+    返す関数
+
+    Parameters
+    ----------
+    value: str
+        値
+
+    Returns
+    ----------
+    form: str
+        NFKC で正規化し, 小文字にして前後の空白を除いた文字
+    """
+    form = unicodedata.normalize("NFKC", value).casefold().strip()
+
+    return form
 
 
 def text_stats(values: pd.Series) -> dict:
@@ -903,8 +937,25 @@ def column_issues(name: str, info: dict, target: Optional[str]) -> list:
     findings: list
         気付きの並び
     """
-    # 目的の列は目的の列の気付きで扱う
+    # 表記のゆれは目的の列でも (クラスが分かれる), 他は目的の列の気付きで
     findings: list = []
+    if info.get("variants"):
+        pair = info["variants"][0][:2]
+        # NFKC と空白だけではそろわない組は, 大文字と小文字の違い
+        cased = any(
+            len({unicodedata.normalize("NFKC", v).strip() for v in group}) > 1
+            for group in info["variants"]
+        )
+        how = (
+            f"normalize_text (columns: [{name}], lowercase: true)" if cased
+            else f"normalize_text (columns: [{name}])"
+        )
+        findings.append(finding(
+            "warning", "mixed_forms",
+            f"{name} に表記だけが違う値があります (例: {' と '.join(pair)}. "
+            "全角と半角, 大文字と小文字, 前後の空白). 別のカテゴリとして"
+            f"扱われるので, {how} でそろえてください", [name]
+        ))
     if name == target:
         return findings
     kind = info["type"]
