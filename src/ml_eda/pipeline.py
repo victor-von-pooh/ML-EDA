@@ -304,6 +304,10 @@ def run_step(
     step = STEPS[spec["op"]]
     params = {k: v for k, v in spec.items() if k not in ("op", "state")}
     try:
+        if spec["op"] == "drop_columns" and params.get("columns") in (
+            None, "auto"
+        ):
+            raise ValueError("落とす列の名前を columns に書いてください")
         if "columns" in step.params and spec["op"] != "drop_missing":
             params["columns"] = resolve_columns(
                 frame, params.get("columns"), roles,
@@ -888,7 +892,15 @@ class Dataset:
             if "columns" in state:
                 params["columns"] = [c for c in columns if c in result]
             result = step.apply(result, params, state)
-        result = result[[c for c in self.features if c in result.columns]]
+        # 学習に使う列が足りない場合は, 黙って落とさずに誤りにする
+        missing = [c for c in self.features if c not in result.columns]
+        if missing:
+            raise ValueError(
+                f"前処理の後に, 学習に使う列が足りません: {', '.join(missing)}"
+                " (元のデータと同じ列を渡してください. カンマ付きの数などは "
+                "load_data で読んだ後の形にそろえてください)"
+            )
+        result = result[self.features]
 
         return result
 

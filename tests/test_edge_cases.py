@@ -316,3 +316,36 @@ def test_big_regular_timeseries() -> None:
     data = Data(kind="timeseries", frame=frame, roles={"time": "t"})
     series = profile(data)["timeseries"]
     assert series["gaps"] == 0 and series["interval_seconds"] == 60
+
+
+def test_transform_needs_columns(tmp_path: Path) -> None:
+    """
+    推論の前処理で学習に使う列が足りない場合と, 列を落とす手順に auto を
+    書いた場合を誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 2 つの列で書き出す
+    from ml_eda import load_dataset
+
+    frame = pd.DataFrame({"a": np.arange(20.0), "b": np.arange(20.0),
+                          "y": [0, 1] * 10})
+    recipe = {"target": "y", "task": "classification",
+              "split": {"method": "random", "valid": 0.2}}
+    export_dataset(table(frame), recipe, tmp_path / "ds")
+
+    # b の無い新しいデータは誤り
+    with pytest.raises(ValueError, match="足りません"):
+        load_dataset(tmp_path / "ds").transform(frame[["a"]])
+
+    # 列を落とす手順の auto は誤り
+    with pytest.raises(ValueError, match="落とす列"):
+        prepare(table(frame), {"steps": [{"op": "drop_columns",
+                                          "columns": "auto"}]})
