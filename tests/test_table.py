@@ -9,6 +9,8 @@ from ml_eda import (
     describe_loaders, describe_steps, detect, export_dataset, load_data,
     load_dataset, load_recipe, prepare, preview, profile
 )
+from ml_eda.loaders import table_kind, to_datetime, to_numbers
+from ml_eda.recipe import apply_lag
 
 
 def make_table(rows: int = 300) -> pd.DataFrame:
@@ -302,3 +304,104 @@ def test_recipe_errors() -> None:
     assert {step["op"] for step in describe_steps()} >= {
         "impute", "standardize", "one_hot", "lag"
     }
+
+
+def test_units_dates_and_series(tmp_path: Path) -> None:
+    """
+    単位の付いた数, 書き方の混ざった日付, 店ごとの系列 (系列ごとのずらし)
+    を確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 2 店の 30 日分. 売上は円付き, 日付は 3 つの書き方
+    rows = []
+    for store, base in (("A店", 100), ("B店", 1000)):
+        for day in range(30):
+            date = pd.Timestamp("2024-01-01") + pd.Timedelta(days=day)
+            text = (
+                f"{date.year}年{date.month}月{date.day}日" if day % 3 == 0
+                else date.strftime("%Y/%m/%d") if day % 3 == 1
+                else date.strftime("%Y-%m-%d")
+            )
+            rows.append({
+                "date": text, "store": store,
+                "sales": f"{base + day:,}円", "rate": f"{day % 5}%",
+            })
+    pd.DataFrame(rows).sample(frac=1, random_state=0).to_csv(
+        tmp_path / "s.csv", index=False
+    )
+    data = load_data(tmp_path / "s.csv")
+    assert data.kind == "timeseries"
+    assert data.roles == {"time": "date", "series": "store"}
+    assert data.frame["sales"].dtype == float
+    assert data.frame["rate"].max() == 4
+
+    # 店ごとの系列の気付きと, 間隔は 1 つの系列で
+    result = profile(data, target="sales")
+    codes = {item["code"] for item in result["findings"]}
+    assert "panel_series" in codes and "irregular_interval" not in codes
+    assert result["timeseries"]["series_by"] == "store"
+
+    # 系列ごとにずらすと, 1 つ前の値は同じ店の前の日
+    recipe = {
+        "target": "sales", "task": "forecasting",
+        "steps": [{"op": "lag", "columns": ["sales"], "lags": [1],
+                   "windows": [2], "by": ["store"]}],
+        "split": {"method": "none"},
+    }
+    frame = prepare(data, recipe).frames["train"]
+    b = frame[frame["store"] == "B店"]
+    assert (b["sales"] - b["sales_lag1"]).dropna().eq(1).all()
+    assert b["sales_mean2"].dropna().min() >= 1000
+
+
+def test_review_fixes_units_panel() -> None:
+    """
+    単位とマイナスの書き方, 日本語の日時, 注文の表を時系列にしないこと,
+    系列の列の欠損を確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 単位の違う値が混ざれば数にしない. 0 で始まる値も. マイナスは前でも
+    assert to_numbers(pd.Series(["1kg", "500g", "2kg"])) is None
+    assert to_numbers(pd.Series(["001件", "002件"])) is None
+    assert to_numbers(pd.Series(["-¥100", "¥-200", "¥300"])).tolist() == [
+        -100, -200, 300
+    ]
+
+    # 日と時の間に空白の無い日時, 時だけ, 年月だけ
+    stamps = to_datetime(pd.Series(["2024年1月3日12時30分", "2024年1月4日9時"]))
+    assert stamps.dt.hour.tolist() == [12, 9]
+    assert to_datetime(pd.Series(["2024年1月", "2024年2月"])).notna().all()
+
+    # 注文の表 (顧客ごとの日がまばら) は時系列にしない
+    rng = np.random.default_rng(0)
+    orders = pd.DataFrame({
+        "date": pd.Timestamp("2024-01-01")
+        + pd.to_timedelta(rng.integers(0, 365, 2000), unit="D"),
+        "customer": rng.integers(0, 150, 2000).astype(str),
+    })
+    assert table_kind(orders)[0] == "table"
+
+    # 系列の列の欠損は, 1 つの系列として扱う (ずらした値を欠損にしない)
+    frame = pd.DataFrame({
+        "y": [1.0, 2.0, 3.0, 4.0], "s": ["a", None, "a", None]
+    })
+    result = apply_lag(
+        frame, {"columns": ["y"], "lags": [1], "by": ["s"]}, {}
+    )
+    assert result["y_lag1"].tolist()[2:] == [1.0, 2.0]
+

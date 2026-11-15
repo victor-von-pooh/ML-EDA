@@ -1,5 +1,7 @@
 import csv
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -11,6 +13,15 @@ from ml_eda.data import Data
 
 # 中身の推定に読む先頭のバイト数
 SNIFF_BYTES = 64 * 1024
+
+# 数の前に付けてよい通貨の記号と, 後に付けてよい単位 (これ以外の文字が
+# 付いた値は, 型番や ID かもしれないので数にしない)
+CURRENCIES = "¥$€£"
+UNITS = (
+    "万円", "千円", "円", "ドル", "%", "個", "件", "人", "本", "回", "点", "歳",
+    "冊", "台", "枚", "杯", "時間", "分", "秒", "日", "kg", "mg", "g", "km",
+    "cm", "mm", "m", "mL", "ml", "L"
+)
 
 # 試す文字コード (日本語の csv によくあるものを含む)
 ENCODINGS = ("utf-8-sig", "utf-8", "cp932", "euc-jp", "latin-1")
@@ -291,6 +302,48 @@ def guess_delimiter(text: str) -> str:
     return delimiter
 
 
+def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
+    """
+    日時の列と組にすると行が重ならない, 系列を分ける列を探す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        表
+    time: str
+        日時の列
+
+    Returns
+    ----------
+    name: Optional[str]
+        文字の列で, 値が 2 から 200 種類, 1 つの値あたり平均 10 行以上,
+        日時の列との組の重なりが 5 % 未満の最初の列. 無ければ None
+    """
+    # 系列ごとに十分な長さがあり, 同じ系列の中で時刻が重ならず, 時刻と系列
+    # の組の半分以上が埋まっている列 (注文の表の顧客は, ほとんどの日に注文
+    # が無いので系列にしない). 整数の店の番号なども候補
+    times = frame[time].nunique()
+    if times < 10:
+        return None
+    for name in frame.columns:
+        column = frame[name]
+        if name == time or pd.api.types.is_float_dtype(column) or (
+            pd.api.types.is_datetime64_any_dtype(column)
+            or pd.api.types.is_bool_dtype(column)
+        ):
+            continue
+        count = column.nunique()
+        if not (2 <= count <= 200 and len(frame) / count >= 10):
+            continue
+        pairs = frame[[time, name]].drop_duplicates().shape[0]
+        if frame.duplicated([time, name]).mean() < 0.05 and (
+            pairs >= 0.5 * times * count
+        ):
+            return str(name)
+
+    return None
+
+
 def table_kind(frame: pd.DataFrame) -> tuple[str, dict]:
     """
     表が時系列かを推定し, 日時の列を時刻の順に並べる関数
@@ -305,7 +358,7 @@ def table_kind(frame: pd.DataFrame) -> tuple[str, dict]:
     kind: str
         table か timeseries
     roles: dict
-        推定した役割 (時系列なら time)
+        推定した役割 (時系列なら time. 複数の系列なら系列を分ける列 series)
     """
     # 日時に変換できる列を探す (数値の列は除く)
     roles: dict = {}
@@ -322,15 +375,50 @@ def table_kind(frame: pd.DataFrame) -> tuple[str, dict]:
             frame[name] = converted
         else:
             continue
-        # 異なる時刻が多い最初の列を日時の列とする (他の日時の列も変換)
+        # 異なる時刻が多い最初の列を日時の列とする (他の日時の列も変換).
+        # 店ごとの売上のように, 系列を分ける列と組にすると時刻が重ならない
+        # 場合も日時の列とする
         valid = converted.dropna()
-        if "time" not in roles and len(valid) >= 3 and (
-            valid.nunique() >= 0.5 * len(valid)
-        ):
-            roles["time"] = str(name)
+        if "time" not in roles and len(valid) >= 3:
+            # 時刻が重なる場合は, まず系列を分ける列を探す
+            series = (
+                panel_of(frame, str(name))
+                if valid.nunique() < len(valid) else None
+            )
+            if series is not None:
+                roles["time"], roles["series"] = str(name), series
+            elif valid.nunique() >= 0.5 * len(valid):
+                roles["time"] = str(name)
     kind = "timeseries" if "time" in roles else "table"
 
     return kind, roles
+
+
+def japanese_date(value: str) -> str:
+    """
+    日本語の日時の書き方 (2024年1月3日12時30分15秒, 2024年1月) を,
+    pandas で読める書き方 (2024-1-3 12:30:15) に直す関数
+
+    Parameters
+    ----------
+    value: str
+        値
+
+    Returns
+    ----------
+    text: str
+        直した値 (日本語の日時でなければそのまま)
+    """
+    # 年月日, 年月, 時分秒 (欠けた分と秒は 0)
+    text = re.sub(r"(\d{4})年(\d{1,2})月(\d{1,2})日?\s*", r"\1-\2-\3 ", value)
+    text = re.sub(r"(\d{4})年(\d{1,2})月(?!\d)", r"\1-\2", text)
+    text = re.sub(
+        r"(\d{1,2})時(?:(\d{1,2})分)?(?:(\d{1,2})秒)?",
+        lambda m: f"{m[1]}:{m[2] or 0}:{m[3] or 0}", text
+    )
+    text = text.strip()
+
+    return text
 
 
 def to_datetime(column: pd.Series) -> Optional[pd.Series]:
@@ -355,6 +443,8 @@ def to_datetime(column: pd.Series) -> Optional[pd.Series]:
     dated = values.str.contains(r"\d[-/:年]\d|\d年|\d{4}-\d", regex=True)
     if dated.mean() < 0.8:
         return None
+    # 2024年1月3日 (と 12時30分) の書き方は, - と : の書き方に直してから読む
+    column = column.where(column.isna(), column.astype(str).map(japanese_date))
     try:
         converted = pd.to_datetime(column, errors="coerce", format="mixed")
         if not pd.api.types.is_datetime64_any_dtype(converted):
@@ -392,18 +482,47 @@ def to_numbers(column: pd.Series) -> Optional[pd.Series]:
     converted: Optional[pd.Series]
         8 割以上が 1,234 の形の数なら変換した列, そうでなければ None
     """
-    # 1,234 や -12,345.6 の形だけを数にする
-    values = column.dropna().astype(str).str.strip()
+    # 1,234 や -12,345.6 の形と, 前後に同じ単位の付いた形 (¥1,200, 1,200円,
+    # 12%, 3.5kg) を数にする. 全角の数字は半角に
+    values = column.dropna().astype(str).map(
+        lambda v: unicodedata.normalize("NFKC", v).strip()
+    )
     if values.empty:
         return None
-    pattern = r"[+-]?\d{1,3}(,\d{3})+(\.\d+)?|[+-]?\d+(\.\d+)?"
-    matched = values.str.fullmatch(pattern)
-    if matched.mean() < 0.8 or not values.str.contains(",").any():
+    number = r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[+-]?\d+(?:\.\d+)?"
+    units = "|".join(re.escape(unit) for unit in UNITS)
+    parts = values.str.extract(
+        rf"^(?P<sign>[+-]?)\s*(?P<pre>[{re.escape(CURRENCIES)}]?)\s*"
+        rf"(?P<num>{number})\s*(?P<suf>(?:{units})?)$"
+    )
+    matched = parts["num"].notna()
+    affix = (parts["pre"].fillna("") + "|" + parts["suf"].fillna(""))[matched]
+    if matched.mean() < 0.8 or affix.empty:
         return None
-    converted = pd.to_numeric(
-        column.astype(str).str.replace(",", "", regex=False),
+    common = affix.value_counts()
+    unit = common.index[0]
+    if common.iloc[0] < 0.8 * len(values):
+        return None
+    if unit == "|" and not values.str.contains(",").any():
+        return None
+    # 単位の付いた形は, 読めた値が全て同じ単位の場合だけ (1kg と 500g の
+    # ように単位の違う値を欠損にしない). 0 で始まる値 (001件) は ID とみて
+    # 数にしない
+    if unit != "|" and (
+        len(common) > 1
+        or parts["num"][matched].str.match(r"[+-]?0\d").any()
+    ):
+        return None
+    keep = matched & (
+        parts["pre"].fillna("") + "|" + parts["suf"].fillna("") == unit
+    )
+    numbers = pd.to_numeric(
+        parts["num"].where(keep).str.replace(",", "", regex=False),
         errors="coerce"
-    ).where(column.notna())
+    )
+    numbers = numbers.where(parts["sign"] != "-", -numbers)
+    converted = pd.Series(np.nan, index=column.index, dtype=float)
+    converted[numbers.index] = numbers
 
     return converted
 

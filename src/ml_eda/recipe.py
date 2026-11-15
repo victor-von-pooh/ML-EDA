@@ -814,7 +814,9 @@ def apply_lag(
     frame: pd.DataFrame
         時刻の順に並んだ表
     params: dict
-        columns, lags (ずらし幅の並び), windows (移動平均の幅の並び)
+        columns, lags (ずらし幅の並び), windows (移動平均の幅の並び),
+        by (系列を分ける列の並び. 店ごとの売上のように, 複数の系列が同じ
+        時刻に並ぶ場合は, 系列ごとにずらす)
     state: dict
         使わない
 
@@ -822,16 +824,39 @@ def apply_lag(
     ----------
     result: pd.DataFrame
         列を足した表 (始めの行は欠損になる)
+
+    Raises
+    ----------
+    ValueError
+        系列を分ける列が無い場合
     """
-    # 未来の値を使わないように, 過去だけを見る
+    # 未来の値を使わないように, 過去だけを見る (系列ごと)
     result = frame.copy()
+    by = params.get("by") or []
+    by = [by] if isinstance(by, str) else list(by)
+    missing = [name for name in by if name not in frame.columns]
+    if missing:
+        raise ValueError(f"系列を分ける列がありません: {', '.join(missing)}")
     for name in resolve_columns(frame, params.get("columns"), {}):
+        if name in by:
+            continue
+        column = result[name]
+        groups = column.groupby(
+            [result[b] for b in by], dropna=False
+        ) if by else None
         for lag in params.get("lags", [1]):
-            result[f"{name}_lag{lag}"] = result[name].shift(int(lag))
-        for window in params.get("windows", []):
-            result[f"{name}_mean{window}"] = (
-                result[name].shift(1).rolling(int(window)).mean()
+            result[f"{name}_lag{lag}"] = (
+                groups.shift(int(lag)) if groups is not None
+                else column.shift(int(lag))
             )
+        for window in params.get("windows", []):
+            mean = (
+                groups.transform(
+                    lambda s, w=int(window): s.shift(1).rolling(w).mean()
+                ) if groups is not None
+                else column.shift(1).rolling(int(window)).mean()
+            )
+            result[f"{name}_mean{window}"] = mean
 
     return result
 
@@ -923,8 +948,9 @@ def register_builtin_steps() -> None:
     register_step(Step(
         "lag", None, apply_lag,
         {"columns": columns, "lags": "ずらし幅の並び",
-         "windows": "移動平均の幅の並び"},
-        "時系列の過去の値と移動平均の列を足す"
+         "windows": "移動平均の幅の並び",
+         "by": "系列を分ける列の並び (店ごとなど. 省略すると 1 つの系列)"},
+        "時系列の過去の値と移動平均の列を足す (by で系列ごと)"
     ))
 
 
