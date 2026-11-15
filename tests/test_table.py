@@ -433,3 +433,45 @@ def test_time_split_keeps_same_time_together() -> None:
     assert (per_day == 1).all()
     last_train = frame["date"][labels == "train"].max()
     assert last_train < frame["date"][labels == "valid"].min()
+
+
+def test_panel_needs_shared_times(tmp_path: Path) -> None:
+    """
+    時刻が行ごとに違う表の 2 値の列を, 系列を分ける列にしないことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 投稿の時刻は行ごとに違い, 重複した行だけで時刻が重なるレビュー
+    times = pd.date_range("2025-01-01", periods=400, freq="h")
+    frame = pd.DataFrame({
+        "posted": times.strftime("%Y/%m/%d %H:%M"),
+        "stars": [1, 5] * 200,
+        "label": ["悪い", "良い"] * 200,
+    })
+    frame = pd.concat([frame, frame.head(20)])
+    path = tmp_path / "reviews.csv"
+    frame.to_csv(path, index=False)
+    data = load_data(path)
+    assert data.kind == "timeseries" and "series" not in data.roles
+
+    # 同じ時刻に 2 つの店が並べば系列
+    shops = pd.DataFrame({
+        "date": list(times.strftime("%Y-%m-%d %H:%M")) * 2,
+        "shop": ["A"] * 400 + ["B"] * 400,
+        "sales": range(800),
+    })
+    shops.to_csv(path, index=False)
+    assert load_data(path).roles.get("series") == "shop"
+
+    # 片方の店が後から始まっても (並ぶ時刻が 4 割) 系列
+    late = shops[(shops["shop"] == "A") | (shops.index >= 640)]
+    late.to_csv(path, index=False)
+    assert load_data(path).roles.get("series") == "shop"
