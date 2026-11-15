@@ -263,6 +263,33 @@ def normalize_image(
     return normalized
 
 
+def normalize_item_text(text: Any, params: dict, state: dict) -> str:
+    """
+    文の表記のゆれ (全角と半角, 前後の空白, 大文字と小文字) をそろえる関数
+
+    Parameters
+    ----------
+    text: Any
+        文
+    params: dict
+        lowercase (小文字にするか)
+    state: dict
+        使わない
+
+    Returns
+    ----------
+    normalized: str
+        そろえた文
+    """
+    from ml_eda.recipe import normal_text
+
+    normalized = normal_text(
+        str(text), bool(params.get("lowercase", False))
+    )
+
+    return normalized
+
+
 def tokenize(text: str, params: dict) -> list[str]:
     """
     文を語に分ける関数
@@ -788,6 +815,11 @@ def register_builtin_item_steps() -> None:
     ))
 
     # 文
+    register_item_step(ItemStep(
+        "normalize_text", "text", None, normalize_item_text,
+        {"lowercase": "小文字にするか (既定 false)"},
+        "表記のゆれ (全角と半角, 前後の空白) をそろえる (NFKC)"
+    ))
     register_item_step(ItemStep(
         "vocabulary", "text", fit_vocabulary, encode_text,
         {"max_tokens": "語彙の上限", "min_count": "語彙に入れる最小の出現数",

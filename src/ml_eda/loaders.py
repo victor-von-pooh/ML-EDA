@@ -522,7 +522,7 @@ def text_table(frame: pd.DataFrame, text_column: str) -> Data:
     length, words = names[-2], names[-1]
     frame[length] = frame[text_column].str.len()
     frame[words] = frame[text_column].str.split().map(len)
-    roles = {"text": text_column}
+    roles = {"text": text_column, "length": length, "words": words}
     column = frame[text_column]
     data = Data(
         kind="text", frame=frame, roles=roles,

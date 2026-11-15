@@ -176,6 +176,8 @@ def infer_type(column: pd.Series, roles: dict) -> str:
     name = str(column.name)
     if values.empty:
         return "empty"
+    if name == roles.get("text"):
+        return "text"
     if name == roles.get("time") or pd.api.types.is_datetime64_any_dtype(
         column
     ):
@@ -938,12 +940,21 @@ def column_issues(name: str, info: dict, target: Optional[str]) -> list:
     # 表記のゆれは目的の列でも (クラスが分かれる), 他は目的の列の気付きで
     findings: list = []
     if info.get("variants"):
-        pair = " と ".join(info["variants"][0][:2])
+        pair = info["variants"][0][:2]
+        # NFKC と空白だけではそろわない組は, 大文字と小文字の違い
+        cased = any(
+            len({unicodedata.normalize("NFKC", v).strip() for v in group}) > 1
+            for group in info["variants"]
+        )
+        how = (
+            f"normalize_text (columns: [{name}], lowercase: true)" if cased
+            else f"normalize_text (columns: [{name}])"
+        )
         findings.append(finding(
             "warning", "mixed_forms",
-            f"{name} に表記だけが違う値があります (例: {pair}. 全角と半角, "
-            "大文字と小文字, 前後の空白). 別のカテゴリとして扱われるので, "
-            "normalize_text でそろえてください", [name]
+            f"{name} に表記だけが違う値があります (例: {' と '.join(pair)}. "
+            "全角と半角, 大文字と小文字, 前後の空白). 別のカテゴリとして"
+            f"扱われるので, {how} でそろえてください", [name]
         ))
     if name == target:
         return findings

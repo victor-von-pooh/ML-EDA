@@ -893,8 +893,8 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
                 "severity": "info", "code": "empty_items",
                 "message": (
                     f"空の文が {empty} 件あります. 全てが詰め物になるので, "
-                    "filter_rows (length が 0 より大きい) で除くことを検討"
-                    "してください"
+                    f"filter_rows ({data.roles.get('length', 'length')} が 0 "
+                    "より大きい) で除くことを検討してください"
                 ),
                 "columns": [text],
             })

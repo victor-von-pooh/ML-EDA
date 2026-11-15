@@ -9,6 +9,7 @@ from ml_eda import (
     detect, export_dataset, load_data, load_dataset, prepare, preview_items,
     profile
 )
+from ml_eda.recipe import apply_normalize_text
 
 PIL = pytest.importorskip("PIL.Image")
 
@@ -474,3 +475,52 @@ def test_text_column(tmp_path: Path) -> None:
     assert len(train) == 6 and set(train["product"]) == {"リュック", "ケトル"}
     assert prepared.classes == ["悪い", "良い"]
     assert prepared.arrays["train"].shape == (6, 6)
+
+
+def test_text_normalize(tmp_path: Path) -> None:
+    """
+    文の表記のゆれを中身の手順でそろえ, 表の手順で文の列を変えると誤りに
+    なることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 全角と大文字だけが違う文は, 中身の手順で同じ番号の並びになる
+    frame = pd.DataFrame({
+        "review": ["ＧＯＯＤ movie", "good movie", "bad"] * 2,
+        "label": ["Pos", "pos", "neg"] * 2,
+    })
+    path = tmp_path / "r.csv"
+    frame.to_csv(path, index=False)
+    data = load_data(path, text_column="review")
+    recipe = {
+        "target": "label", "task": "classification",
+        "item_steps": [
+            {"op": "normalize_text", "lowercase": True},
+            {"op": "vocabulary", "length": 3},
+        ],
+        "split": {"method": "none"},
+    }
+    arrays = prepare(data, recipe).arrays["train"]
+    assert arrays[0].tolist() == arrays[1].tolist()
+
+    # 目的の列の大文字と小文字のゆれは lowercase を勧める
+    forms = [
+        item for item in profile(data, "label")["findings"]
+        if item["code"] == "mixed_forms"
+    ]
+    assert "lowercase: true" in forms[0]["message"]
+
+    # 表の手順で文の列を変えるのは誤り, 数値の列の表記はそろえない
+    recipe["steps"] = [{"op": "normalize_text", "columns": ["review"]}]
+    with pytest.raises(ValueError, match="中身の"):
+        prepare(data, recipe)
+    numbers = pd.DataFrame({"a": [1.0, 2.0]})
+    with pytest.raises(ValueError, match="文字の列"):
+        apply_normalize_text(numbers, {"columns": ["a"]}, {})

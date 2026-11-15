@@ -328,6 +328,14 @@ def run_step(
                 frame, params.get("columns"), chosen,
                 WANT.get(spec["op"], "numeric")
             )
+            # 文の列は中身として読むので, 表の手順で書き換えても配列に
+            # 届かない (中身の手順で変える)
+            text = roles.get("text")
+            if text and text in params["columns"] and not step.changes_rows:
+                raise ValueError(
+                    f"文の列 {text} は表の手順では変えられません. 中身の"
+                    "手順 (item_steps の normalize_text など) を使ってください"
+                )
         state: dict = {}
         if step.fit is not None:
             rows = frame if fit_rows is None else frame[fit_rows]
@@ -870,6 +878,7 @@ def export_dataset(
             for c in prepared.features
         ],
         "classes": prepared.classes,
+        "text_column": data.roles.get("text") if data.kind == "text" else None,
         "splits": splits,
         "source": to_plain(data.source),
         "recipe": "recipe.yaml",

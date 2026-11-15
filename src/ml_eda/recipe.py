@@ -143,7 +143,10 @@ def resolve_columns(
         無い列を指定した場合
     """
     # 名前の指定はそのまま (無い列は誤り)
-    reserved = {roles.get("target"), roles.get("time"), roles.get("id")}
+    reserved = {
+        roles.get("target"), roles.get("time"), roles.get("id"),
+        roles.get("text")
+    }
     if spec not in (None, "auto"):
         names = [spec] if isinstance(spec, str) else list(spec)
         missing = [name for name in names if name not in frame.columns]
@@ -587,6 +590,29 @@ def apply_drop_duplicates(
     return result
 
 
+def normal_text(value: str, lowercase: bool = False) -> str:
+    """
+    文字の表記のゆれをそろえる関数
+
+    Parameters
+    ----------
+    value: str
+        文字
+    lowercase: bool = False
+        小文字にするか
+
+    Returns
+    ----------
+    text: str
+        NFKC で全角の英数字と半角のかなをそろえ, 前後の空白を除いた文字
+    """
+    text = unicodedata.normalize("NFKC", value).strip()
+    if lowercase:
+        text = text.lower()
+
+    return text
+
+
 def apply_normalize_text(
     frame: pd.DataFrame, params: dict, state: dict
 ) -> pd.DataFrame:
@@ -606,21 +632,26 @@ def apply_normalize_text(
     Returns
     ----------
     result: pd.DataFrame
-        そろえた表 (欠損はそのまま)
+        そろえた表 (欠損はそのまま. 文字の型は保つ)
+
+    Raises
+    ----------
+    ValueError
+        数値か日時の列を指定した場合
     """
-    # NFKC で全角の英数字と半角のかなをそろえ, 前後の空白を除く
+    # 欠損以外の値の表記をそろえる
     result = frame.copy()
     lower = bool(params.get("lowercase", False))
     for name in params["columns"]:
         column = result[name]
-        mask = column.notna()
-        values = column[mask].astype(str).map(
-            lambda v: unicodedata.normalize("NFKC", v).strip()
-        )
-        if lower:
-            values = values.str.lower()
-        result[name] = column.astype(object)
-        result.loc[mask, name] = values
+        if pd.api.types.is_numeric_dtype(column) or (
+            pd.api.types.is_datetime64_any_dtype(column)
+        ):
+            raise ValueError(f"{name} は文字の列ではありません")
+        result[name] = column.map(
+            lambda v: v if pd.isna(v) else normal_text(str(v), lower)
+        ).astype(column.dtype if pd.api.types.is_string_dtype(column)
+                 and not pd.api.types.is_object_dtype(column) else object)
 
     return result
 
