@@ -36,6 +36,9 @@ class Step:
 # 手順の登録簿
 STEPS: dict[str, Step] = {}
 
+# 処理の間だけ使う列 (分割, 日時の写し, 元の行の位置)
+HIDDEN = ("__split__", "__time__", "__row__")
+
 # columns が auto のときに選ぶ列の型 (書いていない手順は数値の列)
 WANT = {
     "one_hot": "categorical", "label_encode": "categorical",
@@ -149,8 +152,8 @@ def resolve_columns(
     # auto は型で選ぶ
     names = []
     for name in frame.columns:
-        # 役割のある列と, 処理の間だけ使う列 (__ で始まる) は除く
-        if name in reserved or str(name).startswith("__"):
+        # 役割のある列と, 処理の間だけ使う列は除く
+        if name in reserved or name in HIDDEN:
             continue
         column = frame[name]
         numeric = pd.api.types.is_numeric_dtype(column) and not (
@@ -563,8 +566,9 @@ def apply_drop_duplicates(
     result: pd.DataFrame
         重複を落とした表
     """
-    # 最初の行だけを残す
-    result = frame.drop_duplicates()
+    # 処理の間だけ使う列を除いて比べ, 最初の行だけを残す
+    subset = [c for c in frame.columns if c not in HIDDEN]
+    result = frame.drop_duplicates(subset=subset)
 
     return result
 
@@ -895,6 +899,8 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
         loaded["steps"] = []
     if loaded.get("split") is None:
         loaded["split"] = {"method": "none"}
+    if loaded.get("item_steps") is None:
+        loaded["item_steps"] = []
     valid = isinstance(version, int) and not isinstance(version, bool)
     if not valid or not 1 <= version <= FORMAT_VERSION:
         raise ValueError(

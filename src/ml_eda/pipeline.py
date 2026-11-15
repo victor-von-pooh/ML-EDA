@@ -9,6 +9,7 @@ import pandas as pd
 import yaml
 
 from ml_eda.data import Data
+from ml_eda.itemprep import apply_steps, run_item_steps, to_array
 from ml_eda.profile import to_json
 from ml_eda.recipe import (
     STEPS, WANT, category_key, load_recipe, resolve_columns, to_plain
@@ -20,6 +21,8 @@ DATASET_FORMAT_VERSION = 1
 # 分割を表す列と, 分割に使う日時の写し (処理の間だけ使う)
 SPLIT_COLUMN = "__split__"
 TIME_COLUMN = "__time__"
+ROW_COLUMN = "__row__"
+HIDDEN_COLUMNS = (SPLIT_COLUMN, TIME_COLUMN, ROW_COLUMN)
 
 # 分割の名前
 SPLITS = ("train", "valid", "test")
@@ -39,6 +42,8 @@ class Prepared:
     classes: list = field(default_factory=list)
     # 前処理の後の注意 (数値でない列が残っているなど)
     notes: list = field(default_factory=list)
+    # 画像, 文, 点群の中身の手順をかけた, 分割ごとの配列
+    arrays: dict = field(default_factory=dict)
 
 
 def split_counts(count: int, valid: float, test: float) -> tuple[int, int]:
@@ -353,6 +358,7 @@ def apply_recipe(
     roles = {**data.roles, "target": target} if target else dict(data.roles)
     frame = data.frame.copy()
     frame.columns = [str(name) for name in frame.columns]
+    frame[ROW_COLUMN] = np.arange(len(frame))
     if target:
         if target not in frame.columns:
             raise ValueError(f"目的の列 {target} がありません")
@@ -407,7 +413,8 @@ def sorted_classes(values: pd.Series) -> list[str]:
 
 
 def prepare(
-    data: Data, recipe: Union[str, Path, dict]
+    data: Data, recipe: Union[str, Path, dict],
+    item_dir: Optional[Path] = None
 ) -> Prepared:
     """
     レシピで分割と前処理をして, 学習用の表にする関数
@@ -452,17 +459,38 @@ def prepare(
                 f"回帰の目的の列 {target} が数値ではありません "
                 f"({result[target].dtype}). タスクを分類にするか, 型を変える"
             )
-    frames = {
-        name: result[result[SPLIT_COLUMN] == name].drop(
-            columns=[SPLIT_COLUMN]
-        ).reset_index(drop=True)
-        for name in SPLITS
-        if (result[SPLIT_COLUMN] == name).any()
+    names = [n for n in SPLITS if (result[SPLIT_COLUMN] == n).any()]
+    positions = {
+        n: result.loc[result[SPLIT_COLUMN] == n, ROW_COLUMN].tolist()
+        for n in names
     }
+    frames = {
+        n: result[result[SPLIT_COLUMN] == n].drop(
+            columns=[SPLIT_COLUMN, ROW_COLUMN]
+        ).reset_index(drop=True)
+        for n in names
+    }
+
+    # 画像, 文, 点群は中身の手順で配列にする (表の列は学習に使わない)
+    arrays: dict = {}
+    if data.item_loader is not None:
+        arrays = run_item_steps(
+            item_reader(data), positions.get("train", []), positions,
+            recipe["item_steps"], data.kind, item_dir,
+            int(recipe["split"].get("seed", 0))
+        )
+        prepared = Prepared(
+            frames=frames, recipe=recipe, features=[], target=target,
+            classes=classes, arrays=arrays
+        )
+        return prepared
 
     # 学習に使う列 (役割の列を除く) と, 数値でない列の注意
     reserved = {target, roles.get("id"), roles.get("time"), SPLIT_COLUMN}
-    features = [name for name in result.columns if name not in reserved]
+    features = [
+        name for name in result.columns
+        if name not in reserved and name not in HIDDEN_COLUMNS
+    ]
     notes = []
     for name in features:
         if not pd.api.types.is_numeric_dtype(result[name]):
@@ -483,6 +511,51 @@ def prepare(
     )
 
     return prepared
+
+
+def item_reader(data: Data) -> Any:
+    """
+    中身を読む関数を, 読めない件の場所と直し方を添えた誤りにする関数
+
+    Parameters
+    ----------
+    data: Data
+        中身を持つデータ
+
+    Returns
+    ----------
+    read: Any
+        位置から中身を読む関数
+    """
+    def read(index: int) -> Any:
+        """
+        1 件の中身を読む関数
+
+        Parameters
+        ----------
+        index: int
+            元のデータの位置
+
+        Returns
+        ----------
+        item: Any
+            中身
+        """
+        # 読めない件はファイルの場所を添えて, 除き方を案内
+        try:
+            item = data.load_item(index)
+        except Exception as error:
+            row = data.frame.iloc[index]
+            where = row.get("path", row.get("file", index))
+            raise ValueError(
+                f"{where} を読めません ({error}). 表の手順 filter_rows で, "
+                "読めない件 (画像は width が欠損, 点群は error がある件) を"
+                "除いてください"
+            ) from error
+
+        return item
+
+    return read
 
 
 def preview(
@@ -520,8 +593,8 @@ def preview(
     after, _ = apply_recipe(data, load_recipe(recipe), upto)
 
     # 列の差と先頭の行
-    before = before.drop(columns=[SPLIT_COLUMN])
-    after = after.drop(columns=[SPLIT_COLUMN])
+    before = before.drop(columns=[SPLIT_COLUMN, ROW_COLUMN])
+    after = after.drop(columns=[SPLIT_COLUMN, ROW_COLUMN])
     result = {
         "before": frame_view(before, rows),
         "after": frame_view(after, rows),
@@ -643,19 +716,27 @@ def export_dataset(
                 f"{target} はデータセットではないので置き換えません"
             )
 
-    # 前処理を先に済ませ, 隣の一時ディレクトリに書いてから入れ替える
-    prepared = prepare(data, recipe)
+    # 隣の一時ディレクトリで前処理 (中身の配列も 1 件ずつここに書く) を
+    # 済ませてから入れ替える. 失敗したら一時ディレクトリを消す
     final = target
     target = final.with_name(f".{final.name}.writing")
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
+    try:
+        prepared = prepare(data, recipe, item_dir=target)
+    except Exception:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     splits = {}
     for split, frame in prepared.frames.items():
         splits[split] = {
             "file": write_frame(frame, target / split),
             "rows": int(len(frame)),
         }
+        if split in prepared.arrays:
+            splits[split]["items"] = f"{split}_items.npy"
+            splits[split]["shape"] = list(prepared.arrays[split].shape)
     (target / "recipe.yaml").write_text(
         yaml.safe_dump(to_plain(prepared.recipe), allow_unicode=True,
                        sort_keys=False),
@@ -758,16 +839,22 @@ class Dataset:
         y: Optional[np.ndarray]
             目的の値 (分類は int64 の番号, 回帰は float32), 無ければ None
         """
-        # 特徴量と目的の値を取り出す
+        # 特徴量 (画像などは中身の配列) と目的の値を取り出す
         frame = self.frames[split]
-        x = frame[self.features].to_numpy(dtype=np.float32)
+        items = self.info["splits"][split].get("items")
+        x = (
+            np.load(self.path / items, allow_pickle=False, mmap_mode="r")
+            if items
+            else frame[self.features].to_numpy(dtype=np.float32, copy=True)
+        )
         y = None
         if self.target:
             dtype = (
                 np.int64 if self.info["task"] == "classification"
                 else np.float32
             )
-            y = frame[self.target].to_numpy(dtype=dtype)
+            # 書き込める配列にする (PyTorch のテンソルにそのまま渡せるように)
+            y = frame[self.target].to_numpy(dtype=dtype, copy=True)
 
         return x, y
 
@@ -805,6 +892,31 @@ class Dataset:
 
         return result
 
+    def transform_item(self, item: Any) -> np.ndarray:
+        """
+        新しい画像, 文, 点群に, 当てはめた中身の手順をかける関数
+
+        Parameters
+        ----------
+        item: Any
+            中身 (画像は配列, 文は文字, 点群は points を持つ辞書)
+
+        Returns
+        ----------
+        array: np.ndarray
+            学習のときと同じ形の配列
+        """
+        # 画像のファイルの場所は学習のときと同じ読み方で読み, 保存した値で
+        # 手順をかけて配列にする
+        if isinstance(item, (str, Path)) and self.info["kind"] == "image":
+            from ml_eda.media import read_image
+
+            item = read_image(Path(item))
+        result = apply_steps(item, self.recipe.get("item_steps", []))
+        array = to_array(result, self.info["kind"])
+
+        return array
+
     def tensors(self, split: str) -> tuple:
         """
         分割の特徴量と目的の値を PyTorch のテンソルで返す関数
@@ -823,6 +935,8 @@ class Dataset:
         import torch
 
         x, y = self.arrays(split)
+        # ファイルから読んだ配列は書き込めないので写してから渡す
+        x = np.array(x)
         tensors = (torch.from_numpy(x),) if y is None else (
             torch.from_numpy(x), torch.from_numpy(y)
         )

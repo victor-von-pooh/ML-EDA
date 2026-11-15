@@ -94,6 +94,16 @@ def profile(
         "timeseries": series,
     }
     result["findings"] = find_issues(result, target)
+    if data.item_loader is not None:
+        from ml_eda.media import describe_items
+
+        result["items"] = describe_items(data, seed)
+        # 中身の様子の列 (幅, 色の形式など) が揃っているのは良いことなので,
+        # 定数の気付きは出さない
+        quiet = {"constant", "near_constant"}
+        result["findings"] = result["items"].pop("findings") + [
+            item for item in result["findings"] if item["code"] not in quiet
+        ]
     result = to_json(result)
 
     return result
