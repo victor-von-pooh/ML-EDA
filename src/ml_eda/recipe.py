@@ -816,7 +816,8 @@ def apply_lag(
     params: dict
         columns, lags (ずらし幅の並び), windows (移動平均の幅の並び),
         by (系列を分ける列の並び. 店ごとの売上のように, 複数の系列が同じ
-        時刻に並ぶ場合は, 系列ごとにずらす)
+        時刻に並ぶ場合は, 系列ごとにずらす), time と freq と match (時刻で
+        ずらす場合. apply_time_lag)
     state: dict
         使わない
 
@@ -837,6 +838,8 @@ def apply_lag(
     missing = [name for name in by if name not in frame.columns]
     if missing:
         raise ValueError(f"系列を分ける列がありません: {', '.join(missing)}")
+    if params.get("time"):
+        return apply_time_lag(result, params, by)
     for name in resolve_columns(frame, params.get("columns"), {}):
         if name in by:
             continue
@@ -857,6 +860,113 @@ def apply_lag(
                 else column.shift(1).rolling(int(window)).mean()
             )
             result[f"{name}_mean{window}"] = mean
+
+    return result
+
+
+def apply_time_lag(
+    frame: pd.DataFrame, params: dict, by: list
+) -> pd.DataFrame:
+    """
+    時系列の列を, 行ではなく時刻でずらした列と移動平均の列を足す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        表 (並びは問わない. 返す表は元の並び)
+    params: dict
+        columns, lags, windows, time (時刻の列), freq (1 つ分の間隔.
+        1D, 1h など), match (previous はその時刻が無ければそれより前で
+        最も近い値, exact は無ければ欠損. 既定 previous)
+    by: list
+        系列を分ける列の並び
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        列を足した表
+
+    Raises
+    ----------
+    ValueError
+        時刻の列が無い, 日時でない, freq が読めない場合
+    """
+    # 時刻の列と間隔の確認
+    time = str(params["time"])
+    if time not in frame.columns:
+        raise ValueError(f"時刻の列がありません: {time}")
+    times = pd.to_datetime(frame[time], errors="coerce")
+    if times.notna().sum() == 0:
+        raise ValueError(f"{time} は日時の列ではありません")
+    try:
+        step = pd.to_timedelta(params.get("freq", "1D"))
+    except ValueError as error:
+        raise ValueError(
+            f"freq を間隔として読めません: {params.get('freq')} "
+            "(1D, 1h, 30min など)"
+        ) from error
+    if step <= pd.Timedelta(0):
+        raise ValueError("freq は正の間隔にしてください")
+    match = params.get("match", "previous")
+    if match not in ("previous", "exact"):
+        raise ValueError(f"match は previous か exact にしてください: {match}")
+
+    # 過去の値の表 (系列と時刻ごとに 1 つ. 重なれば後の行) と, 探す側の表
+    result = frame.copy()
+    keys = [f"__by{k}" for k in range(len(by))]
+    base = pd.DataFrame(
+        {key: frame[name].astype(str).to_numpy() for key, name in zip(
+            keys, by
+        )}, index=frame.index
+    )
+    base["__time"] = times
+    columns = [
+        name for name in resolve_columns(frame, params.get("columns"), {})
+        if name not in by and name != time
+    ]
+    known = pd.concat([base, frame[columns]], axis=1).dropna(
+        subset=["__time"]
+    ).drop_duplicates(keys + ["__time"], keep="last")
+    known = known.sort_values("__time")
+    for lag in params.get("lags", [1]):
+        wanted = base.copy()
+        wanted["__time"] = base["__time"] - step * int(lag)
+        wanted["__row"] = np.arange(len(base))
+        found = pd.merge_asof(
+            wanted.dropna(subset=["__time"]).sort_values("__time"),
+            known, on="__time", by=keys or None, direction="backward",
+            tolerance=pd.Timedelta(0) if match == "exact" else None
+        ).set_index("__row")
+        for name in columns:
+            values = np.full(len(base), np.nan)
+            values[found.index.to_numpy()] = found[name].to_numpy(
+                dtype=float, na_value=np.nan
+            )
+            result[f"{name}_lag{lag}"] = values
+
+    # 移動平均は w × freq 前からその時刻の前まで (その時刻は含めない)
+    rows = base.assign(__row=np.arange(len(base)))
+    for window in params.get("windows", []):
+        span = step * int(window)
+        groups = known.groupby(keys, dropna=False) if keys else [
+            (None, known)
+        ]
+        parts = []
+        for _, group in groups:
+            means = group.set_index("__time")[columns].astype(float).rolling(
+                span, closed="left"
+            ).mean()
+            parts.append(means.reset_index().assign(**{
+                key: group[key].to_numpy() for key in keys
+            }))
+        table = pd.concat(parts, ignore_index=True)
+        merged = rows.merge(table, on=keys + ["__time"], how="inner")
+        for name in columns:
+            values = np.full(len(base), np.nan)
+            values[merged["__row"].to_numpy()] = merged[name].to_numpy(
+                dtype=float, na_value=np.nan
+            )
+            result[f"{name}_mean{window}"] = values
 
     return result
 
@@ -949,8 +1059,11 @@ def register_builtin_steps() -> None:
         "lag", None, apply_lag,
         {"columns": columns, "lags": "ずらし幅の並び",
          "windows": "移動平均の幅の並び",
-         "by": "系列を分ける列の並び (店ごとなど. 省略すると 1 つの系列)"},
-        "時系列の過去の値と移動平均の列を足す (by で系列ごと)"
+         "by": "系列を分ける列の並び (店ごとなど. 省略すると 1 つの系列)",
+         "time": "時刻でずらす場合の時刻の列 (省略すると行でずらす)",
+         "freq": "時刻でずらす 1 つ分の間隔 (1D, 1h など. 既定 1D)",
+         "match": "previous (無ければ前で最も近い値) か exact"},
+        "時系列の過去の値と移動平均の列を足す (by で系列ごと. time で時刻で)"
     ))
 
 
