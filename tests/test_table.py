@@ -274,6 +274,11 @@ def test_time_split_and_lag(tmp_path: Path) -> None:
     assert "time_hour" in prepared.features
     assert "y" not in prepared.features
 
+    # lag の auto は目的の列も選ぶ (目的の列そのものは学習に使わない)
+    recipe["steps"][0] = {"op": "lag", "columns": "auto", "lags": [1]}
+    prepared = prepare(data, recipe)
+    assert "y_lag1" in prepared.features and "y" not in prepared.features
+
 
 def test_recipe_errors() -> None:
     """
