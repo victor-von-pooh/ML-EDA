@@ -2,9 +2,12 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from ml_eda import detect, export_dataset, load_data, load_dataset, profile
+from ml_eda import (
+    detect, export_dataset, load_data, load_dataset, preview_items, profile
+)
 
 PIL = pytest.importorskip("PIL.Image")
 
@@ -363,3 +366,45 @@ def test_item_checks(tmp_path: Path) -> None:
     # タスクを決めていなければ注意
     recipe["task"] = "none"
     assert "タスク" in prepare(data, recipe, read_items=False).notes[0]
+
+
+def test_preview_items(tmp_path: Path) -> None:
+    """
+    中身の手順を少ない見本で当てはめて, 数件の前と後を返すことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 画像は前が元の配列, 後が (チャンネル, 高さ, 幅)
+    write_images(tmp_path / "pets")
+    data = load_data(tmp_path / "pets")
+    recipe = {
+        "target": "label", "task": "classification",
+        "item_steps": [
+            {"op": "resize", "width": 6, "height": 6}, {"op": "normalize"}
+        ],
+        "split": {"method": "stratified", "valid": 0.25},
+    }
+    result = preview_items(data, recipe, count=3, fit_limit=4)
+    assert len(result["items"]) == 3 and result["fit_rows"] == 4
+    item = result["items"][0]
+    assert item["after"].shape == (3, 6, 6) and item["label"] in ("cat", "dog")
+    assert "state" in result["steps"][1]
+
+    # 目的の列を落とす手順は誤り. 表は中身を持たないので誤り
+    dropped = {
+        **recipe, "split": {"method": "random", "valid": 0.25},
+        "steps": [{"op": "drop_columns", "columns": ["label"]}],
+    }
+    with pytest.raises(ValueError, match="消えました"):
+        preview_items(data, dropped)
+    pd.DataFrame({"a": [1, 2]}).to_csv(tmp_path / "t.csv", index=False)
+    with pytest.raises(ValueError, match="中身"):
+        preview_items(load_data(tmp_path / "t.csv"), {"steps": []})

@@ -577,6 +577,55 @@ def item_notes(frame: pd.DataFrame, steps: list, kind: str) -> list[str]:
     return notes
 
 
+def fit_item_steps(
+    load: Callable[[int], Any], train: list[int], steps: list,
+    seed: int = 0, limit: int = FIT_SAMPLE, limit_all: Optional[int] = None
+) -> None:
+    """
+    中身の手順を, 前から順に学習用の件で当てはめる関数
+
+    Parameters
+    ----------
+    load: Callable[[int], Any]
+        元のデータの位置から中身を読む関数
+    train: list[int]
+        学習用の位置
+    steps: list
+        item_steps (当てはめた値を state に書き込む)
+    seed: int = 0
+        当てはめの見本を選ぶ乱数のシード
+    limit: int = FIT_SAMPLE
+        当てはめに使う件数の上限 (無作為に選ぶ)
+    limit_all: Optional[int] = None
+        全ての学習用の件で当てはめる手順 (語彙) の件数の上限. None なら
+        全て
+
+    Returns
+    ----------
+    None
+    """
+    # 学習用の無作為な見本 (語彙は全て, または limit_all まで)
+    rng = np.random.default_rng(seed)
+    sample = (
+        rng.choice(train, limit, replace=False).tolist()
+        if len(train) > limit else list(train)
+    )
+    if limit_all is None or len(train) <= limit_all:
+        every = list(train)
+    elif limit_all <= len(sample):
+        every = sample[:limit_all]
+    else:
+        every = rng.choice(train, limit_all, replace=False).tolist()
+    for number, spec in enumerate(steps):
+        step = ITEM_STEPS[spec["op"]]
+        if step.fit is None:
+            continue
+        chosen = every if step.fit_all else sample
+        items = (apply_steps(load(i), steps[:number]) for i in chosen)
+        params = {k: v for k, v in spec.items() if k not in ("op", "state")}
+        spec["state"] = step.fit(list(items), params)
+
+
 def run_item_steps(
     load: Callable[[int], Any], train: list[int], splits: dict,
     steps: list, kind: str, out_dir: Optional[Any] = None, seed: int = 0
@@ -612,23 +661,9 @@ def run_item_steps(
     ValueError
         知らない手順, 種類に合わない手順, 形のそろわない中身の場合
     """
-    # 手順の確認
+    # 手順の確認と当てはめ
     check_item_steps(steps, kind)
-
-    # 前から順に, 学習用の無作為な見本 (語彙は全て) で当てはめる
-    rng = np.random.default_rng(seed)
-    sample = (
-        rng.choice(train, FIT_SAMPLE, replace=False).tolist()
-        if len(train) > FIT_SAMPLE else list(train)
-    )
-    for number, spec in enumerate(steps):
-        step = ITEM_STEPS[spec["op"]]
-        if step.fit is None:
-            continue
-        chosen = train if step.fit_all else sample
-        items = (apply_steps(load(i), steps[:number]) for i in chosen)
-        params = {k: v for k, v in spec.items() if k not in ("op", "state")}
-        spec["state"] = step.fit(list(items), params)
+    fit_item_steps(load, train, steps, seed)
 
     # 分割ごとに全ての手順をかけ, 最初の件の形にそろうかを確かめて積む
     arrays = {}
