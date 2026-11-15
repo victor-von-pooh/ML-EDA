@@ -6,7 +6,8 @@ import pandas as pd
 import pytest
 
 from ml_eda import (
-    detect, export_dataset, load_data, load_dataset, preview_items, profile
+    detect, export_dataset, load_data, load_dataset, prepare, preview_items,
+    profile
 )
 
 PIL = pytest.importorskip("PIL.Image")
@@ -414,3 +415,62 @@ def test_preview_items(tmp_path: Path) -> None:
     pd.DataFrame({"a": [1, 2]}).to_csv(tmp_path / "t.csv", index=False)
     with pytest.raises(ValueError, match="中身"):
         preview_items(load_data(tmp_path / "t.csv"), {"steps": []})
+
+
+def test_text_column(tmp_path: Path) -> None:
+    """
+    表の文の列を文のデータとして読み, 重複, 空の文, 表記のゆれの気付きと
+    手順を確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 日時の列があっても, 文の列を指定すれば文のデータ (他の列も残す)
+    frame = pd.DataFrame({
+        "posted": pd.date_range("2025-01-01", periods=8, freq="h"),
+        "product": ["ﾘｭｯｸ", "リュック", "ケトル", "ケトル "] * 2,
+        "review": ["とても良い", "良くない", "", "最高", "とても良い",
+                   None, "壊れた", "普通"],
+        "label": ["良い", "悪い", "悪い", "良い"] * 2,
+    })
+    frame.loc[3, "label"] = "良い "
+    path = tmp_path / "reviews.csv"
+    frame.to_csv(path, index=False, encoding="cp932")
+    data = load_data(path, text_column="review")
+    assert data.kind == "text" and data.load_item(5) == ""
+    assert {"posted", "product", "length", "words"} <= set(data.frame)
+
+    # 重複と空の文, 表記のゆれの気付き
+    codes = {
+        item["code"]: item for item in profile(data, "label")["findings"]
+    }
+    assert {"duplicate_items", "empty_items", "mixed_forms"} <= set(codes)
+    assert codes["mixed_forms"]["columns"] == ["label"]
+
+    # 表として読めば, 他の列の表記のゆれも気付きになる
+    table = profile(load_data(path, kind="table"))
+    forms = [i for i in table["findings"] if i["code"] == "mixed_forms"]
+    assert any("ﾘｭｯｸ" in item["message"] for item in forms)
+
+    # 文の列で重複を落とし, 表記をそろえて書き出す
+    recipe = {
+        "target": "label", "task": "classification",
+        "steps": [
+            {"op": "drop_duplicates", "columns": ["review"]},
+            {"op": "normalize_text", "columns": ["product", "label"]},
+        ],
+        "item_steps": [{"op": "vocabulary", "unit": "char", "length": 6}],
+        "split": {"method": "none"},
+    }
+    prepared = prepare(data, recipe)
+    train = prepared.frames["train"]
+    # 空の文 2 つも同じ文として 1 つになる
+    assert len(train) == 6 and set(train["product"]) == {"リュック", "ケトル"}
+    assert prepared.classes == ["悪い", "良い"]
+    assert prepared.arrays["train"].shape == (6, 6)

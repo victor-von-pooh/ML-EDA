@@ -870,6 +870,34 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
             "message": f"読めないファイルが {unreadable} 件あります",
             "columns": [],
         })
+    if data.kind == "text":
+        # 同じ文 (分割をまたぐと検証が甘くなる) と空の文
+        text = data.roles.get("text", "text")
+        values = frame[text].fillna("").astype(str).str.strip()
+        empty = int((values == "").sum())
+        repeated = int(values[values != ""].duplicated().sum())
+        result["empty"] = empty
+        result["duplicates"] = repeated
+        if repeated:
+            findings.append({
+                "severity": "warning", "code": "duplicate_items",
+                "message": (
+                    f"同じ文が {repeated} 件あります (2 回目以降の数). "
+                    "学習用と検証用に分かれると正解率が甘くなるので, "
+                    f"drop_duplicates (columns: [{text}]) で落としてください"
+                ),
+                "columns": [text],
+            })
+        if empty:
+            findings.append({
+                "severity": "info", "code": "empty_items",
+                "message": (
+                    f"空の文が {empty} 件あります. 全てが詰め物になるので, "
+                    "filter_rows (length が 0 より大きい) で除くことを検討"
+                    "してください"
+                ),
+                "columns": [text],
+            })
     result["findings"] = findings
 
     return result

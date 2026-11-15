@@ -1,4 +1,5 @@
 import copy
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -42,6 +43,7 @@ HIDDEN = ("__split__", "__time__", "__row__")
 # columns が auto のときに選ぶ列の型 (書いていない手順は数値の列)
 WANT = {
     "one_hot": "categorical", "label_encode": "categorical",
+    "normalize_text": "categorical",
     "datetime_parts": "datetime",
 }
 
@@ -557,7 +559,7 @@ def apply_drop_duplicates(
     frame: pd.DataFrame
         表
     params: dict
-        使わない
+        columns (比べる列の名前の並び. 省略すると全ての列)
     state: dict
         使わない
 
@@ -565,10 +567,60 @@ def apply_drop_duplicates(
     ----------
     result: pd.DataFrame
         重複を落とした表
+
+    Raises
+    ----------
+    ValueError
+        無い列を指定した場合
     """
     # 処理の間だけ使う列を除いて比べ, 最初の行だけを残す
-    subset = [c for c in frame.columns if c not in HIDDEN]
+    columns = params.get("columns")
+    if columns in (None, "auto", []):
+        subset = [c for c in frame.columns if c not in HIDDEN]
+    else:
+        subset = [columns] if isinstance(columns, str) else list(columns)
+        missing = [c for c in subset if c not in frame.columns]
+        if missing:
+            raise ValueError(f"列がありません: {', '.join(missing)}")
     result = frame.drop_duplicates(subset=subset)
+
+    return result
+
+
+def apply_normalize_text(
+    frame: pd.DataFrame, params: dict, state: dict
+) -> pd.DataFrame:
+    """
+    文字の列の表記のゆれ (全角と半角, 前後の空白, 大文字と小文字) を
+    そろえる関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        表
+    params: dict
+        columns, lowercase (小文字にするか, 既定 False)
+    state: dict
+        使わない
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        そろえた表 (欠損はそのまま)
+    """
+    # NFKC で全角の英数字と半角のかなをそろえ, 前後の空白を除く
+    result = frame.copy()
+    lower = bool(params.get("lowercase", False))
+    for name in params["columns"]:
+        column = result[name]
+        mask = column.notna()
+        values = column[mask].astype(str).map(
+            lambda v: unicodedata.normalize("NFKC", v).strip()
+        )
+        if lower:
+            values = values.str.lower()
+        result[name] = column.astype(object)
+        result.loc[mask, name] = values
 
     return result
 
@@ -777,8 +829,14 @@ def register_builtin_steps() -> None:
         changes_rows=True
     ))
     register_step(Step(
-        "drop_duplicates", None, apply_drop_duplicates, {},
-        "全く同じ行を落とす", changes_rows=True
+        "drop_duplicates", None, apply_drop_duplicates,
+        {"columns": "比べる列の名前の並び (省略すると全ての列)"},
+        "同じ行 (columns の値が同じ行) を落とす", changes_rows=True
+    ))
+    register_step(Step(
+        "normalize_text", None, apply_normalize_text,
+        {"columns": columns, "lowercase": "小文字にするか (既定 false)"},
+        "表記のゆれ (全角と半角, 前後の空白) をそろえる (NFKC)"
     ))
     register_step(Step(
         "filter_rows", None, apply_filter_rows,

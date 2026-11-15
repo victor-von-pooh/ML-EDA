@@ -316,7 +316,9 @@ def run_step(
             None, "auto"
         ):
             raise ValueError("落とす列の名前を columns に書いてください")
-        if "columns" in step.params and spec["op"] != "drop_missing":
+        if "columns" in step.params and spec["op"] not in (
+            "drop_missing", "drop_duplicates"
+        ):
             # 時系列の予測では目的の列の過去の値が最も大事な手がかりなので,
             # lag の auto は目的の列も選ぶ (ずらすので未来の値は使わない)
             chosen = {
