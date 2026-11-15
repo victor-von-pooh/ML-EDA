@@ -563,8 +563,9 @@ def apply_drop_duplicates(
     result: pd.DataFrame
         重複を落とした表
     """
-    # 最初の行だけを残す
-    result = frame.drop_duplicates()
+    # 処理の間だけ使う列 (__ で始まる) を除いて比べ, 最初の行だけを残す
+    subset = [c for c in frame.columns if not str(c).startswith("__")]
+    result = frame.drop_duplicates(subset=subset)
 
     return result
 
@@ -895,6 +896,8 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
         loaded["steps"] = []
     if loaded.get("split") is None:
         loaded["split"] = {"method": "none"}
+    if loaded.get("item_steps") is None:
+        loaded["item_steps"] = []
     valid = isinstance(version, int) and not isinstance(version, bool)
     if not valid or not 1 <= version <= FORMAT_VERSION:
         raise ValueError(

@@ -94,6 +94,13 @@ def profile(
         "timeseries": series,
     }
     result["findings"] = find_issues(result, target)
+    if data.item_loader is not None:
+        from ml_eda.media import describe_items
+
+        result["items"] = describe_items(data, seed)
+        result["findings"] = (
+            result["items"].pop("findings") + result["findings"]
+        )
     result = to_json(result)
 
     return result

@@ -9,6 +9,7 @@ import pandas as pd
 import yaml
 
 from ml_eda.data import Data
+from ml_eda.itemprep import apply_steps, run_item_steps, to_array
 from ml_eda.profile import to_json
 from ml_eda.recipe import (
     STEPS, WANT, category_key, load_recipe, resolve_columns, to_plain
@@ -20,6 +21,7 @@ DATASET_FORMAT_VERSION = 1
 # 分割を表す列と, 分割に使う日時の写し (処理の間だけ使う)
 SPLIT_COLUMN = "__split__"
 TIME_COLUMN = "__time__"
+ROW_COLUMN = "__row__"
 
 # 分割の名前
 SPLITS = ("train", "valid", "test")
@@ -39,6 +41,8 @@ class Prepared:
     classes: list = field(default_factory=list)
     # 前処理の後の注意 (数値でない列が残っているなど)
     notes: list = field(default_factory=list)
+    # 画像, 文, 点群の中身の手順をかけた, 分割ごとの配列
+    arrays: dict = field(default_factory=dict)
 
 
 def split_counts(count: int, valid: float, test: float) -> tuple[int, int]:
@@ -353,6 +357,7 @@ def apply_recipe(
     roles = {**data.roles, "target": target} if target else dict(data.roles)
     frame = data.frame.copy()
     frame.columns = [str(name) for name in frame.columns]
+    frame[ROW_COLUMN] = np.arange(len(frame))
     if target:
         if target not in frame.columns:
             raise ValueError(f"目的の列 {target} がありません")
@@ -452,17 +457,37 @@ def prepare(
                 f"回帰の目的の列 {target} が数値ではありません "
                 f"({result[target].dtype}). タスクを分類にするか, 型を変える"
             )
-    frames = {
-        name: result[result[SPLIT_COLUMN] == name].drop(
-            columns=[SPLIT_COLUMN]
-        ).reset_index(drop=True)
-        for name in SPLITS
-        if (result[SPLIT_COLUMN] == name).any()
+    names = [n for n in SPLITS if (result[SPLIT_COLUMN] == n).any()]
+    positions = {
+        n: result.loc[result[SPLIT_COLUMN] == n, ROW_COLUMN].tolist()
+        for n in names
     }
+    frames = {
+        n: result[result[SPLIT_COLUMN] == n].drop(
+            columns=[SPLIT_COLUMN, ROW_COLUMN]
+        ).reset_index(drop=True)
+        for n in names
+    }
+
+    # 画像, 文, 点群は中身の手順で配列にする (表の列は学習に使わない)
+    arrays: dict = {}
+    if data.item_loader is not None:
+        arrays = run_item_steps(
+            data.load_item, positions.get("train", []), positions,
+            recipe["item_steps"], data.kind
+        )
+        prepared = Prepared(
+            frames=frames, recipe=recipe, features=[], target=target,
+            classes=classes, arrays=arrays
+        )
+        return prepared
 
     # 学習に使う列 (役割の列を除く) と, 数値でない列の注意
     reserved = {target, roles.get("id"), roles.get("time"), SPLIT_COLUMN}
-    features = [name for name in result.columns if name not in reserved]
+    features = [
+        name for name in result.columns
+        if name not in reserved and not str(name).startswith("__")
+    ]
     notes = []
     for name in features:
         if not pd.api.types.is_numeric_dtype(result[name]):
@@ -520,8 +545,8 @@ def preview(
     after, _ = apply_recipe(data, load_recipe(recipe), upto)
 
     # 列の差と先頭の行
-    before = before.drop(columns=[SPLIT_COLUMN])
-    after = after.drop(columns=[SPLIT_COLUMN])
+    before = before.drop(columns=[SPLIT_COLUMN, ROW_COLUMN])
+    after = after.drop(columns=[SPLIT_COLUMN, ROW_COLUMN])
     result = {
         "before": frame_view(before, rows),
         "after": frame_view(after, rows),
@@ -656,6 +681,10 @@ def export_dataset(
             "file": write_frame(frame, target / split),
             "rows": int(len(frame)),
         }
+        if split in prepared.arrays:
+            np.save(target / f"{split}_items.npy", prepared.arrays[split])
+            splits[split]["items"] = f"{split}_items.npy"
+            splits[split]["shape"] = list(prepared.arrays[split].shape)
     (target / "recipe.yaml").write_text(
         yaml.safe_dump(to_plain(prepared.recipe), allow_unicode=True,
                        sort_keys=False),
@@ -758,9 +787,13 @@ class Dataset:
         y: Optional[np.ndarray]
             目的の値 (分類は int64 の番号, 回帰は float32), 無ければ None
         """
-        # 特徴量と目的の値を取り出す
+        # 特徴量 (画像などは中身の配列) と目的の値を取り出す
         frame = self.frames[split]
-        x = frame[self.features].to_numpy(dtype=np.float32)
+        items = self.info["splits"][split].get("items")
+        x = (
+            np.load(self.path / items, allow_pickle=False) if items
+            else frame[self.features].to_numpy(dtype=np.float32)
+        )
         y = None
         if self.target:
             dtype = (
@@ -804,6 +837,26 @@ class Dataset:
         result = result[[c for c in self.features if c in result.columns]]
 
         return result
+
+    def transform_item(self, item: Any) -> np.ndarray:
+        """
+        新しい画像, 文, 点群に, 当てはめた中身の手順をかける関数
+
+        Parameters
+        ----------
+        item: Any
+            中身 (画像は配列, 文は文字, 点群は points を持つ辞書)
+
+        Returns
+        ----------
+        array: np.ndarray
+            学習のときと同じ形の配列
+        """
+        # 保存した値で手順をかけて配列にする
+        result = apply_steps(item, self.recipe.get("item_steps", []))
+        array = to_array(result, self.info["kind"])
+
+        return array
 
     def tensors(self, split: str) -> tuple:
         """
