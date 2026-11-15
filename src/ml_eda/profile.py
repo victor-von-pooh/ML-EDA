@@ -160,6 +160,10 @@ def describe_overview(
         "sample_rows": int(len(frame)),
         "roles": dict(data.roles),
     }
+    # Excel のシート (全ての名前と, 読んだシート)
+    if data.source.get("sheets"):
+        overview["sheets"] = list(data.source["sheets"])
+        overview["sheet"] = data.source.get("sheet")
 
     return overview
 
@@ -911,6 +915,19 @@ def find_issues(result: dict, target: Optional[str]) -> list[dict]:
     findings = []
     for name, info in result["columns"].items():
         findings.extend(column_issues(name, info, target))
+
+    # 他のシートのある Excel
+    sheets = result["overview"].get("sheets") or []
+    if len(sheets) > 1:
+        current = result["overview"]["sheet"]
+        others = [name for name in sheets if name != current]
+        findings.append(finding(
+            "info", "multiple_sheets",
+            f"このファイルにはシートが {len(sheets)} 枚あります. 読んでいるのは "
+            f"{current} で, 他に {', '.join(others[:5])}"
+            f"{' など' if len(others) > 5 else ''} があります. 他のシートを読む"
+            "には, 読み込みの設定の sheet に名前を書いてください", []
+        ))
 
     # 重複した行
     duplicates = result["overview"]["duplicate_rows"]
