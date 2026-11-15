@@ -26,8 +26,11 @@ excel = [
 image = [
     "pillow>=10"
 ]
+text = [
+    "tokenizers>=0.20"
+]
 all = [
-    "ml-eda[parquet,excel,image]"
+    "ml-eda[parquet,excel,image,text]"
 ]
 dev = [
     "pytest"

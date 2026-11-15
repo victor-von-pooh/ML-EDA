@@ -12,12 +12,14 @@ from ml_eda.profile import profile
 from ml_eda.recipe import (
     STEPS, Step, describe_steps, load_recipe, register_step
 )
+from ml_eda.textunits import compare_tokenizers
 
 __version__ = "0.1.0"
 
 __all__ = [
     "ITEM_STEPS", "KINDS", "LOADERS", "STEPS", "Data", "Dataset", "Loader",
-    "Prepared", "Step", "describe_item_steps", "describe_loaders",
+    "Prepared", "Step", "compare_tokenizers", "describe_item_steps",
+    "describe_loaders",
     "describe_steps", "detect", "export_dataset", "load_data",
     "load_dataset", "load_recipe", "prepare", "preview", "preview_items",
     "profile",

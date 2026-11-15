@@ -18,7 +18,7 @@ git clone https://github.com/victor-von-pooh/ML-EDA.git
 cd ML-EDA
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[all]"     # parquet, Excel, 画像も読む場合 (使うだけなら pip install -e . でもよい)
+pip install -e ".[all]"     # parquet, Excel, 画像, 文の部分語も使う場合 (使うだけなら pip install -e . でもよい)
 pip install -e ".[dev,all]" # テストも動かす場合
 ```
 
@@ -86,6 +86,8 @@ item_steps:
   - {op: normalize}                       # 点群は sample_points と normalize_cloud
 split: {method: stratified, valid: 0.2}
 ```
+
+文の区切り方 (文字 `char`, 語 `word`, 部分語 `subword`) は, 分析の結果の `result["items"]["tokenizers"]` が見本の文で比べて勧める (語彙の大きさ, 1 つの文のトークンの数, 語彙に無いトークンの割合). `recommended` をそのまま `item_steps` に入れられる. 部分語は `tokenizers` が要る (`[all]` か `[text]` で入る).
 
 `load_dataset(...).tensors("train")` は (画像なら (件数, チャンネル, 高さ, 幅)) の配列とラベルを返す.
 

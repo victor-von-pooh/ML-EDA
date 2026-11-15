@@ -330,14 +330,30 @@ def fit_vocabulary(items: list, params: dict) -> dict:
     items: list
         学習用の文
     params: dict
-        max_tokens (語彙の上限, 既定 20000), min_count (最小の出現数,
-        既定 1), lowercase, unit
+        max_tokens (語彙の上限, 既定 20000. 部分語は語彙の大きさで既定
+        8000), min_count (最小の出現数, 既定 1. 部分語では使わない),
+        lowercase, unit (word, char, subword)
 
     Returns
     ----------
     state: dict
-        語彙 (0 は埋め草, 1 は語彙に無い語)
+        語彙 (0 は埋め草, 1 は語彙に無い語. 部分語は区切りの JSON の
+        tokenizer も)
     """
+    # 部分語は学習用の文で BPE の区切りを作る
+    if params.get("unit", "word") == "subword":
+        from ml_eda.textunits import fit_subword, subword_vocabulary
+
+        lower = params.get("lowercase", True)
+        serialized = fit_subword(
+            [str(item).lower() if lower else str(item) for item in items],
+            int(params.get("max_tokens", 8000))
+        )
+        return {
+            "vocabulary": subword_vocabulary(serialized),
+            "tokenizer": serialized,
+        }
+
     # 頻度の上位を語彙にする
     counts: Counter = Counter()
     for item in items:
@@ -398,12 +414,49 @@ def encode_text(text: str, params: dict, state: dict) -> np.ndarray:
     ids: np.ndarray
         (length,) の int64 の配列 (短い場合は 0 で埋め, 長い場合は切る)
     """
-    # 語彙に無い語は 1
-    index = vocabulary_index(state["vocabulary"])
+    # 長さに切り, 短い場合は 0 で埋める
     length = int(params.get("length", 128))
-    tokens = tokenize(text, params)[:length]
+    tokens = encode_tokens(text, params, state)[:length]
     ids = np.zeros(length, dtype=np.int64)
-    ids[:len(tokens)] = [index.get(token, 1) for token in tokens]
+    ids[:len(tokens)] = tokens
+
+    return ids
+
+
+def encode_tokens(text: str, params: dict, state: dict) -> list[int]:
+    """
+    文を語の番号の並び (長さをそろえない) にする関数
+
+    Parameters
+    ----------
+    text: str
+        文
+    params: dict
+        lowercase, unit
+    state: dict
+        語彙 (部分語は区切りの JSON の tokenizer も)
+
+    Returns
+    ----------
+    ids: list[int]
+        語の番号 (語彙に無い語は 1)
+    """
+    # 部分語は保存した区切りで分ける
+    if params.get("unit", "word") == "subword":
+        from ml_eda.textunits import subword_tokenizer
+
+        if "tokenizer" not in state:
+            raise ValueError(
+                "部分語の区切りがありません. vocabulary を当てはめ直して"
+                "ください"
+            )
+        value = str(text)
+        if params.get("lowercase", True):
+            value = value.lower()
+        ids = list(subword_tokenizer(state["tokenizer"]).encode(value).ids)
+        return ids
+    index = vocabulary_index(state["vocabulary"])
+    ids = [index.get(token, 1) for token in tokenize(text, params)]
 
     return ids
 
@@ -539,6 +592,23 @@ def check_item_steps(steps: Any, kind: str) -> None:
             raise ValueError(
                 f"{op} の引数 {', '.join(missing)} を決めてください"
             )
+
+        # 文の区切り方 (部分語は tokenizers が要る)
+        if op == "vocabulary":
+            unit = spec.get("unit", "word")
+            if unit not in ("word", "char", "subword"):
+                raise ValueError(
+                    f"vocabulary の unit は word, char, subword のどれかに"
+                    f"してください: {unit}"
+                )
+            if unit == "subword" and "state" not in spec:
+                from ml_eda.textunits import has_subword
+
+                if not has_subword():
+                    raise ValueError(
+                        "部分語 (unit: subword) には tokenizers が要ります "
+                        "(pip install tokenizers)"
+                    )
 
     # 文は語彙で番号にしないと学習に渡せない
     if kind == "text" and not any(s["op"] == "vocabulary" for s in steps):
@@ -824,7 +894,7 @@ def register_builtin_item_steps() -> None:
         "vocabulary", "text", fit_vocabulary, encode_text,
         {"max_tokens": "語彙の上限", "min_count": "語彙に入れる最小の出現数",
          "length": "並びの長さ", "lowercase": "小文字にするか",
-         "unit": "word (語) か char (文字)"},
+         "unit": "word (語), char (文字), subword (部分語)"},
         "学習用の文で語彙を作り, 語の番号の並び (決まった長さ) にする",
         fit_all=True
     ))
