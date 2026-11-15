@@ -208,7 +208,8 @@ def test_pointclouds(tmp_path: Path) -> None:
     cloud = data.load_item(1)
     assert cloud["points"].shape == (250, 3) and cloud["colors"] is not None
     result = profile(data, target="label")
-    assert "mixed_points" in {item["code"] for item in result["findings"]}
+    codes = {item["code"] for item in result["findings"]}
+    assert "mixed_points" in codes and "high_correlation" not in codes
 
     # 1 つのファイルの形式 (PCD, xyz, npy)
     (tmp_path / "a.pcd").write_text(

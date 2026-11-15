@@ -98,12 +98,11 @@ def profile(
         from ml_eda.media import describe_items
 
         result["items"] = describe_items(data, seed)
-        # 中身の様子の列 (幅, 色の形式など) が揃っているのは良いことなので,
-        # 定数の気付きは出さない. 読み込みの表の列は学習に使わない (中身を
-        # 配列にする) ので, ファイルの場所が ID らしいという気付きも出さない
-        quiet = {"constant", "near_constant", "id_like"}
+        # 読み込みの表の列 (場所, 幅, 点の範囲など) は学習に使わない (中身を
+        # 配列にする) ので, 列の気付きは目的の列についてのものだけを残す
+        kept = {"class_imbalance", "target_missing"}
         result["findings"] = result["items"].pop("findings") + [
-            item for item in result["findings"] if item["code"] not in quiet
+            item for item in result["findings"] if item["code"] in kept
         ]
     result = to_json(result)
 
