@@ -59,7 +59,12 @@ def profile(
         frame[data.roles["time"]] if data.kind == "timeseries" else None
     )
     sampled = len(frame) > SAMPLE_ROWS
-    if sampled and data.kind == "timeseries":
+    if sampled and data.kind == "timeseries" and data.roles.get("series"):
+        # 複数の系列は, 時刻の値で間引く (全ての系列を同じ時刻で残す)
+        times = frame[data.roles["time"]].drop_duplicates()
+        keep = times.iloc[::math.ceil(len(frame) / SAMPLE_ROWS)]
+        frame = frame[frame[data.roles["time"]].isin(keep)]
+    elif sampled and data.kind == "timeseries":
         frame = frame.iloc[::math.ceil(len(frame) / SAMPLE_ROWS)]
     elif sampled:
         frame = frame.sample(SAMPLE_ROWS, random_state=seed)
@@ -80,7 +85,12 @@ def profile(
         describe_target(frame, target, columns) if target else None
     )
     series = (
-        describe_timeseries(frame, data.roles["time"], columns, full_time)
+        describe_timeseries(
+            frame, data.roles["time"], columns, full_time,
+            data.roles.get("series"),
+            int(data.frame[data.roles["series"]].nunique())
+            if data.roles.get("series") in data.frame.columns else 1
+        )
         if data.kind == "timeseries" else None
     )
 
@@ -764,48 +774,10 @@ def find_period(acf: list[float]) -> Optional[int]:
     return None
 
 
-def series_column(
-    frame: pd.DataFrame, time: str, columns: dict
-) -> Optional[str]:
-    """
-    同じ時刻に複数の系列が並ぶ表で, 系列を分ける列を見つける関数
-
-    Parameters
-    ----------
-    frame: pd.DataFrame
-        時刻の順に並んだ表
-    time: str
-        日時の列
-    columns: dict
-        列ごとの分析の結果
-
-    Returns
-    ----------
-    name: Optional[str]
-        系列を分ける列 (カテゴリの列で, その列と時刻の組がほぼ重ならない
-        もの. 重なりが最も少ない列). 同じ時刻がほとんど無ければ None
-    """
-    # 同じ時刻が 2 割未満なら 1 つの系列
-    if frame[time].duplicated().mean() < 0.2:
-        return None
-    best, fewest = None, 0.05
-    for name, info in columns.items():
-        if name == time or info["type"] not in (
-            "categorical", "id", "boolean"
-        ) or not (
-            2 <= info["unique"] <= 1000
-        ):
-            continue
-        overlap = float(frame.duplicated([time, name]).mean())
-        if overlap < fewest:
-            best, fewest = name, overlap
-
-    return best
-
-
 def describe_timeseries(
     frame: pd.DataFrame, time: str, columns: dict,
-    full_time: Optional[pd.Series] = None
+    full_time: Optional[pd.Series] = None, by: Optional[str] = None,
+    count: int = 1
 ) -> dict:
     """
     時系列の間隔, 抜け, 周期の候補, グラフ用の系列を求める関数
@@ -820,6 +792,10 @@ def describe_timeseries(
         列ごとの分析の結果
     full_time: Optional[pd.Series] = None
         間引く前の日時の列 (間隔と抜けは全体で求める)
+    by: Optional[str] = None
+        系列を分ける列 (読み込みの役割 series. 店ごとの売上など)
+    count: int = 1
+        系列の数 (間引く前)
 
     Returns
     ----------
@@ -827,13 +803,14 @@ def describe_timeseries(
         間隔 (秒), 抜けと重なりの数, 列ごとの周期の候補と自己相関,
         間引いた系列
     """
-    # 店ごとの売上のように, 複数の系列が同じ時刻に並ぶ場合は, 系列を分ける
-    # 列を見つけ, 間隔と自己相関は最も長い 1 つの系列で求める
-    by = series_column(frame, time, columns)
-    if by is not None:
+    # 店ごとの売上のように, 複数の系列が同じ時刻に並ぶ場合は, 間隔と自己
+    # 相関を最も長い 1 つの系列で求める
+    if by is not None and by in frame.columns:
         largest = frame[by].value_counts().index[0]
         frame = frame[frame[by] == largest]
         full_time = None
+    else:
+        by = None
 
     # 間隔と, 抜け (最も多い間隔の 1.5 倍より長い) と重なり
     source = full_time if full_time is not None else frame[time]
@@ -870,7 +847,7 @@ def describe_timeseries(
     result = {
         "time_column": time,
         "series_by": by,
-        "series_count": int(columns[by]["unique"]) if by else 1,
+        "series_count": count if by else 1,
         "interval_seconds": interval,
         "gaps": gaps,
         "duplicates": duplicates,

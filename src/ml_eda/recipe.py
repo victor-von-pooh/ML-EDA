@@ -841,7 +841,9 @@ def apply_lag(
         if name in by:
             continue
         column = result[name]
-        groups = column.groupby([result[b] for b in by]) if by else None
+        groups = column.groupby(
+            [result[b] for b in by], dropna=False
+        ) if by else None
         for lag in params.get("lags", [1]):
             result[f"{name}_lag{lag}"] = (
                 groups.shift(int(lag)) if groups is not None
