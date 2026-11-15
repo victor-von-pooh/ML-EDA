@@ -59,7 +59,8 @@ def test_images(tmp_path: Path) -> None:
     # 大きさのばらつきの気付き
     result = profile(data, target="label")
     json.dumps(result)
-    assert "mixed_sizes" in {item["code"] for item in result["findings"]}
+    codes = {item["code"] for item in result["findings"]}
+    assert "mixed_sizes" in codes and "id_like" not in codes
     assert result["items"]["sizes"][0] == {
         "width": 8, "height": 8, "count": 11
     }

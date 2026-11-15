@@ -107,6 +107,8 @@ ML-EDA の設計の方針をまとめる.
 | `mixed_sizes` | 大きさやチャンネル数がそろわない画像 |
 | `unreadable_items` | 読めない画像や点群のファイル |
 
+画像, 文, 点群では読み込みの表の列を学習に使わない (中身を配列にする) ので, `constant`, `near_constant`, `id_like` は出さない.
+
 気付きは `{severity, code, message, columns}` の辞書. `message` は日本語で, 理由と次にできること (前処理の手順の候補) を書く.
 
 ## 前処理のレシピ
