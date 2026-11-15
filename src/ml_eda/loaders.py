@@ -196,6 +196,32 @@ def read_head(path: Path, size: int = SNIFF_BYTES) -> bytes:
     return head
 
 
+def decodes(head: bytes, encoding: str) -> Optional[str]:
+    """
+    先頭のバイト列を文字コードで読めるか試す関数
+
+    Parameters
+    ----------
+    head: bytes
+        ファイルの先頭
+    encoding: str
+        文字コード
+
+    Returns
+    ----------
+    text: Optional[str]
+        読めた文字 (末尾で文字が途中で切れていても読む), 読めなければ None
+    """
+    # 末尾の最大 3 バイトを除いて試す
+    for cut in range(0, 4):
+        try:
+            return (head[:len(head) - cut] if cut else head).decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    return None
+
+
 def guess_encoding(head: bytes) -> str:
     """
     先頭のバイト列から文字コードを推定する関数
@@ -208,16 +234,22 @@ def guess_encoding(head: bytes) -> str:
     Returns
     ----------
     encoding: str
-        最初に読めた文字コード
+        推定した文字コード
     """
-    # 末尾で文字が途中で切れても読めるように, 最後の数バイトを除いて試す
-    for encoding in ENCODINGS:
-        for cut in range(0, 4):
-            try:
-                (head[:len(head) - cut] if cut else head).decode(encoding)
-                return encoding
-            except UnicodeDecodeError:
-                continue
+    # UTF-8 で読めればそれ. 日本語の 2 つ (cp932 と euc-jp) は両方で
+    # 読める場合があるので, 半角カナ (文字化けの印) の少ない方を選ぶ
+    for encoding in ("utf-8-sig", "utf-8"):
+        if decodes(head, encoding) is not None:
+            return encoding
+    readable = {
+        encoding: text for encoding in ("cp932", "euc-jp")
+        if (text := decodes(head, encoding)) is not None
+    }
+    if readable:
+        return min(
+            readable,
+            key=lambda e: sum("\uff61" <= c <= "\uff9f" for c in readable[e])
+        )
     encoding = "latin-1"
 
     return encoding
@@ -290,11 +322,12 @@ def table_kind(frame: pd.DataFrame) -> tuple[str, dict]:
             frame[name] = converted
         else:
             continue
-        # 異なる時刻が多く, 時刻の順に並ぶ (か並べられる) 列を日時の列とする
+        # 異なる時刻が多い最初の列を日時の列とする (他の日時の列も変換)
         valid = converted.dropna()
-        if len(valid) >= 3 and valid.nunique() >= 0.5 * len(valid):
+        if "time" not in roles and len(valid) >= 3 and (
+            valid.nunique() >= 0.5 * len(valid)
+        ):
             roles["time"] = str(name)
-            break
     kind = "timeseries" if "time" in roles else "table"
 
     return kind, roles
@@ -314,18 +347,91 @@ def to_datetime(column: pd.Series) -> Optional[pd.Series]:
     converted: Optional[pd.Series]
         8 割以上が日時として読めた場合は変換した列, そうでなければ None
     """
-    # 数字だけの列 (ID など) は日時として扱わない
+    # 日付の区切り (- / : 年) を含まない値 (数やカンマ付きの数) は日時に
+    # しない. 時差の違う値が混ざる場合は UTC にそろえる
     values = column.dropna().astype(str)
-    if values.empty or values.str.fullmatch(r"\d{1,6}").mean() > 0.5:
+    if values.empty:
+        return None
+    dated = values.str.contains(r"\d[-/:年]\d|\d年|\d{4}-\d", regex=True)
+    if dated.mean() < 0.8:
         return None
     try:
         converted = pd.to_datetime(column, errors="coerce", format="mixed")
+        if not pd.api.types.is_datetime64_any_dtype(converted):
+            converted = pd.to_datetime(
+                column, errors="coerce", format="mixed", utc=True
+            )
     except (ValueError, TypeError):
-        return None
-    if converted.notna().sum() < 0.8 * column.notna().sum():
+        try:
+            converted = pd.to_datetime(
+                column, errors="coerce", format="mixed", utc=True
+            )
+        except (ValueError, TypeError):
+            return None
+    years = converted.dropna().dt.year
+    plausible = years.between(1800, 2200).mean() if len(years) else 0
+    if converted.notna().sum() < 0.8 * column.notna().sum() or (
+        plausible < 0.8
+    ):
         return None
 
     return converted
+
+
+def to_numbers(column: pd.Series) -> Optional[pd.Series]:
+    """
+    桁区切りのカンマ付きの数の列を数に変換する関数
+
+    Parameters
+    ----------
+    column: pd.Series
+        文字の列
+
+    Returns
+    ----------
+    converted: Optional[pd.Series]
+        8 割以上が 1,234 の形の数なら変換した列, そうでなければ None
+    """
+    # 1,234 や -12,345.6 の形だけを数にする
+    values = column.dropna().astype(str).str.strip()
+    if values.empty:
+        return None
+    pattern = r"[+-]?\d{1,3}(,\d{3})+(\.\d+)?|[+-]?\d+(\.\d+)?"
+    matched = values.str.fullmatch(pattern)
+    if matched.mean() < 0.8 or not values.str.contains(",").any():
+        return None
+    converted = pd.to_numeric(
+        column.astype(str).str.replace(",", "", regex=False),
+        errors="coerce"
+    ).where(column.notna())
+
+    return converted
+
+
+def unique_names(names: list) -> list[str]:
+    """
+    列の名前を文字にし, 重なる名前に番号を付ける関数
+
+    Parameters
+    ----------
+    names: list
+        列の名前
+
+    Returns
+    ----------
+    unique: list[str]
+        重ならない文字の名前 (2 つ目からは name.1 のように付ける)
+    """
+    # 出てきた回数を数えて番号を付ける
+    seen: dict[str, int] = {}
+    unique = []
+    for name in names:
+        text = str(name)
+        count = seen.get(text, 0)
+        seen[text] = count + 1
+        unique.append(text if count == 0 else f"{text}.{count}")
+
+    return unique
 
 
 def finish_table(frame: pd.DataFrame, options: dict) -> Data:
@@ -344,8 +450,16 @@ def finish_table(frame: pd.DataFrame, options: dict) -> Data:
     data: Data
         表か時系列のデータ
     """
-    # 列の名前を文字にそろえる
-    frame.columns = [str(name) for name in frame.columns]
+    # 列の名前を重ならない文字にし, カンマ付きの数を数にする
+    frame.columns = unique_names(list(frame.columns))
+    for name in frame.columns:
+        column = frame[name]
+        if pd.api.types.is_object_dtype(column) or (
+            pd.api.types.is_string_dtype(column)
+        ):
+            numbers = to_numbers(column)
+            if numbers is not None:
+                frame[name] = numbers
 
     # 日時の列の指定があればそれを, 無ければ推定
     time_column = options.get("time_column")
@@ -353,7 +467,9 @@ def finish_table(frame: pd.DataFrame, options: dict) -> Data:
         if time_column not in frame.columns:
             raise ValueError(f"日時の列 {time_column} がありません")
         frame[time_column] = pd.to_datetime(
-            frame[time_column], errors="coerce", format="mixed"
+            frame[time_column], errors="coerce", format="mixed", utc=True
+        ) if to_datetime(frame[time_column]) is None else to_datetime(
+            frame[time_column]
         )
         kind, roles = "timeseries", {"time": time_column}
     elif options.get("kind") == "table":
@@ -433,12 +549,24 @@ def load_csv(path: Path, **options: Any) -> Data:
     sep = options.get("sep") or guess_delimiter(text)
     header = options.get("header", "infer")
 
-    # 読み込み (空白区切りは連続した空白を 1 つとして扱う)
-    frame = pd.read_csv(
-        path, sep=r"\s+" if sep == " " else sep, encoding=encoding,
-        header=header, engine="python" if sep == " " else "c",
-        low_memory=False
-    )
+    # 読み込み (空白区切りは連続した空白を 1 つとして扱う). 先頭より後で
+    # 読めない文字があれば, 次の文字コードで読み直す
+    order = [encoding] + [e for e in ENCODINGS if e != encoding]
+    if options.get("encoding"):
+        order = [encoding]
+    for candidate in order:
+        try:
+            frame = pd.read_csv(
+                path, sep=r"\s+" if sep == " " else sep, encoding=candidate,
+                header=header, engine="python" if sep == " " else "c",
+                **({} if sep == " " else {"low_memory": False})
+            )
+            encoding = candidate
+            break
+        except UnicodeDecodeError:
+            continue
+        except pd.errors.EmptyDataError as error:
+            raise ValueError(f"{path.name} は空です") from error
     data = finish_table(frame, options)
     data.source = {"encoding": encoding, "sep": sep}
 
@@ -710,9 +838,9 @@ def load_npy(path: Path, **options: Any) -> Data:
         )
 
     # 列の名前を付けて表にする
-    columns = options.get("columns") or [
+    columns = unique_names(options.get("columns") or [
         f"x{index}" for index in range(array.shape[1])
-    ]
+    ])
     frame = pd.DataFrame(array, columns=columns)
     data = Data(kind="table", frame=frame)
 

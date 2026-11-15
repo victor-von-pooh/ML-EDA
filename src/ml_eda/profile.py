@@ -1,10 +1,12 @@
 import math
+import re
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from ml_eda.data import Data
+from ml_eda.loaders import unique_names
 
 # 分析に使う行の上限 (超える場合は無作為に選んだ見本を使う)
 SAMPLE_ROWS = 100_000
@@ -47,13 +49,19 @@ def profile(
         JSON にできる分析の結果 (overview, columns, correlations,
         associations, target, timeseries, findings)
     """
-    # 大きなデータは見本で分析
-    frame = data.frame
+    # 列の名前を重ならない文字にそろえる
+    frame = data.frame.copy(deep=False)
+    frame.columns = unique_names(list(frame.columns))
+
+    # 大きなデータは見本で分析 (時系列は間隔を保つように等間隔に間引く)
+    full_time = (
+        frame[data.roles["time"]] if data.kind == "timeseries" else None
+    )
     sampled = len(frame) > SAMPLE_ROWS
-    if sampled:
+    if sampled and data.kind == "timeseries":
+        frame = frame.iloc[::math.ceil(len(frame) / SAMPLE_ROWS)]
+    elif sampled:
         frame = frame.sample(SAMPLE_ROWS, random_state=seed)
-        if data.kind == "timeseries":
-            frame = frame.sort_index()
     target = target or data.roles.get("target")
     if target is not None and target not in frame.columns:
         raise ValueError(f"目的の列 {target} がありません")
@@ -71,7 +79,7 @@ def profile(
         describe_target(frame, target, columns) if target else None
     )
     series = (
-        describe_timeseries(frame, data.roles["time"], columns)
+        describe_timeseries(frame, data.roles["time"], columns, full_time)
         if data.kind == "timeseries" else None
     )
 
@@ -175,8 +183,9 @@ def infer_type(column: pd.Series, roles: dict) -> str:
             return "boolean"
         if integer and unique <= CATEGORY_LIMIT and len(values) > 2 * unique:
             return "categorical"
+        id_name = re.search(r"(^|_)id$|Id$|ID$", name) is not None
         if integer and unique == len(values) and len(values) > 20 and (
-            values.is_monotonic_increasing or name.lower().endswith("id")
+            values.is_monotonic_increasing or id_name
         ):
             return "id"
         return "numeric"
@@ -235,7 +244,7 @@ def describe_column(column: pd.Series, roles: dict) -> dict:
     elif kind == "text":
         result.update(text_stats(values.astype(str)))
     elif kind == "datetime":
-        result.update(datetime_stats(pd.to_datetime(values)))
+        result.update(datetime_stats(values))
 
     return result
 
@@ -372,7 +381,7 @@ def datetime_stats(values: pd.Series) -> dict:
         最初と最後の時刻, 最も多い間隔 (秒)
     """
     # 並べた時刻の差で間隔を求める
-    ordered = values.sort_values()
+    ordered = pd.to_datetime(values, utc=True).sort_values()
     diffs = ordered.diff().dropna().dt.total_seconds()
     positive = diffs[diffs > 0]
     stats = {
@@ -402,7 +411,7 @@ def numeric_correlations(frame: pd.DataFrame, columns: dict) -> dict:
     result: dict
         列の名前の並びと, 2 つの相関の行列
     """
-    # 数値の列 (多い場合は分散の大きい順に上限まで)
+    # 数値の列 (多い場合は先頭から上限まで)
     names = [
         name for name, info in columns.items() if info["type"] == "numeric"
     ][:MAX_CORRELATION_COLUMNS]
@@ -442,9 +451,9 @@ def cramers_v(left: pd.Series, right: pd.Series) -> float:
     expected = table.sum(1, keepdims=True) * table.sum(0, keepdims=True)
     expected = expected / total
     chi2 = float(((table - expected) ** 2 / expected).sum())
-    value = math.sqrt(chi2 / total / (min(table.shape) - 1))
+    value = min(math.sqrt(chi2 / total / (min(table.shape) - 1)), 1.0)
 
-    return min(value, 1.0)
+    return value
 
 
 def correlation_ratio(categories: pd.Series, values: pd.Series) -> float:
@@ -473,9 +482,9 @@ def correlation_ratio(categories: pd.Series, values: pd.Series) -> float:
         return 0.0
     groups = frame.groupby("c")["v"]
     between = (groups.count() * (groups.mean() - frame["v"].mean()) ** 2)
-    eta = math.sqrt(float(between.sum()) / float(total))
+    eta = min(math.sqrt(float(between.sum()) / float(total)), 1.0)
 
-    return min(eta, 1.0)
+    return eta
 
 
 def categorical_associations(frame: pd.DataFrame, columns: dict) -> dict:
@@ -526,10 +535,8 @@ def guess_task(info: dict) -> str:
     task: str
         classification か regression
     """
-    # カテゴリと 2 値は分類, 数値は回帰
-    if info["type"] in ("categorical", "boolean", "constant"):
-        return "classification"
-    task = "regression"
+    # 数値は回帰, それ以外 (カテゴリ, 2 値, 文, ID など) は分類
+    task = "regression" if info["type"] == "numeric" else "classification"
 
     return task
 
@@ -605,16 +612,18 @@ def describe_target(
     task = guess_task(info)
     result: dict = {"column": target, "task": task, "type": info["type"]}
     if task == "classification":
-        counts = frame[target].astype(str).value_counts()
+        counts = frame[target].dropna().astype(str).value_counts()
         result["classes"] = [
             {"value": str(value), "count": int(count)}
             for value, count in counts.items()
         ]
 
-    # 各列と目的の列の関連の強さを強い順に並べる
+    # 各列と目的の列の関連の強さを強い順に並べる (クラスが多すぎる場合は
+    # 分割表が大きくなるので求めない)
     ranking = []
     for name, feature in columns.items():
-        if name == target:
+        many = task == "classification" and info["unique"] > 500
+        if name == target or many:
             continue
         value = association(frame[name], feature["type"], frame[target], task)
         if value is not None:
@@ -678,7 +687,8 @@ def find_period(acf: list[float]) -> Optional[int]:
 
 
 def describe_timeseries(
-    frame: pd.DataFrame, time: str, columns: dict
+    frame: pd.DataFrame, time: str, columns: dict,
+    full_time: Optional[pd.Series] = None
 ) -> dict:
     """
     時系列の間隔, 抜け, 周期の候補, グラフ用の系列を求める関数
@@ -691,6 +701,8 @@ def describe_timeseries(
         日時の列
     columns: dict
         列ごとの分析の結果
+    full_time: Optional[pd.Series] = None
+        間引く前の日時の列 (間隔と抜けは全体で求める)
 
     Returns
     ----------
@@ -699,7 +711,8 @@ def describe_timeseries(
         間引いた系列
     """
     # 間隔と, 抜け (最も多い間隔の 1.5 倍より長い) と重なり
-    times = pd.to_datetime(frame[time]).dropna().sort_values()
+    source = full_time if full_time is not None else frame[time]
+    times = pd.to_datetime(source, utc=True).dropna().sort_values()
     diffs = times.diff().dropna().dt.total_seconds()
     positive = diffs[diffs > 0]
     interval = float(positive.mode().iloc[0]) if len(positive) else None
@@ -721,7 +734,10 @@ def describe_timeseries(
     step = max(1, len(frame) // SERIES_POINTS)
     thinned = frame.iloc[::step]
     series = {
-        "time": [t.isoformat() for t in pd.to_datetime(thinned[time])],
+        "time": [
+            t.isoformat() if pd.notna(t) else None
+            for t in pd.to_datetime(thinned[time], utc=True)
+        ],
         "values": {
             name: thinned[name].astype(float).tolist() for name in names
         },
@@ -795,9 +811,10 @@ def find_issues(result: dict, target: Optional[str]) -> list[dict]:
     # 重複した行
     duplicates = result["overview"]["duplicate_rows"]
     if duplicates:
+        where = "見本の中に" if result["overview"]["sampled"] else ""
         findings.append(finding(
             "warning", "duplicate_rows",
-            f"全く同じ行が {duplicates} 行あります. 学習用と検証用に同じ行が"
+            f"{where}全く同じ行が {duplicates} 行あります. 学習用と検証用に同じ行が"
             "入ると検証の結果が良く見えすぎるので, 重複を除く手順を検討して"
             "ください", []
         ))

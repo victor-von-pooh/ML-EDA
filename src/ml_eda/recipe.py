@@ -36,6 +36,37 @@ class Step:
 # 手順の登録簿
 STEPS: dict[str, Step] = {}
 
+# columns が auto のときに選ぶ列の型 (書いていない手順は数値の列)
+WANT = {
+    "one_hot": "categorical", "label_encode": "categorical",
+    "datetime_parts": "datetime",
+}
+
+
+def category_key(value: Any) -> str:
+    """
+    カテゴリの値を, 型に依らない文字の鍵にする関数
+
+    整数の列に欠損が入ると float になり 1 が 1.0 になるので, 整数の値の
+    float は整数の文字にそろえる
+
+    Parameters
+    ----------
+    value: Any
+        値 (欠損でないもの)
+
+    Returns
+    ----------
+    key: str
+        鍵
+    """
+    # 整数の値の float は整数の文字
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return str(int(value))
+    key = str(value)
+
+    return key
+
 
 def register_step(step: Step) -> None:
     """
@@ -288,13 +319,13 @@ def fit_one_hot(frame: pd.DataFrame, params: dict, roles: dict) -> dict:
     state: dict
         列ごとのカテゴリの並び
     """
-    # 列ごとに頻度の上位のカテゴリ
+    # 列ごとに頻度の上位のカテゴリ (欠損はカテゴリにしない)
     names = resolve_columns(frame, params.get("columns"), roles, "categorical")
     limit = int(params.get("max_categories", 20))
     categories = {
         name: [
-            str(value)
-            for value in frame[name].astype(str).value_counts().index[:limit]
+            str(value) for value in frame[name].dropna().map(category_key)
+            .value_counts().index[:limit]
         ]
         for name in names
     }
@@ -323,10 +354,12 @@ def apply_one_hot(
     result: pd.DataFrame
         置き換えた表 (学習用に無かった値は全て 0)
     """
-    # カテゴリごとの列を作り, 元の列を落とす
+    # カテゴリごとの列を作り, 元の列を落とす (欠損は全て 0)
     result = frame.copy()
     for name, categories in state["categories"].items():
-        values = result[name].astype(str)
+        values = result[name].map(
+            lambda v: category_key(v) if pd.notna(v) else None
+        )
         for category in categories:
             result[f"{name}={category}"] = (values == category).astype(int)
         result = result.drop(columns=[name])
@@ -355,7 +388,7 @@ def fit_label_encode(frame: pd.DataFrame, params: dict, roles: dict) -> dict:
     # 値の並びを決める
     names = resolve_columns(frame, params.get("columns"), roles, "categorical")
     categories = {
-        name: sorted(frame[name].dropna().astype(str).unique().tolist())
+        name: sorted(frame[name].dropna().map(category_key).unique().tolist())
         for name in names
     }
     state = {"categories": categories}
@@ -388,7 +421,7 @@ def apply_label_encode(
     for name, categories in state["categories"].items():
         index = {value: number for number, value in enumerate(categories)}
         result[name] = result[name].map(
-            lambda v: index.get(str(v), -1) if pd.notna(v) else -1
+            lambda v: index.get(category_key(v), -1) if pd.notna(v) else -1
         ).astype(int)
 
     return result
@@ -547,7 +580,7 @@ def apply_filter_rows(
     frame: pd.DataFrame
         表
     params: dict
-        column, op (==, !=, <, <=, >, >=, in, notna), value
+        column, compare (==, !=, <, <=, >, >=, in, notna), value
     state: dict
         使わない
 
@@ -558,7 +591,7 @@ def apply_filter_rows(
     """
     # 任意の式は評価せず, 決まった比較だけを使う
     column = frame[params["column"]]
-    op = params.get("op", "==")
+    op = params.get("compare", "==")
     value = params.get("value")
     comparisons = {
         "==": lambda: column == value, "!=": lambda: column != value,
@@ -636,6 +669,9 @@ def apply_cast(
     for name in resolve_columns(frame, params.get("columns"), {}):
         if to == "datetime":
             result[name] = pd.to_datetime(result[name], errors="coerce")
+        elif to == "int" and result[name].isna().any():
+            # 欠損を持てる整数の型
+            result[name] = result[name].astype("Int64")
         elif to in ("float", "int", "str", "category"):
             result[name] = result[name].astype(to)
         else:
@@ -742,7 +778,7 @@ def register_builtin_steps() -> None:
     ))
     register_step(Step(
         "filter_rows", None, apply_filter_rows,
-        {"column": "列", "op": "==, !=, <, <=, >, >=, in, notna",
+        {"column": "列", "compare": "==, !=, <, <=, >, >=, in, notna",
          "value": "比べる値"}, "条件に合う行だけを残す", changes_rows=True
     ))
     register_step(Step(
@@ -855,7 +891,12 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
 
     # 版 (書かなければ版 1), 手順, 分割の確認
     version = loaded.setdefault("format_version", 1)
-    if not isinstance(version, int) or version > FORMAT_VERSION:
+    if loaded.get("steps") is None:
+        loaded["steps"] = []
+    if loaded.get("split") is None:
+        loaded["split"] = {"method": "none"}
+    valid = isinstance(version, int) and not isinstance(version, bool)
+    if not valid or not 1 <= version <= FORMAT_VERSION:
         raise ValueError(
             f"format_version {version} のレシピは, このライブラリ (版 "
             f"{FORMAT_VERSION} まで) では読めません"

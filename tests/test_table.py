@@ -63,13 +63,23 @@ def test_detect_and_load_formats(tmp_path: Path) -> None:
     frame.to_csv(tmp_path / "a.txt", sep=";", index=False)
     frame.to_json(tmp_path / "a.json", orient="records")
     frame.to_json(tmp_path / "a.jsonl", orient="records", lines=True)
-    frame.to_parquet(tmp_path / "a.parquet")
-    frame.to_excel(tmp_path / "a.xlsx", index=False)
     np.save(tmp_path / "a.npy", np.arange(12.0).reshape(4, 3))
+    names = ["a.csv", "a.tsv", "a.txt", "a.json", "a.jsonl"]
+
+    # 任意の依存 (pyarrow, openpyxl) がある場合は parquet と Excel も
+    try:
+        frame.to_parquet(tmp_path / "a.parquet")
+        names.append("a.parquet")
+    except ImportError:
+        pass
+    try:
+        frame.to_excel(tmp_path / "a.xlsx", index=False)
+        names.append("a.xlsx")
+    except ImportError:
+        pass
 
     # どれも表として読め, 行と列が揃う
-    for name in ("a.csv", "a.tsv", "a.txt", "a.json", "a.jsonl",
-                 "a.parquet", "a.xlsx"):
+    for name in names:
         data = load_data(tmp_path / name)
         assert data.kind == "table", name
         assert data.frame.shape == frame.shape, name

@@ -10,13 +10,16 @@ import yaml
 
 from ml_eda.data import Data
 from ml_eda.profile import to_json
-from ml_eda.recipe import STEPS, load_recipe, to_plain
+from ml_eda.recipe import (
+    STEPS, WANT, category_key, load_recipe, resolve_columns, to_plain
+)
 
 # データセットの説明の形式の版
 DATASET_FORMAT_VERSION = 1
 
-# 分割を表す列 (処理の間だけ使う)
+# 分割を表す列と, 分割に使う日時の写し (処理の間だけ使う)
 SPLIT_COLUMN = "__split__"
+TIME_COLUMN = "__time__"
 
 # 分割の名前
 SPLITS = ("train", "valid", "test")
@@ -36,6 +39,74 @@ class Prepared:
     classes: list = field(default_factory=list)
     # 前処理の後の注意 (数値でない列が残っているなど)
     notes: list = field(default_factory=list)
+
+
+def split_counts(count: int, valid: float, test: float) -> tuple[int, int]:
+    """
+    全体の件数から, 検証用とテスト用の件数を求める関数
+
+    Parameters
+    ----------
+    count: int
+        件数
+    valid: float
+        検証用の割合
+    test: float
+        テスト用の割合
+
+    Returns
+    ----------
+    counts: tuple[int, int]
+        検証用とテスト用の件数 (割合が 0 でなければ, 学習用を 1 件以上
+        残せる限り 1 件以上)
+    """
+    # 四捨五入し, 割合があるのに 0 件になる場合は 1 件にする
+    n_valid = int(round(count * valid))
+    n_test = int(round(count * test))
+    if valid > 0 and n_valid == 0 and count - n_test >= 2:
+        n_valid = 1
+    if test > 0 and n_test == 0 and count - n_valid >= 2:
+        n_test = 1
+    counts = (n_valid, n_test)
+
+    return counts
+
+
+def allocate(sizes: list[int], total: int) -> list[int]:
+    """
+    全体の件数を, グループの大きさに比例して配る関数 (最大剰余法)
+
+    Parameters
+    ----------
+    sizes: list[int]
+        グループごとの件数
+    total: int
+        配る件数
+
+    Returns
+    ----------
+    shares: list[int]
+        グループごとに配った件数 (合計は total, グループの件数を超えない)
+    """
+    # 比例した値の整数部を配り, 残りを端数の大きい順に配る
+    whole = sum(sizes)
+    if whole == 0 or total == 0:
+        return [0] * len(sizes)
+    exact = [size * total / whole for size in sizes]
+    shares = [min(int(value), size) for value, size in zip(exact, sizes)]
+    order = sorted(
+        range(len(sizes)), key=lambda k: exact[k] - int(exact[k]),
+        reverse=True
+    )
+    rest = total - sum(shares)
+    for k in order * 2:
+        if rest <= 0:
+            break
+        if shares[k] < sizes[k]:
+            shares[k] += 1
+            rest -= 1
+
+    return shares
 
 
 def assign_splits(
@@ -73,48 +144,72 @@ def assign_splits(
     if valid < 0 or test < 0 or valid + test >= 1:
         raise ValueError("valid と test の割合は 0 以上で, 合計を 1 未満に")
     rng = np.random.default_rng(int(split.get("seed", 0)))
+    n_valid, n_test = split_counts(len(frame), valid, test)
 
     # 時刻の順は, 最後の部分を検証用とテスト用にする
     if method == "time":
         time = roles.get("time")
         if not time:
             raise ValueError("時刻の順の分割には日時の列が要ります")
-        order = np.argsort(pd.to_datetime(frame[time]).to_numpy(),
-                           kind="stable")
-        return label_by_position(frame.index, order, valid, test)
+        times = pd.to_datetime(frame[time], utc=True).to_numpy()
+        order = np.argsort(times, kind="stable")
+        return label_by_position(frame.index, order, n_valid, n_test)
 
-    # グループごとに同じ分割にする
+    # グループごとに同じ分割にする (行の件数が割合に近くなるまで加える)
     if method == "group":
         column = split.get("column")
-        if column not in frame.columns:
-            raise ValueError(f"グループの列 {column} がありません")
-        groups = frame[column].astype(str).unique()
+        if not column or column not in frame.columns:
+            raise ValueError(
+                f"グループの分割には列 (split.column) が要ります: {column}"
+            )
+        keys = frame[column].astype(str).where(frame[column].notna(), None)
+        sizes = keys.value_counts(dropna=False)
+        groups = list(sizes.index)
         rng.shuffle(groups)
-        labels = label_by_position(
-            pd.Index(groups), np.arange(len(groups)), valid, test
-        )
-        return frame[column].astype(str).map(labels)
+        labels: dict = {}
+        filled = {"test": 0, "valid": 0}
+        for group in groups:
+            size = int(sizes[group])
+            if filled["test"] + size <= max(n_test, 0) and n_test:
+                labels[group] = "test"
+                filled["test"] += size
+            elif filled["valid"] + size <= max(n_valid, 0) and n_valid:
+                labels[group] = "valid"
+                filled["valid"] += size
+            else:
+                labels[group] = "train"
+        return keys.map(lambda key: labels.get(key, "train"))
 
-    # 層化は目的の列の値ごとに, 無作為はまとめて割り当て
+    # 層化は, 全体の件数を目的の列の値ごとに比例して配る
     if method == "stratified":
         target = roles.get("target")
         if not target:
             raise ValueError("層化の分割には目的の列が要ります")
-        assigned = pd.Series("train", index=frame.index)
-        for _, group in frame.groupby(frame[target].astype(str)):
-            order = rng.permutation(len(group))
-            assigned.loc[group.index] = label_by_position(
-                group.index, order, valid, test
+        groups = [
+            group.index
+            for _, group in frame.groupby(frame[target].astype(str))
+        ]
+        sizes = [len(index) for index in groups]
+        valid_shares = allocate(sizes, n_valid)
+        test_shares = allocate(
+            [size - share for size, share in zip(sizes, valid_shares)],
+            n_test
+        )
+        assigned = pd.Series("train", index=frame.index, dtype=object)
+        for index, v_count, t_count in zip(groups, valid_shares, test_shares):
+            order = rng.permutation(len(index))
+            assigned.loc[index] = label_by_position(
+                index, order, v_count, t_count
             )
         return assigned
     order = rng.permutation(len(frame))
-    assigned = label_by_position(frame.index, order, valid, test)
+    assigned = label_by_position(frame.index, order, n_valid, n_test)
 
     return assigned
 
 
 def label_by_position(
-    index: pd.Index, order: np.ndarray, valid: float, test: float
+    index: pd.Index, order: np.ndarray, n_valid: int, n_test: int
 ) -> pd.Series:
     """
     並べた順の最後の部分を検証用とテスト用にする関数
@@ -125,24 +220,21 @@ def label_by_position(
         行の名前
     order: np.ndarray
         行の位置の並べ方
-    valid: float
-        検証用の割合
-    test: float
-        テスト用の割合
+    n_valid: int
+        検証用の件数
+    n_test: int
+        テスト用の件数
 
     Returns
     ----------
     labels: pd.Series
         行ごとの分割の名前
     """
-    # 件数を割合から求め, 並べた順の後ろから割り当てる
+    # 並べた順の後ろからテスト用, その前を検証用に割り当てる
     count = len(order)
-    n_test = int(round(count * test))
-    n_valid = int(round(count * valid))
-    if valid > 0 and n_valid == 0 and count - n_test >= 2:
-        n_valid = 1
     names = np.array(["train"] * count, dtype=object)
-    names[order[count - n_test - n_valid:count - n_test]] = "valid"
+    start = max(count - n_test - n_valid, 0)
+    names[order[start:count - n_test]] = "valid"
     if n_test:
         names[order[count - n_test:]] = "test"
     labels = pd.Series(names, index=index)
@@ -150,46 +242,168 @@ def label_by_position(
     return labels
 
 
-def run_steps(
-    frame: pd.DataFrame, recipe: dict, roles: dict,
-    upto: Optional[int] = None
+def first_fit(steps: list) -> int:
+    """
+    値を学ぶ最初の手順の位置を返す関数
+
+    Parameters
+    ----------
+    steps: list
+        レシピの手順
+
+    Returns
+    ----------
+    position: int
+        最初の値を学ぶ手順の位置 (無ければ手順の数)
+    """
+    # それより前の手順は, 分割の前に全体にかけられる
+    position = next(
+        (k for k, spec in enumerate(steps) if STEPS[spec["op"]].fit),
+        len(steps)
+    )
+
+    return position
+
+
+def run_step(
+    frame: pd.DataFrame, spec: dict, roles: dict, number: int,
+    fit_rows: Optional[pd.Series]
 ) -> pd.DataFrame:
     """
-    レシピの手順を順にかける関数 (値を学ぶ手順は学習用の行で当てはめ)
+    1 つの手順の列を決め, 当てはめてからかける関数
 
     Parameters
     ----------
     frame: pd.DataFrame
-        分割の列 (SPLIT_COLUMN) を持つ表
-    recipe: dict
-        レシピ (当てはめた値を各手順の state に書き込む)
+        表
+    spec: dict
+        手順 (決めた列と当てはめた値を state に書き込む)
     roles: dict
-        列の役割
+        列の役割 (auto の列から目的の列などを除く)
+    number: int
+        手順の番号 (誤りの文に使う)
+    fit_rows: Optional[pd.Series]
+        当てはめに使う行 (学習用の行の印). None は全ての行
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        手順をかけた表
+
+    Raises
+    ----------
+    ValueError
+        手順が失敗した場合 (番号と手順の名前を添える)
+    """
+    # auto の列を役割を除いて 1 度だけ決め, 推論のときも同じ列を使う
+    step = STEPS[spec["op"]]
+    params = {k: v for k, v in spec.items() if k not in ("op", "state")}
+    try:
+        if "columns" in step.params and spec["op"] != "drop_missing":
+            params["columns"] = resolve_columns(
+                frame, params.get("columns"), roles,
+                WANT.get(spec["op"], "numeric")
+            )
+        state: dict = {}
+        if step.fit is not None:
+            rows = frame if fit_rows is None else frame[fit_rows]
+            if rows.empty:
+                raise ValueError("当てはめる学習用の行がありません")
+            state = to_plain(step.fit(rows, params, roles))
+        if "columns" in params:
+            state["columns"] = params["columns"]
+        spec["state"] = state
+        result = step.apply(frame, params, state)
+    except (KeyError, ValueError, TypeError) as error:
+        raise ValueError(
+            f"手順 {number} ({spec['op']}) で失敗しました: {error}"
+        ) from error
+
+    return result
+
+
+def apply_recipe(
+    data: Data, recipe: dict, upto: Optional[int] = None
+) -> tuple[pd.DataFrame, dict]:
+    """
+    分割と手順を順にかける関数
+
+    値を学ぶ最初の手順より前の手順 (列や行を落とす, 過去の値の列など) は
+    分割の前に全体にかける (分割をまたぐ重複も落とせる). それ以降は,
+    値を学ぶ手順を学習用の行だけで当てはめる
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        読み込んだレシピ (当てはめた値を各手順の state に書き込む)
     upto: Optional[int] = None
         この数の手順までかける (None は全て)
 
     Returns
     ----------
     result: pd.DataFrame
-        手順をかけた表
+        分割の列 (SPLIT_COLUMN) を持つ, 手順をかけた表
+    roles: dict
+        目的の列を含む列の役割
     """
-    # 手順ごとに当てはめと適用
-    result = frame
-    steps = recipe["steps"][:upto] if upto is not None else recipe["steps"]
-    for number, spec in enumerate(steps, 1):
-        step = STEPS[spec["op"]]
-        params = {k: v for k, v in spec.items() if k not in ("op", "state")}
-        try:
-            if step.fit is not None:
-                train = result[result[SPLIT_COLUMN] == "train"]
-                spec["state"] = to_plain(step.fit(train, params, roles))
-            result = step.apply(result, params, spec.get("state", {}))
-        except (KeyError, ValueError, TypeError) as error:
-            raise ValueError(
-                f"手順 {number} ({spec['op']}) で失敗しました: {error}"
-            ) from error
+    # 目的の列の欠損の行を落とす
+    target = recipe.get("target") or data.roles.get("target")
+    roles = {**data.roles, "target": target} if target else dict(data.roles)
+    frame = data.frame.copy()
+    frame.columns = [str(name) for name in frame.columns]
+    if target:
+        if target not in frame.columns:
+            raise ValueError(f"目的の列 {target} がありません")
+        frame = frame[frame[target].notna()]
+    steps = recipe["steps"] if upto is None else recipe["steps"][:upto]
 
-    return result
+    # 分割の前の手順, 分割, 分割の後の手順. 時刻の順の分割に使う日時は,
+    # 手順で日時の列を落としても使えるように別の列に写しておく
+    time = roles.get("time")
+    if time and time in frame.columns:
+        frame[TIME_COLUMN] = frame[time]
+    head = first_fit(steps)
+    for number, spec in enumerate(steps[:head], 1):
+        frame = run_step(frame, spec, roles, number, None)
+    if frame.empty:
+        raise ValueError("手順の後に行が残りませんでした")
+    split_roles = {**roles, "time": TIME_COLUMN} if time else roles
+    frame[SPLIT_COLUMN] = assign_splits(frame, recipe["split"], split_roles)
+    frame = frame.drop(columns=[TIME_COLUMN], errors="ignore")
+    for number, spec in enumerate(steps[head:], head + 1):
+        frame = run_step(
+            frame, spec, roles, number, frame[SPLIT_COLUMN] == "train"
+        )
+    result = frame
+
+    return result, roles
+
+
+def sorted_classes(values: pd.Series) -> list[str]:
+    """
+    分類のクラスを, 元の値の順 (数なら数の順) に並べる関数
+
+    Parameters
+    ----------
+    values: pd.Series
+        目的の列
+
+    Returns
+    ----------
+    classes: list[str]
+        クラスの文字 (category_key の形)
+    """
+    # 数として並べられれば数の順, そうでなければ文字の順
+    unique = values.dropna().unique().tolist()
+    try:
+        unique = sorted(unique, key=float)
+    except (TypeError, ValueError):
+        unique = sorted(unique, key=str)
+    classes = list(dict.fromkeys(category_key(value) for value in unique))
+
+    return classes
 
 
 def prepare(
@@ -209,25 +423,35 @@ def prepare(
     ----------
     prepared: Prepared
         分割ごとの表, 当てはめたレシピ, 学習に使う列, クラス
-    """
-    # 目的の列の欠損の行を落としてから分割
-    recipe = load_recipe(recipe)
-    target = recipe.get("target") or data.roles.get("target")
-    roles = {**data.roles, "target": target} if target else dict(data.roles)
-    frame = data.frame.copy()
-    if target:
-        if target not in frame.columns:
-            raise ValueError(f"目的の列 {target} がありません")
-        frame = frame[frame[target].notna()]
-    frame[SPLIT_COLUMN] = assign_splits(frame, recipe["split"], roles)
 
-    # 手順をかけ, 分割ごとに分ける
-    result = run_steps(frame, recipe, roles)
-    classes = []
+    Raises
+    ----------
+    ValueError
+        手順の失敗, 目的の列が手順で消えた場合, 学習用の行が無い場合,
+        回帰の目的の列が数値でない場合
+    """
+    # 分割と手順
+    recipe = load_recipe(recipe)
+    result, roles = apply_recipe(data, recipe)
+    target = roles.get("target")
+    if target and target not in result.columns:
+        raise ValueError(f"目的の列 {target} が手順で消えました")
+    if not (result[SPLIT_COLUMN] == "train").any():
+        raise ValueError("学習用の行がありません (割合か絞り込みを見直す)")
+
+    # 目的の列の形 (分類は番号, 回帰は数値)
+    classes: list = []
     if target and recipe["task"] == "classification":
-        classes = sorted(result[target].astype(str).unique().tolist())
+        classes = sorted_classes(result[target])
         index = {value: number for number, value in enumerate(classes)}
-        result[target] = result[target].astype(str).map(index).astype(int)
+        result[target] = result[target].map(category_key).map(index)
+        result[target] = result[target].astype(int)
+    elif target and recipe["task"] in ("regression", "forecasting"):
+        if not pd.api.types.is_numeric_dtype(result[target]):
+            raise ValueError(
+                f"回帰の目的の列 {target} が数値ではありません "
+                f"({result[target].dtype}). タスクを分類にするか, 型を変える"
+            )
     frames = {
         name: result[result[SPLIT_COLUMN] == name].drop(
             columns=[SPLIT_COLUMN]
@@ -236,8 +460,8 @@ def prepare(
         if (result[SPLIT_COLUMN] == name).any()
     }
 
-    # 学習に使う列と, 数値でない列の注意
-    reserved = {target, roles.get("id"), SPLIT_COLUMN}
+    # 学習に使う列 (役割の列を除く) と, 数値でない列の注意
+    reserved = {target, roles.get("id"), roles.get("time"), SPLIT_COLUMN}
     features = [name for name in result.columns if name not in reserved]
     notes = []
     for name in features:
@@ -249,6 +473,10 @@ def prepare(
             )
         elif result[name].isna().any():
             notes.append(f"{name} に欠損が残っています (impute で埋める)")
+    if target and recipe["task"] == "none":
+        notes.append(
+            "タスクが決まっていません. 目的の列はそのままの値で書き出します"
+        )
     prepared = Prepared(
         frames=frames, recipe=recipe, features=features, target=target,
         classes=classes, notes=notes
@@ -278,17 +506,18 @@ def preview(
     ----------
     result: dict
         前と後の行数, 列, 先頭の行, 足した列と消えた列
+
+    Raises
+    ----------
+    ValueError
+        upto が手順の数の範囲の外の場合
     """
-    # 分割してから, 手順を upto - 1 と upto までかける
-    recipe = load_recipe(recipe)
-    target = recipe.get("target") or data.roles.get("target")
-    roles = {**data.roles, "target": target} if target else dict(data.roles)
-    frame = data.frame.copy()
-    if target and target in frame.columns:
-        frame = frame[frame[target].notna()]
-    frame[SPLIT_COLUMN] = assign_splits(frame, recipe["split"], roles)
-    before = run_steps(frame, load_recipe(recipe), roles, max(upto - 1, 0))
-    after = run_steps(frame, load_recipe(recipe), roles, upto)
+    # 手順を upto - 1 と upto までかける
+    loaded = load_recipe(recipe)
+    if not 0 <= upto <= len(loaded["steps"]):
+        raise ValueError(f"upto は 0 から {len(loaded['steps'])} にして")
+    before, _ = apply_recipe(data, load_recipe(recipe), max(upto - 1, 0))
+    after, _ = apply_recipe(data, load_recipe(recipe), upto)
 
     # 列の差と先頭の行
     before = before.drop(columns=[SPLIT_COLUMN])
@@ -324,7 +553,8 @@ def frame_view(frame: pd.DataFrame, rows: int) -> dict:
     head = frame.head(rows)
     records = [
         [
-            None if pd.isna(value) else (
+            str(value) if isinstance(value, (list, dict, np.ndarray))
+            else None if pd.isna(value) else (
                 value if isinstance(value, (int, float, bool, np.number))
                 else str(value)
             )
@@ -400,18 +630,26 @@ def export_dataset(
     Raises
     ----------
     FileExistsError
-        ディレクトリが既にあり, overwrite が False の場合
+        ディレクトリが既にあり, overwrite が False の場合と, データセット
+        ではない (dataset.yaml の無い) ディレクトリを置き換えようとした場合
     """
-    # 書き出す先の用意
+    # 置き換えられるのは, 前に書き出したデータセットだけ
     target = Path(path).expanduser()
     if target.exists():
         if not overwrite:
             raise FileExistsError(f"{target} は既にあります")
+        if not (target / "dataset.yaml").is_file():
+            raise FileExistsError(
+                f"{target} はデータセットではないので置き換えません"
+            )
+
+    # 前処理を先に済ませ, 隣の一時ディレクトリに書いてから入れ替える
+    prepared = prepare(data, recipe)
+    final = target
+    target = final.with_name(f".{final.name}.writing")
+    if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
-
-    # 前処理と, 分割ごとの保存
-    prepared = prepare(data, recipe)
     splits = {}
     for split, frame in prepared.frames.items():
         splits[split] = {
@@ -429,7 +667,7 @@ def export_dataset(
     reference = prepared.frames.get("train", first)
     info = {
         "format_version": DATASET_FORMAT_VERSION,
-        "name": name or target.name,
+        "name": name or final.name,
         "created_at": dt.datetime.now().astimezone().isoformat(),
         "kind": data.kind,
         "task": prepared.recipe["task"],
@@ -448,6 +686,9 @@ def export_dataset(
         yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
         encoding="utf-8"
     )
+    if final.exists():
+        shutil.rmtree(final)
+    target.rename(final)
 
     return info
 
@@ -544,15 +785,22 @@ class Dataset:
         result: pd.DataFrame
             学習に使う列だけの表 (当てはめた値をそのまま使う)
         """
-        # 当てはめ直さずに, 保存した値で手順を順にかける
+        # 当てはめ直さずに, 保存した値と列で手順を順にかける. 行を増減
+        # する手順と, 目的の列にかける手順は飛ばす (入力と行をそろえる)
         result = frame.copy()
+        result.columns = [str(name) for name in result.columns]
         for spec in self.recipe["steps"]:
+            step = STEPS[spec["op"]]
+            state = spec.get("state", {})
+            columns = state.get("columns", [])
+            if step.changes_rows or (self.target and self.target in columns):
+                continue
             params = {
                 k: v for k, v in spec.items() if k not in ("op", "state")
             }
-            result = STEPS[spec["op"]].apply(
-                result, params, spec.get("state", {})
-            )
+            if "columns" in state:
+                params["columns"] = [c for c in columns if c in result]
+            result = step.apply(result, params, state)
         result = result[[c for c in self.features if c in result.columns]]
 
         return result
