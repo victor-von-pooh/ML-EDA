@@ -792,7 +792,7 @@ class Dataset:
         items = self.info["splits"][split].get("items")
         x = (
             np.load(self.path / items, allow_pickle=False) if items
-            else frame[self.features].to_numpy(dtype=np.float32)
+            else frame[self.features].to_numpy(dtype=np.float32, copy=True)
         )
         y = None
         if self.target:
@@ -800,7 +800,8 @@ class Dataset:
                 np.int64 if self.info["task"] == "classification"
                 else np.float32
             )
-            y = frame[self.target].to_numpy(dtype=dtype)
+            # 書き込める配列にする (PyTorch のテンソルにそのまま渡せるように)
+            y = frame[self.target].to_numpy(dtype=dtype, copy=True)
 
         return x, y
 
