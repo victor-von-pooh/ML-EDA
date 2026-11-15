@@ -524,3 +524,72 @@ def test_excel_sheets(tmp_path: Path) -> None:
     pd.DataFrame({"a": [1, 2]}).to_excel(single, index=False)
     codes = [item["code"] for item in profile(load_data(single))["findings"]]
     assert "multiple_sheets" not in codes
+
+
+def test_time_lag() -> None:
+    """
+    時刻でずらす lag (抜けを挟んでも暦でずらす) を確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 店 A は 1 月 3 日が休み. 並びは時刻の順でなくてよい
+    frame = pd.DataFrame({
+        "date": pd.to_datetime([
+            "2024-01-05", "2024-01-01", "2024-01-02", "2024-01-04",
+            "2024-01-01", "2024-01-02", "2024-01-03",
+        ]),
+        "shop": ["A", "A", "A", "A", "B", "B", "B"],
+        "v": [5.0, 1.0, 2.0, 4.0, 10.0, 20.0, 30.0],
+    })
+    params = {
+        "columns": ["v"], "lags": [1, 2], "windows": [2], "by": ["shop"],
+        "time": "date", "freq": "1D",
+    }
+    result = apply_lag(frame, params, {})
+    a = result[result["shop"] == "A"].set_index("date")
+    # 休みの翌日の 1 つ前は, 休みより前の最も近い値 (2 日の 2)
+    assert a.loc["2024-01-04", "v_lag1"] == 2.0
+    assert a.loc["2024-01-05", "v_lag2"] == 2.0
+    # 2 日の移動平均は, その日を含めない直前の 2 日にある値だけ
+    assert a.loc["2024-01-05", "v_mean2"] == 4.0
+    assert np.isnan(a.loc["2024-01-01", "v_lag1"])
+    # 系列をまたがない
+    b = result[result["shop"] == "B"].set_index("date")
+    assert b.loc["2024-01-03", "v_mean2"] == 15.0
+    assert list(result.index) == list(frame.index)
+
+    # exact は, その時刻が無ければ欠損
+    exact = apply_lag(frame, {**params, "match": "exact"}, {})
+    assert np.isnan(exact.loc[3, "v_lag1"])
+
+    # 同じ時刻の行は移動平均に全て入れる (1 と 10 の平均)
+    twice = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02"]),
+        "v": [1.0, 10.0, 3.0],
+    })
+    doubled = apply_lag(twice, {
+        "columns": ["v"], "lags": [1], "windows": [2], "time": "date",
+    }, {})
+    assert doubled.loc[2, "v_mean2"] == 5.5 and doubled.loc[2, "v_lag1"] == 10
+
+    # 書き方の混ざった文字の日付も読む
+    mixed = twice.assign(date=["2024/01/01", "2024-01-01", "2024-01-02 00:00"])
+    assert apply_lag(mixed, {
+        "columns": ["v"], "lags": [1], "time": "date",
+    }, {}).loc[2, "v_lag1"] == 10
+
+    # 読めない間隔, 空の間隔, 数値でない列, 時刻の列が無い場合は誤り
+    with pytest.raises(ValueError, match="freq"):
+        apply_lag(frame, {**params, "freq": "毎日"}, {})
+    with pytest.raises(ValueError, match="freq"):
+        apply_lag(frame, {**params, "freq": None}, {})
+    with pytest.raises(ValueError, match="数値"):
+        apply_lag(frame, {**params, "columns": ["shop", "v"], "by": []}, {})
+    with pytest.raises(ValueError, match="時刻の列"):
+        apply_lag(frame, {**params, "time": "when"}, {})
