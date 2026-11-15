@@ -340,7 +340,7 @@ def fit_vocabulary(items: list, params: dict) -> dict:
         語彙 (0 は埋め草, 1 は語彙に無い語. 部分語は区切りの JSON の
         tokenizer も)
     """
-    # 部分語は学習用の文で BPE の区切りを作る
+    # 部分語は学習用の文での BPE の区切りの作成
     if params.get("unit", "word") == "subword":
         from ml_eda.textunits import fit_subword, subword_vocabulary
 
@@ -349,6 +349,8 @@ def fit_vocabulary(items: list, params: dict) -> dict:
             [str(item).lower() if lower else str(item) for item in items],
             int(params.get("max_tokens", 8000))
         )
+        # 語彙の並びは区切りの JSON と重なるが, 番号を語に戻す使い手の
+        # ため (前と後の表示, 語彙の大きさ) の保存
         return {
             "vocabulary": subword_vocabulary(serialized),
             "tokenizer": serialized,
@@ -414,7 +416,7 @@ def encode_text(text: str, params: dict, state: dict) -> np.ndarray:
     ids: np.ndarray
         (length,) の int64 の配列 (短い場合は 0 で埋め, 長い場合は切る)
     """
-    # 長さに切り, 短い場合は 0 で埋める
+    # 長さで切り, 短い場合は 0 で埋めた並び
     length = int(params.get("length", 128))
     tokens = encode_tokens(text, params, state)[:length]
     ids = np.zeros(length, dtype=np.int64)
@@ -441,7 +443,7 @@ def encode_tokens(text: str, params: dict, state: dict) -> list[int]:
     ids: list[int]
         語の番号 (語彙に無い語は 1)
     """
-    # 部分語は保存した区切りで分ける
+    # 部分語は保存した区切りでの分割
     if params.get("unit", "word") == "subword":
         from ml_eda.textunits import subword_tokenizer
 

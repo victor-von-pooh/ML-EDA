@@ -8,7 +8,9 @@ from ml_eda import (
     compare_tokenizers, export_dataset, load_data, load_dataset, profile,
     textunits
 )
-from ml_eda.itemprep import check_item_steps, encode_tokens
+from ml_eda.itemprep import (
+    check_item_steps, encode_tokens, fit_vocabulary
+)
 
 # 部分語の試験は tokenizers が要る
 needs_subword = pytest.mark.skipif(
@@ -32,7 +34,7 @@ def japanese_reviews(count: int, seed: int = 0) -> list[str]:
     texts: list[str]
         空白で区切らない文
     """
-    # 同じ句が何度も出る (部分語で短くなる)
+    # 同じ句の繰り返し (部分語で短くなる)
     rng = np.random.default_rng(seed)
     subjects = ["本体は", "配送は", "説明書は", "付属品は", "梱包は"]
     states = ["問題なかった", "期待通りではない", "しっかりしている",
@@ -60,10 +62,10 @@ def test_compare_char_for_few_kinds() -> None:
     ----------
     None
     """
-    # 文字がばらばらな短い文は, どの区切り方でも長さが変わらない
+    # 1 文字ずつ空白で区切った文は, どの区切り方でも短くならない
     rng = np.random.default_rng(0)
     letters = list("abcdefghij")
-    texts = ["".join(rng.choice(letters, 6)) for _ in range(300)]
+    texts = [" ".join(rng.choice(letters, 6)) for _ in range(300)]
     result = compare_tokenizers(texts)
     units = [c["unit"] for c in result["candidates"]]
     assert units[:2] == ["char", "word"]
@@ -72,9 +74,50 @@ def test_compare_char_for_few_kinds() -> None:
     assert char["tokens_p95"] == 6.0 and char["length"] == 8
     assert result["recommended"]["unit"] == "char"
 
-    # 空の文だけなら勧めない
+    # 空の文だけなら, 勧めも注意も無し
     empty = compare_tokenizers(["", "  "])
     assert empty["recommended"] is None and empty["candidates"] == []
+    assert empty["notes"] == []
+
+
+def test_recommend_rule() -> None:
+    """
+    勧め方の境目 (ちょうど 2 割, 語彙に無い語が 1 % を超える場合) を
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 語彙の小さい順にたどり, ちょうど 2 割短ければ大きい語彙へ
+    def make(unit: str, vocabulary: int, p95: float, unknown: float) -> dict:
+        return {
+            "unit": unit, "vocabulary": vocabulary, "tokens_p95": p95,
+            "unknown_rate": unknown,
+        }
+
+    char = make("char", 50, 100.0, 0.0)
+    small = make("subword", 500, 80.0, 0.0)
+    large = make("subword", 2000, 70.0, 0.0)
+    best, reason = textunits.recommend([char, small, large])
+    assert best is small and "文字は 100 個" in reason
+    best, _ = textunits.recommend([char, make("subword", 500, 81.0, 0.0)])
+    assert best is char
+
+    # 語彙に無い語が多い候補は外し, 1 つだけ残ればそれ
+    word = make("word", 900, 20.0, 0.05)
+    best, reason = textunits.recommend([char, word])
+    assert best is char and "語彙の最も小さい" not in reason
+    assert "文字だけ" in reason
+    # 全てが多ければ, 最も少ないもの
+    best, reason = textunits.recommend([
+        make("char", 50, 100.0, 0.03), make("word", 900, 20.0, 0.02)
+    ])
+    assert best["unit"] == "word" and "1 % を超える" in reason
 
 
 def test_compare_word_for_english(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,7 +133,7 @@ def test_compare_word_for_english(monkeypatch: pytest.MonkeyPatch) -> None:
     ----------
     None
     """
-    # 部分語が無い場合は, その旨を注意に書く
+    # 部分語が無い場合は, その旨の注意
     monkeypatch.setattr(textunits, "has_subword", lambda: False)
     rng = np.random.default_rng(1)
     words = ["good", "movie", "bad", "story", "acting", "great", "boring"]
@@ -123,7 +166,7 @@ def test_subword_export(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 分析で部分語を勧める (文字より並びが短い)
+    # 分析での部分語の勧め (文字より並びが短い)
     texts = japanese_reviews(600)
     frame = pd.DataFrame({
         "review": texts, "label": ["良い", "悪い"] * 300,
@@ -139,7 +182,7 @@ def test_subword_export(tmp_path: Path) -> None:
     recommended = result["recommended"]
     assert recommended["unit"] == "subword"
 
-    # 勧めた手順で書き出し, 新しい文にも同じ区切りをかける
+    # 勧めた手順での書き出しと, 新しい文への同じ区切り
     recipe = {
         "target": "label", "task": "classification",
         "item_steps": [recommended],
@@ -161,3 +204,10 @@ def test_subword_export(tmp_path: Path) -> None:
     # 部分語の区切りが無い状態は誤り
     with pytest.raises(ValueError, match="区切り"):
         encode_tokens(texts[0], {"unit": "subword"}, {"vocabulary": []})
+
+    # 語彙の上限は文字も含む (多い文字から残し, 外れた文字は語彙に無い語)
+    rare = [chr(0x4e00 + k) for k in range(600)]
+    state = fit_vocabulary(rare + texts, {
+        "unit": "subword", "max_tokens": 100
+    })
+    assert len(state["vocabulary"]) <= 100
