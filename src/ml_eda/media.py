@@ -849,6 +849,19 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
                 ),
                 "columns": ["points"],
             })
+        invalid = frame.get("invalid_points")
+        if invalid is not None and invalid.fillna(0).sum() > 0:
+            # 距離のセンサーの欠けなど. sample_points は有限の点だけを使う
+            clouds = int((invalid.fillna(0) > 0).sum())
+            findings.append({
+                "severity": "info", "code": "invalid_points",
+                "message": (
+                    f"座標が数でない点 (NaN, inf) が {clouds} 件の点群に計 "
+                    f"{int(invalid.fillna(0).sum())} 点あります. "
+                    "sample_points は有限の点だけを使います"
+                ),
+                "columns": ["invalid_points"],
+            })
     else:
         unreadable = 0
     if unreadable:

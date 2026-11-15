@@ -106,6 +106,7 @@ ML-EDA の設計の方針をまとめる.
 | `irregular_interval` | 時系列の時刻の間隔の抜けや重なり |
 | `mixed_sizes` | 大きさやチャンネル数がそろわない画像 |
 | `unreadable_items` | 読めない画像や点群のファイル |
+| `invalid_points` | 座標が数でない点 (NaN, inf) を含む点群 |
 
 画像, 文, 点群では読み込みの表の列 (場所, 幅, 点の範囲など) を学習に使わない (中身を配列にする) ので, 列の気付きは目的の列についてのもの (`class_imbalance`, `target_missing`) だけを出す.
 

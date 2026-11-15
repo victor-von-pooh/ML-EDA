@@ -221,6 +221,12 @@ def test_pointclouds(tmp_path: Path) -> None:
         encoding="ascii"
     )
     (tmp_path / "a.xyz").write_text("0 0 0\n1 1 1\n2 2 2\n", encoding="ascii")
+    (tmp_path / "gap").mkdir()
+    (tmp_path / "gap" / "a.xyz").write_text(
+        "0 0 0\nnan 1 1\n2 2 2\n", encoding="ascii"
+    )
+    gap = profile(load_data(tmp_path / "gap"))
+    assert "invalid_points" in {item["code"] for item in gap["findings"]}
     np.save(tmp_path / "lidar_points.npy", rng.normal(0, 1, (100, 4)))
     for name in ("a.pcd", "a.xyz", "lidar_points.npy"):
         assert load_data(tmp_path / name).kind == "pointcloud", name
