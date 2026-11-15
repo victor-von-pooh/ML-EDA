@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import numpy as np
+import pandas as pd
 
 # 当てはめに使う学習用の件数の上限 (画像の平均など)
 FIT_SAMPLE = 500
@@ -25,6 +26,8 @@ class ItemStep:
     description: str = ""
     # 当てはめに全ての学習用の件を使うか (語を数えるだけの軽いもの)
     fit_all: bool = False
+    # 省けない引数
+    required: tuple = ()
 
 
 # 中身の手順の登録簿
@@ -475,6 +478,105 @@ def to_array(item: Any, kind: str) -> np.ndarray:
     return array
 
 
+def check_item_steps(steps: Any, kind: str) -> None:
+    """
+    中身の手順の並びを, 中身を読まずに確かめる関数
+
+    Parameters
+    ----------
+    steps: Any
+        item_steps
+    kind: str
+        種類
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        並びでない, 知らない手順, 種類に合わない手順, 引数が足りない,
+        文に vocabulary が無い場合
+    """
+    # 1 つずつ, 名前と種類と省けない引数を確かめる
+    if not isinstance(steps, list):
+        raise ValueError("item_steps は手順の並び (リスト) にしてください")
+    for spec in steps:
+        op = spec.get("op") if isinstance(spec, dict) else spec
+        step = ITEM_STEPS.get(op) if isinstance(op, str) else None
+        if step is None or step.kind != kind:
+            raise ValueError(f"{kind} に使えない中身の手順です: {op}")
+        missing = [name for name in step.required if spec.get(name) is None]
+        if missing:
+            raise ValueError(
+                f"{op} の引数 {', '.join(missing)} を決めてください"
+            )
+
+    # 文は語彙で番号にしないと学習に渡せない
+    if kind == "text" and not any(s["op"] == "vocabulary" for s in steps):
+        raise ValueError("文は vocabulary の手順で番号の並びにしてください")
+
+
+def item_notes(frame: pd.DataFrame, steps: list, kind: str) -> list[str]:
+    """
+    読み込みの表 (大きさ, 色の形式, 点の数, 読めない件) から, 書き出しで
+    失敗しそうなことを中身を読まずに挙げる関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        書き出す件の, 読み込みの表の行
+    steps: list
+        item_steps
+    kind: str
+        種類
+
+    Returns
+    ----------
+    notes: list[str]
+        注意
+    """
+    # 読めない件 (画像は大きさが欠損, 点群は error がある件)
+    ops = {spec["op"] for spec in steps}
+    notes = []
+    unreadable = 0
+    if kind == "image" and "width" in frame.columns:
+        unreadable = int(frame["width"].isna().sum())
+    elif "error" in frame.columns:
+        unreadable = int(frame["error"].notna().sum())
+    if unreadable:
+        how = "width が notna" if kind == "image" else "error が isna"
+        notes.append(
+            f"読めない件が {unreadable} 件あります. 書き出しで失敗するので, "
+            f"表の手順 filter_rows ({how}) で除いてください"
+        )
+
+    # 形がそろわない (大きさ, 色の形式, 点の数)
+    readable = frame.dropna(subset=["width"]) if (
+        kind == "image" and "width" in frame.columns
+    ) else frame
+    if kind == "image" and "resize" not in ops and len(
+        readable.groupby(["width", "height"])
+    ) > 1:
+        notes.append("画像の大きさがそろっていません. resize を足してください")
+    if kind == "image" and not ops & {"rgb", "grayscale"} and (
+        "channels" in readable.columns and readable["channels"].nunique() > 1
+    ):
+        notes.append(
+            "灰色とカラーの画像が混ざっています. rgb か grayscale を"
+            "足してください"
+        )
+    if kind == "pointcloud" and "sample_points" not in ops and (
+        "points" in readable.columns and readable["points"].nunique() > 1
+    ):
+        notes.append(
+            "点の数がそろっていません. sample_points を足してください"
+        )
+
+    return notes
+
+
 def run_item_steps(
     load: Callable[[int], Any], train: list[int], splits: dict,
     steps: list, kind: str, out_dir: Optional[Any] = None, seed: int = 0
@@ -510,15 +612,8 @@ def run_item_steps(
     ValueError
         知らない手順, 種類に合わない手順, 形のそろわない中身の場合
     """
-    # 手順の確認 (文は語彙で番号にしないと学習に渡せない)
-    for spec in steps:
-        step = ITEM_STEPS.get(spec.get("op"))
-        if step is None or step.kind != kind:
-            raise ValueError(
-                f"{kind} に使えない中身の手順です: {spec.get('op')}"
-            )
-    if kind == "text" and not any(s["op"] == "vocabulary" for s in steps):
-        raise ValueError("文は vocabulary の手順で番号の並びにしてください")
+    # 手順の確認
+    check_item_steps(steps, kind)
 
     # 前から順に, 学習用の無作為な見本 (語彙は全て) で当てはめる
     rng = np.random.default_rng(seed)
@@ -642,7 +737,8 @@ def register_builtin_item_steps() -> None:
     # 画像
     register_item_step(ItemStep(
         "resize", "image", None, resize,
-        {"width": "幅", "height": "高さ"}, "画像の大きさをそろえる"
+        {"width": "幅", "height": "高さ"}, "画像の大きさをそろえる",
+        required=("width", "height")
     ))
     register_item_step(ItemStep(
         "grayscale", "image", None, grayscale, {}, "灰色 (1 チャンネル) にする"
@@ -670,7 +766,7 @@ def register_builtin_item_steps() -> None:
     register_item_step(ItemStep(
         "sample_points", "pointcloud", None, sample_points,
         {"points": "そろえる点の数", "seed": "乱数のシード"},
-        "点の数をそろえる (間引きと重ね)"
+        "点の数をそろえる (間引きと重ね)", required=("points",)
     ))
     register_item_step(ItemStep(
         "normalize_cloud", "pointcloud", None, normalize_cloud, {},

@@ -9,7 +9,9 @@ import pandas as pd
 import yaml
 
 from ml_eda.data import Data
-from ml_eda.itemprep import apply_steps, run_item_steps, to_array
+from ml_eda.itemprep import (
+    apply_steps, check_item_steps, item_notes, run_item_steps, to_array
+)
 from ml_eda.profile import to_json
 from ml_eda.recipe import (
     STEPS, WANT, category_key, load_recipe, resolve_columns, to_plain
@@ -23,6 +25,11 @@ SPLIT_COLUMN = "__split__"
 TIME_COLUMN = "__time__"
 ROW_COLUMN = "__row__"
 HIDDEN_COLUMNS = (SPLIT_COLUMN, TIME_COLUMN, ROW_COLUMN)
+
+# 目的の列があるのにタスクを決めていない場合の注意
+NO_TASK_NOTE = (
+    "タスクが決まっていません. 目的の列はそのままの値で書き出します"
+)
 
 # 分割の名前
 SPLITS = ("train", "valid", "test")
@@ -418,7 +425,7 @@ def sorted_classes(values: pd.Series) -> list[str]:
 
 def prepare(
     data: Data, recipe: Union[str, Path, dict],
-    item_dir: Optional[Path] = None
+    item_dir: Optional[Path] = None, read_items: bool = True
 ) -> Prepared:
     """
     レシピで分割と前処理をして, 学習用の表にする関数
@@ -429,6 +436,11 @@ def prepare(
         読み込んだデータ
     recipe: Union[str, Path, dict]
         レシピ
+    item_dir: Optional[Path] = None
+        画像などの配列を書くディレクトリ (指定しなければメモリに置く)
+    read_items: bool = True
+        画像などの中身を読んで配列にするか. False なら中身を読まずに,
+        手順の確認と注意だけをする (画面の前と後の様子に使う)
 
     Returns
     ----------
@@ -478,6 +490,16 @@ def prepare(
     # 画像, 文, 点群は中身の手順で配列にする (表の列は学習に使わない)
     arrays: dict = {}
     if data.item_loader is not None:
+        check_item_steps(recipe["item_steps"], data.kind)
+        rows = data.frame.iloc[result[ROW_COLUMN].tolist()]
+        notes = item_notes(rows, recipe["item_steps"], data.kind)
+        if target and recipe["task"] == "none":
+            notes.append(NO_TASK_NOTE)
+        if not read_items:
+            return Prepared(
+                frames=frames, recipe=recipe, features=[], target=target,
+                classes=classes, notes=notes
+            )
         arrays = run_item_steps(
             item_reader(data), positions.get("train", []), positions,
             recipe["item_steps"], data.kind, item_dir,
@@ -485,7 +507,7 @@ def prepare(
         )
         prepared = Prepared(
             frames=frames, recipe=recipe, features=[], target=target,
-            classes=classes, arrays=arrays
+            classes=classes, notes=notes, arrays=arrays
         )
         return prepared
 
@@ -506,9 +528,7 @@ def prepare(
         elif result[name].isna().any():
             notes.append(f"{name} に欠損が残っています (impute で埋める)")
     if target and recipe["task"] == "none":
-        notes.append(
-            "タスクが決まっていません. 目的の列はそのままの値で書き出します"
-        )
+        notes.append(NO_TASK_NOTE)
     prepared = Prepared(
         frames=frames, recipe=recipe, features=features, target=target,
         classes=classes, notes=notes

@@ -306,3 +306,58 @@ def test_review_fixes(tmp_path: Path) -> None:
     # 大文字と記号付きの文字の語は切らない. 日本語は 1 文字ずつ
     assert tokenize("Hello café", {"lowercase": False}) == ["Hello", "café"]
     assert tokenize("猫が好き", {}) == ["猫", "が", "好", "き"]
+
+
+def test_item_checks(tmp_path: Path) -> None:
+    """
+    中身を読まずに, 中身の手順の誤りと書き出しで失敗しそうなことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    from ml_eda import prepare
+
+    # 大きさの混ざる画像と, 読めない 1 枚
+    write_images(tmp_path / "pets")
+    (tmp_path / "pets" / "cat" / "bad.png").write_bytes(b"not an image")
+    data = load_data(tmp_path / "pets")
+    recipe = {
+        "target": "label", "task": "classification",
+        "split": {"method": "stratified", "valid": 0.25},
+    }
+
+    # 誤った手順は中身を読まずに誤り
+    for steps, message in (
+        ("resize", "リスト"),
+        ([{"op": "sample_points", "points": 8}], "使えない"),
+        ([{"op": "resize", "width": 8}], "height"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            prepare(data, {**recipe, "item_steps": steps}, read_items=False)
+
+    # 読めない件と大きさのばらつきの注意. 配列は作らない
+    prepared = prepare(
+        data, {**recipe, "item_steps": [{"op": "normalize"}]},
+        read_items=False
+    )
+    assert prepared.arrays == {}
+    assert len(prepared.notes) == 2
+    assert "1 件" in prepared.notes[0] and "resize" in prepared.notes[1]
+
+    # 読めない件を除き, 大きさをそろえれば注意は無い
+    recipe["steps"] = [
+        {"op": "filter_rows", "column": "width", "compare": "notna"}
+    ]
+    recipe["item_steps"] = [{"op": "resize", "width": 8, "height": 8}]
+    assert prepare(data, recipe, read_items=False).notes == []
+
+    # タスクを決めていなければ注意
+    recipe["task"] = "none"
+    assert "タスク" in prepare(data, recipe, read_items=False).notes[0]
