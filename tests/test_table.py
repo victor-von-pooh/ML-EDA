@@ -10,6 +10,7 @@ from ml_eda import (
     load_dataset, load_recipe, prepare, preview, profile
 )
 from ml_eda.loaders import table_kind, to_datetime, to_numbers
+from ml_eda.pipeline import assign_splits
 from ml_eda.recipe import apply_lag
 
 
@@ -405,3 +406,30 @@ def test_review_fixes_units_panel() -> None:
     )
     assert result["y_lag1"].tolist()[2:] == [1.0, 2.0]
 
+
+
+def test_time_split_keeps_same_time_together() -> None:
+    """
+    時刻の順の分割で, 同じ時刻の行が学習用と検証用にまたがらないことを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 3 店の 10 日分 (30 行) を 2 割で分けると, 境目が日の途中になる
+    frame = pd.DataFrame({
+        "date": np.repeat(pd.date_range("2024-01-01", periods=10), 3),
+        "store": ["a", "b", "c"] * 10,
+    })
+    labels = assign_splits(
+        frame, {"method": "time", "valid": 0.25}, {"time": "date"}
+    )
+    per_day = frame.assign(split=labels).groupby("date")["split"].nunique()
+    assert (per_day == 1).all()
+    last_train = frame["date"][labels == "train"].max()
+    assert last_train < frame["date"][labels == "valid"].min()

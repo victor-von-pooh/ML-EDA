@@ -164,9 +164,10 @@ def assign_splits(
         time = roles.get("time")
         if not time:
             raise ValueError("時刻の順の分割には日時の列が要ります")
-        times = pd.to_datetime(frame[time], utc=True).to_numpy()
-        order = np.argsort(times, kind="stable")
-        return label_by_position(frame.index, order, n_valid, n_test)
+        times = pd.to_datetime(frame[time], utc=True)
+        order = np.argsort(times.to_numpy(), kind="stable")
+        labels = label_by_position(frame.index, order, n_valid, n_test)
+        return align_to_time(labels, times)
 
     # グループごとに同じ分割にする (行の件数が割合に近くなるまで加える)
     if method == "group":
@@ -219,6 +220,38 @@ def assign_splits(
     assigned = label_by_position(frame.index, order, n_valid, n_test)
 
     return assigned
+
+
+def align_to_time(labels: pd.Series, times: pd.Series) -> pd.Series:
+    """
+    同じ時刻の行が分割をまたがないように, 分割の境目を時刻にそろえる関数
+
+    店ごとの売上のように同じ時刻の行が複数ある場合, 件数で切ると境目の
+    時刻が学習用と検証用の両方に入る (同じ日の他の店の値を学習に使う).
+    境目の時刻の行は, 後ろの分割にそろえる
+
+    Parameters
+    ----------
+    labels: pd.Series
+        件数で決めた行ごとの分割の名前
+    times: pd.Series
+        行ごとの時刻 (欠損は件数で決めた分割のまま)
+
+    Returns
+    ----------
+    aligned: pd.Series
+        時刻ごとに 1 つの分割にした名前
+    """
+    # 時刻ごとに, その時刻の行の中で最も後ろの分割にそろえる
+    rank = {"train": 0, "valid": 1, "test": 2}
+    names = ["train", "valid", "test"]
+    known = times.notna()
+    level = labels.map(rank)
+    latest = level[known].groupby(times[known]).transform("max")
+    aligned = labels.copy()
+    aligned[known] = latest.map(lambda k: names[int(k)])
+
+    return aligned
 
 
 def label_by_position(
