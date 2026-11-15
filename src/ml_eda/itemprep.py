@@ -610,11 +610,12 @@ def fit_item_steps(
         rng.choice(train, limit, replace=False).tolist()
         if len(train) > limit else list(train)
     )
-    every = (
-        rng.choice(train, limit_all, replace=False).tolist()
-        if limit_all is not None and len(train) > limit_all
-        else list(train)
-    )
+    if limit_all is None or len(train) <= limit_all:
+        every = list(train)
+    elif limit_all <= len(sample):
+        every = sample[:limit_all]
+    else:
+        every = rng.choice(train, limit_all, replace=False).tolist()
     for number, spec in enumerate(steps):
         step = ITEM_STEPS[spec["op"]]
         if step.fit is None:

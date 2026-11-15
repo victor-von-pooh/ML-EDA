@@ -2,9 +2,12 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from ml_eda import detect, export_dataset, load_data, load_dataset, profile
+from ml_eda import (
+    detect, export_dataset, load_data, load_dataset, preview_items, profile
+)
 
 PIL = pytest.importorskip("PIL.Image")
 
@@ -379,8 +382,6 @@ def test_preview_items(tmp_path: Path) -> None:
     ----------
     None
     """
-    from ml_eda import preview_items
-
     # 画像は前が元の配列, 後が (チャンネル, 高さ, 幅)
     write_images(tmp_path / "pets")
     data = load_data(tmp_path / "pets")
@@ -397,9 +398,13 @@ def test_preview_items(tmp_path: Path) -> None:
     assert item["after"].shape == (3, 6, 6) and item["label"] in ("cat", "dog")
     assert "state" in result["steps"][1]
 
-    # 表は中身を持たないので誤り
-    import pandas as pd
-
+    # 目的の列を落とす手順は誤り. 表は中身を持たないので誤り
+    dropped = {
+        **recipe, "split": {"method": "random", "valid": 0.25},
+        "steps": [{"op": "drop_columns", "columns": ["label"]}],
+    }
+    with pytest.raises(ValueError, match="消えました"):
+        preview_items(data, dropped)
     pd.DataFrame({"a": [1, 2]}).to_csv(tmp_path / "t.csv", index=False)
     with pytest.raises(ValueError, match="中身"):
         preview_items(load_data(tmp_path / "t.csv"), {"steps": []})
