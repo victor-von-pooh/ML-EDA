@@ -1,5 +1,6 @@
 import csv
 import json
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -11,6 +12,15 @@ from ml_eda.data import Data
 
 # 中身の推定に読む先頭のバイト数
 SNIFF_BYTES = 64 * 1024
+
+# 数の前に付けてよい通貨の記号と, 後に付けてよい単位 (これ以外の文字が
+# 付いた値は, 型番や ID かもしれないので数にしない)
+CURRENCIES = "¥$€£"
+UNITS = (
+    "万円", "千円", "円", "ドル", "%", "個", "件", "人", "本", "回", "点", "歳",
+    "冊", "台", "枚", "杯", "時間", "分", "秒", "日", "kg", "mg", "g", "km",
+    "cm", "mm", "m", "mL", "ml", "L"
+)
 
 # 試す文字コード (日本語の csv によくあるものを含む)
 ENCODINGS = ("utf-8-sig", "utf-8", "cp932", "euc-jp", "latin-1")
@@ -291,6 +301,41 @@ def guess_delimiter(text: str) -> str:
     return delimiter
 
 
+def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
+    """
+    日時の列と組にすると行が重ならない, 系列を分ける列を探す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        表
+    time: str
+        日時の列
+
+    Returns
+    ----------
+    name: Optional[str]
+        文字の列で, 値が 2 から 200 種類, 1 つの値あたり平均 10 行以上,
+        日時の列との組の重なりが 5 % 未満の最初の列. 無ければ None
+    """
+    # 系列ごとに十分な長さがあり, 同じ系列の中で時刻が重ならない列
+    if frame[time].nunique() < 10:
+        return None
+    for name in frame.columns:
+        column = frame[name]
+        if name == time or pd.api.types.is_numeric_dtype(column) or (
+            pd.api.types.is_datetime64_any_dtype(column)
+        ):
+            continue
+        count = column.nunique()
+        if 2 <= count <= 200 and len(frame) / count >= 10 and (
+            frame.duplicated([time, name]).mean() < 0.05
+        ):
+            return str(name)
+
+    return None
+
+
 def table_kind(frame: pd.DataFrame) -> tuple[str, dict]:
     """
     表が時系列かを推定し, 日時の列を時刻の順に並べる関数
@@ -322,10 +367,13 @@ def table_kind(frame: pd.DataFrame) -> tuple[str, dict]:
             frame[name] = converted
         else:
             continue
-        # 異なる時刻が多い最初の列を日時の列とする (他の日時の列も変換)
+        # 異なる時刻が多い最初の列を日時の列とする (他の日時の列も変換).
+        # 店ごとの売上のように, 系列を分ける列と組にすると時刻が重ならない
+        # 場合も日時の列とする
         valid = converted.dropna()
         if "time" not in roles and len(valid) >= 3 and (
             valid.nunique() >= 0.5 * len(valid)
+            or panel_of(frame, str(name)) is not None
         ):
             roles["time"] = str(name)
     kind = "timeseries" if "time" in roles else "table"
@@ -355,6 +403,14 @@ def to_datetime(column: pd.Series) -> Optional[pd.Series]:
     dated = values.str.contains(r"\d[-/:年]\d|\d年|\d{4}-\d", regex=True)
     if dated.mean() < 0.8:
         return None
+    # 2024年1月3日 (と 12時30分) の書き方は, - と : の書き方に直してから読む
+    column = column.where(
+        column.isna(), column.astype(str).str.replace(
+            r"(\d{4})年(\d{1,2})月(\d{1,2})日?", r"\1-\2-\3", regex=True
+        ).str.replace(
+            r"(\d{1,2})時(\d{1,2})分?", r"\1:\2", regex=True
+        )
+    )
     try:
         converted = pd.to_datetime(column, errors="coerce", format="mixed")
         if not pd.api.types.is_datetime64_any_dtype(converted):
@@ -392,18 +448,38 @@ def to_numbers(column: pd.Series) -> Optional[pd.Series]:
     converted: Optional[pd.Series]
         8 割以上が 1,234 の形の数なら変換した列, そうでなければ None
     """
-    # 1,234 や -12,345.6 の形だけを数にする
-    values = column.dropna().astype(str).str.strip()
+    # 1,234 や -12,345.6 の形と, 前後に同じ単位の付いた形 (¥1,200, 1,200円,
+    # 12%, 3.5kg) を数にする. 全角の数字は半角に
+    values = column.dropna().astype(str).map(
+        lambda v: unicodedata.normalize("NFKC", v).strip()
+    )
     if values.empty:
         return None
-    pattern = r"[+-]?\d{1,3}(,\d{3})+(\.\d+)?|[+-]?\d+(\.\d+)?"
-    matched = values.str.fullmatch(pattern)
-    if matched.mean() < 0.8 or not values.str.contains(",").any():
+    number = r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[+-]?\d+(?:\.\d+)?"
+    units = "|".join(UNITS)
+    parts = values.str.extract(
+        rf"^(?P<pre>[{CURRENCIES}]?)\s*(?P<num>{number})\s*"
+        rf"(?P<suf>(?:{units})?)$"
+    )
+    matched = parts["num"].notna()
+    affix = (parts["pre"].fillna("") + "|" + parts["suf"].fillna(""))[matched]
+    if matched.mean() < 0.8 or affix.empty:
         return None
-    converted = pd.to_numeric(
-        column.astype(str).str.replace(",", "", regex=False),
+    common = affix.value_counts()
+    unit = common.index[0]
+    if common.iloc[0] < 0.8 * len(values):
+        return None
+    if unit == "|" and not values.str.contains(",").any():
+        return None
+    keep = matched & (
+        parts["pre"].fillna("") + "|" + parts["suf"].fillna("") == unit
+    )
+    numbers = pd.to_numeric(
+        parts["num"].where(keep).str.replace(",", "", regex=False),
         errors="coerce"
-    ).where(column.notna())
+    )
+    converted = pd.Series(np.nan, index=column.index, dtype=float)
+    converted[numbers.index] = numbers
 
     return converted
 

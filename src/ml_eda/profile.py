@@ -764,6 +764,45 @@ def find_period(acf: list[float]) -> Optional[int]:
     return None
 
 
+def series_column(
+    frame: pd.DataFrame, time: str, columns: dict
+) -> Optional[str]:
+    """
+    同じ時刻に複数の系列が並ぶ表で, 系列を分ける列を見つける関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        時刻の順に並んだ表
+    time: str
+        日時の列
+    columns: dict
+        列ごとの分析の結果
+
+    Returns
+    ----------
+    name: Optional[str]
+        系列を分ける列 (カテゴリの列で, その列と時刻の組がほぼ重ならない
+        もの. 重なりが最も少ない列). 同じ時刻がほとんど無ければ None
+    """
+    # 同じ時刻が 2 割未満なら 1 つの系列
+    if frame[time].duplicated().mean() < 0.2:
+        return None
+    best, fewest = None, 0.05
+    for name, info in columns.items():
+        if name == time or info["type"] not in (
+            "categorical", "id", "boolean"
+        ) or not (
+            2 <= info["unique"] <= 1000
+        ):
+            continue
+        overlap = float(frame.duplicated([time, name]).mean())
+        if overlap < fewest:
+            best, fewest = name, overlap
+
+    return best
+
+
 def describe_timeseries(
     frame: pd.DataFrame, time: str, columns: dict,
     full_time: Optional[pd.Series] = None
@@ -788,6 +827,14 @@ def describe_timeseries(
         間隔 (秒), 抜けと重なりの数, 列ごとの周期の候補と自己相関,
         間引いた系列
     """
+    # 店ごとの売上のように, 複数の系列が同じ時刻に並ぶ場合は, 系列を分ける
+    # 列を見つけ, 間隔と自己相関は最も長い 1 つの系列で求める
+    by = series_column(frame, time, columns)
+    if by is not None:
+        largest = frame[by].value_counts().index[0]
+        frame = frame[frame[by] == largest]
+        full_time = None
+
     # 間隔と, 抜け (最も多い間隔の 1.5 倍より長い) と重なり
     source = full_time if full_time is not None else frame[time]
     times = as_datetime(source).dropna().sort_values()
@@ -822,6 +869,8 @@ def describe_timeseries(
     }
     result = {
         "time_column": time,
+        "series_by": by,
+        "series_count": int(columns[by]["unique"]) if by else 1,
         "interval_seconds": interval,
         "gaps": gaps,
         "duplicates": duplicates,
@@ -904,8 +953,18 @@ def find_issues(result: dict, target: Optional[str]) -> list[dict]:
     if result["target"]:
         findings.extend(target_issues(result, target))
 
-    # 時系列の間隔
+    # 複数の系列と, 時系列の間隔
     series = result["timeseries"]
+    if series and series.get("series_by"):
+        by = series["series_by"]
+        findings.append(finding(
+            "warning", "panel_series",
+            f"{by} ごとの {series['series_count']} 本の系列が同じ時刻に"
+            "並んでいます. ずらしや移動平均は lag の by に "
+            f"[{by}] を書いて系列ごとにしてください (書かないと, 別の系列の"
+            "値をずらして使います). 間隔と自己相関は最も長い系列で求めました",
+            [by]
+        ))
     if series and (series["gaps"] or series["duplicates"]):
         findings.append(finding(
             "warning", "irregular_interval",

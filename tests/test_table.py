@@ -302,3 +302,58 @@ def test_recipe_errors() -> None:
     assert {step["op"] for step in describe_steps()} >= {
         "impute", "standardize", "one_hot", "lag"
     }
+
+
+def test_units_dates_and_series(tmp_path: Path) -> None:
+    """
+    単位の付いた数, 書き方の混ざった日付, 店ごとの系列 (系列ごとのずらし)
+    を確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 2 店の 30 日分. 売上は円付き, 日付は 3 つの書き方
+    rows = []
+    for store, base in (("A店", 100), ("B店", 1000)):
+        for day in range(30):
+            date = pd.Timestamp("2024-01-01") + pd.Timedelta(days=day)
+            text = (
+                f"{date.year}年{date.month}月{date.day}日" if day % 3 == 0
+                else date.strftime("%Y/%m/%d") if day % 3 == 1
+                else date.strftime("%Y-%m-%d")
+            )
+            rows.append({
+                "date": text, "store": store,
+                "sales": f"{base + day:,}円", "rate": f"{day % 5}%",
+            })
+    pd.DataFrame(rows).sample(frac=1, random_state=0).to_csv(
+        tmp_path / "s.csv", index=False
+    )
+    data = load_data(tmp_path / "s.csv")
+    assert data.kind == "timeseries" and data.roles == {"time": "date"}
+    assert data.frame["sales"].dtype == float
+    assert data.frame["rate"].max() == 4
+
+    # 店ごとの系列の気付きと, 間隔は 1 つの系列で
+    result = profile(data, target="sales")
+    codes = {item["code"] for item in result["findings"]}
+    assert "panel_series" in codes and "irregular_interval" not in codes
+    assert result["timeseries"]["series_by"] == "store"
+
+    # 系列ごとにずらすと, 1 つ前の値は同じ店の前の日
+    recipe = {
+        "target": "sales", "task": "forecasting",
+        "steps": [{"op": "lag", "columns": ["sales"], "lags": [1],
+                   "windows": [2], "by": ["store"]}],
+        "split": {"method": "none"},
+    }
+    frame = prepare(data, recipe).frames["train"]
+    b = frame[frame["store"] == "B店"]
+    assert (b["sales"] - b["sales_lag1"]).dropna().eq(1).all()
+    assert b["sales_mean2"].dropna().min() >= 1000
