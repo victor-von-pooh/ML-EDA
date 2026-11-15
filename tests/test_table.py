@@ -470,3 +470,8 @@ def test_panel_needs_shared_times(tmp_path: Path) -> None:
     })
     shops.to_csv(path, index=False)
     assert load_data(path).roles.get("series") == "shop"
+
+    # 片方の店が後から始まっても (並ぶ時刻が 4 割) 系列
+    late = shops[(shops["shop"] == "A") | (shops.index >= 640)]
+    late.to_csv(path, index=False)
+    assert load_data(path).roles.get("series") == "shop"

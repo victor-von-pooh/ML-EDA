@@ -317,7 +317,7 @@ def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
     ----------
     name: Optional[str]
         文字の列で, 値が 2 から 200 種類, 1 つの値あたり平均 10 行以上,
-        日時の列との組の重なりが 5 % 未満, 半分以上の時刻に 2 つ以上の値が
+        日時の列との組の重なりが 5 % 未満, 1 割以上の時刻に 2 つ以上の値が
         並ぶ最初の列. 無ければ None
     """
     # 系列ごとに十分な長さがあり, 同じ系列の中で時刻が重ならず, 時刻と系列
@@ -342,9 +342,10 @@ def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
         ):
             continue
         # 系列は同じ時刻に並ぶもの (時刻が行ごとに違うレビューのラベルは,
-        # 2 つの値で埋まり方が 5 割になっても系列にしない)
+        # 2 つの値で埋まり方が 5 割になっても系列にしない). 開始日のずれや
+        # 週末だけの営業も系列にするよう, 並ぶ時刻は 1 割以上
         shared = (frame.groupby(time)[name].nunique() >= 2).mean()
-        if shared >= 0.5:
+        if shared >= 0.1:
             return str(name)
 
     return None
