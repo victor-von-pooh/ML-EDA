@@ -568,8 +568,28 @@ def test_time_lag() -> None:
     exact = apply_lag(frame, {**params, "match": "exact"}, {})
     assert np.isnan(exact.loc[3, "v_lag1"])
 
-    # 読めない間隔と, 時刻の列が無い場合は誤り
+    # 同じ時刻の行は移動平均に全て入れる (1 と 10 の平均)
+    twice = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02"]),
+        "v": [1.0, 10.0, 3.0],
+    })
+    doubled = apply_lag(twice, {
+        "columns": ["v"], "lags": [1], "windows": [2], "time": "date",
+    }, {})
+    assert doubled.loc[2, "v_mean2"] == 5.5 and doubled.loc[2, "v_lag1"] == 10
+
+    # 書き方の混ざった文字の日付も読む
+    mixed = twice.assign(date=["2024/01/01", "2024-01-01", "2024-01-02 00:00"])
+    assert apply_lag(mixed, {
+        "columns": ["v"], "lags": [1], "time": "date",
+    }, {}).loc[2, "v_lag1"] == 10
+
+    # 読めない間隔, 空の間隔, 数値でない列, 時刻の列が無い場合は誤り
     with pytest.raises(ValueError, match="freq"):
         apply_lag(frame, {**params, "freq": "毎日"}, {})
+    with pytest.raises(ValueError, match="freq"):
+        apply_lag(frame, {**params, "freq": None}, {})
+    with pytest.raises(ValueError, match="数値"):
+        apply_lag(frame, {**params, "columns": ["shop", "v"], "by": []}, {})
     with pytest.raises(ValueError, match="時刻の列"):
         apply_lag(frame, {**params, "time": "when"}, {})

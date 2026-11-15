@@ -824,7 +824,8 @@ def apply_lag(
     Returns
     ----------
     result: pd.DataFrame
-        列を足した表 (始めの行は欠損になる)
+        列を足した表 (始めの行は欠損になる. 時刻でずらす場合の移動平均は,
+        期間にある値だけの平均で, 値が 1 つでもあれば欠損にならない)
 
     Raises
     ----------
@@ -895,7 +896,10 @@ def apply_time_lag(
     time = str(params["time"])
     if time not in frame.columns:
         raise ValueError(f"時刻の列がありません: {time}")
-    times = pd.to_datetime(frame[time], errors="coerce")
+    column = frame[time]
+    times = column if pd.api.types.is_datetime64_any_dtype(column) else (
+        pd.to_datetime(column, errors="coerce", format="mixed")
+    )
     if times.notna().sum() == 0:
         raise ValueError(f"{time} は日時の列ではありません")
     try:
@@ -903,10 +907,10 @@ def apply_time_lag(
     except ValueError as error:
         raise ValueError(
             f"freq を間隔として読めません: {params.get('freq')} "
-            "(1D, 1h, 30min など)"
+            "(1D, 1h, 30min など. 月や年のような長さの変わる間隔は不可)"
         ) from error
-    if step <= pd.Timedelta(0):
-        raise ValueError("freq は正の間隔にしてください")
+    if pd.isna(step) or step <= pd.Timedelta(0):
+        raise ValueError("freq は正の間隔 (1D, 1h など) にしてください")
     match = params.get("match", "previous")
     if match not in ("previous", "exact"):
         raise ValueError(f"match は previous か exact にしてください: {match}")
@@ -924,10 +928,18 @@ def apply_time_lag(
         name for name in resolve_columns(frame, params.get("columns"), {})
         if name not in by and name != time
     ]
-    known = pd.concat([base, frame[columns]], axis=1).dropna(
+    text = [
+        name for name in columns
+        if not pd.api.types.is_numeric_dtype(frame[name])
+    ]
+    if text:
+        raise ValueError(
+            f"時刻でずらす列は数値にしてください: {', '.join(text)}"
+        )
+    rows = pd.concat([base, frame[columns]], axis=1).dropna(
         subset=["__time"]
-    ).drop_duplicates(keys + ["__time"], keep="last")
-    known = known.sort_values("__time")
+    ).sort_values("__time", kind="stable")
+    known = rows.drop_duplicates(keys + ["__time"], keep="last")
     for lag in params.get("lags", [1]):
         wanted = base.copy()
         wanted["__time"] = base["__time"] - step * int(lag)
@@ -944,23 +956,18 @@ def apply_time_lag(
             )
             result[f"{name}_lag{lag}"] = values
 
-    # 移動平均は w × freq 前からその時刻の前まで (その時刻は含めない)
-    rows = base.assign(__row=np.arange(len(base)))
+    # 移動平均は w × freq 前からその時刻の前まで (その時刻は含めない. 同じ
+    # 時刻の行は全て平均に入れ, 期間にある値だけの平均)
+    positions = base.assign(__row=np.arange(len(base)))
     for window in params.get("windows", []):
         span = step * int(window)
-        groups = known.groupby(keys, dropna=False) if keys else [
-            (None, known)
-        ]
-        parts = []
-        for _, group in groups:
-            means = group.set_index("__time")[columns].astype(float).rolling(
-                span, closed="left"
-            ).mean()
-            parts.append(means.reset_index().assign(**{
-                key: group[key].to_numpy() for key in keys
-            }))
-        table = pd.concat(parts, ignore_index=True)
-        merged = rows.merge(table, on=keys + ["__time"], how="inner")
+        indexed = rows.set_index("__time")
+        rolled = (
+            indexed.groupby(keys, dropna=False)[columns] if keys
+            else indexed[columns]
+        ).rolling(span, closed="left").mean().reset_index()
+        rolled = rolled.drop_duplicates(keys + ["__time"], keep="last")
+        merged = positions.merge(rolled, on=keys + ["__time"], how="inner")
         for name in columns:
             values = np.full(len(base), np.nan)
             values[merged["__row"].to_numpy()] = merged[name].to_numpy(
