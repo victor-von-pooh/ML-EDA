@@ -99,8 +99,9 @@ def profile(
 
         result["items"] = describe_items(data, seed)
         # 中身の様子の列 (幅, 色の形式など) が揃っているのは良いことなので,
-        # 定数の気付きは出さない
-        quiet = {"constant", "near_constant"}
+        # 定数の気付きは出さない. 読み込みの表の列は学習に使わない (中身を
+        # 配列にする) ので, ファイルの場所が ID らしいという気付きも出さない
+        quiet = {"constant", "near_constant", "id_like"}
         result["findings"] = result["items"].pop("findings") + [
             item for item in result["findings"] if item["code"] not in quiet
         ]
