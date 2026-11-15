@@ -233,3 +233,76 @@ def test_pointclouds(tmp_path: Path) -> None:
     x, y = load_dataset(tmp_path / "ds").arrays("train")
     assert x.shape == (6, 128, 3) and len(y) == 6
     assert np.abs(np.linalg.norm(x, axis=2).max() - 1) < 1e-5
+
+
+def test_review_fixes(tmp_path: Path) -> None:
+    """
+    16 ビットの画像, 無作為な当てはめの見本, 灰色だけの形, 灰色とカラーの
+    混在, 隠しの名前のディレクトリ, 点群と文の読み方を確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    from ml_eda.itemprep import FIT_SAMPLE, tokenize
+    from ml_eda.media import parse_pcd, parse_xyz, read_image
+
+    # 16 ビットの画像は値の範囲を保って 0 から 255 に縮める
+    wide = (np.arange(64, dtype=np.uint16).reshape(8, 8) * 1000)
+    PIL.fromarray(wide).save(tmp_path / "w16.png")
+    image = read_image(tmp_path / "w16.png")
+    assert image.ndim == 2 and len(np.unique(image)) > 30
+
+    # 隠しの名前のディレクトリでも読む. 明るさの違う 2 クラスを多く置き,
+    # 正規化の平均は学習用の両方のクラスから求める
+    root = tmp_path / ".pets"
+    for label, value in (("a", 230), ("b", 20)):
+        (root / label).mkdir(parents=True)
+        for index in range(FIT_SAMPLE // 2 + 50):
+            pixels = np.full((4, 4, 3), value, dtype=np.uint8)
+            PIL.fromarray(pixels).save(root / label / f"{index}.png")
+    data = load_data(root)
+    recipe = {
+        "target": "label", "task": "classification",
+        "item_steps": [{"op": "normalize"}],
+        "split": {"method": "stratified", "valid": 0.2},
+    }
+    from ml_eda import prepare
+
+    mean = prepare(data, recipe).recipe["item_steps"][0]["state"]["mean"][0]
+    assert 0.3 < mean < 0.7
+
+    # 灰色だけでも (件数, 1, 高さ, 幅) で 0 から 1
+    recipe["item_steps"] = [{"op": "grayscale"}]
+    array = prepare(data, recipe).arrays["train"]
+    assert array.shape[1:] == (1, 4, 4) and array.max() <= 1.0
+
+    # 灰色とカラーの混在は rgb でそろう
+    PIL.fromarray(np.zeros((4, 4), dtype=np.uint8)).save(
+        root / "a" / "gray.png"
+    )
+    data = load_data(root)
+    recipe["item_steps"] = [{"op": "normalize"}]
+    with pytest.raises(ValueError):
+        prepare(data, recipe)
+    recipe["item_steps"] = [{"op": "rgb"}, {"op": "normalize"}]
+    assert prepare(data, recipe).arrays["train"].shape[1] == 3
+
+    # PCD の整数の rgb と, .pts の強度の後の色
+    (tmp_path / "u.pcd").write_text(
+        "FIELDS x y z rgb\nSIZE 4 4 4 4\nTYPE F F F U\nCOUNT 1 1 1 1\n"
+        f"DATA ascii\n0 0 0 {255 << 16 | 128 << 8 | 7}\n",
+        encoding="ascii"
+    )
+    assert parse_pcd(tmp_path / "u.pcd")["colors"].tolist() == [[255, 128, 7]]
+    (tmp_path / "a.pts").write_text("1\n0 0 0 0.5 10 20 30\n", "ascii")
+    assert parse_xyz(tmp_path / "a.pts")["colors"].tolist() == [[10, 20, 30]]
+
+    # 大文字と記号付きの文字の語は切らない. 日本語は 1 文字ずつ
+    assert tokenize("Hello café", {"lowercase": False}) == ["Hello", "café"]
+    assert tokenize("猫が好き", {}) == ["猫", "が", "好", "き"]

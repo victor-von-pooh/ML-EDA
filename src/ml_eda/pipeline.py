@@ -22,6 +22,7 @@ DATASET_FORMAT_VERSION = 1
 SPLIT_COLUMN = "__split__"
 TIME_COLUMN = "__time__"
 ROW_COLUMN = "__row__"
+HIDDEN_COLUMNS = (SPLIT_COLUMN, TIME_COLUMN, ROW_COLUMN)
 
 # 分割の名前
 SPLITS = ("train", "valid", "test")
@@ -412,7 +413,8 @@ def sorted_classes(values: pd.Series) -> list[str]:
 
 
 def prepare(
-    data: Data, recipe: Union[str, Path, dict]
+    data: Data, recipe: Union[str, Path, dict],
+    item_dir: Optional[Path] = None
 ) -> Prepared:
     """
     レシピで分割と前処理をして, 学習用の表にする関数
@@ -473,8 +475,9 @@ def prepare(
     arrays: dict = {}
     if data.item_loader is not None:
         arrays = run_item_steps(
-            data.load_item, positions.get("train", []), positions,
-            recipe["item_steps"], data.kind
+            item_reader(data), positions.get("train", []), positions,
+            recipe["item_steps"], data.kind, item_dir,
+            int(recipe["split"].get("seed", 0))
         )
         prepared = Prepared(
             frames=frames, recipe=recipe, features=[], target=target,
@@ -486,7 +489,7 @@ def prepare(
     reserved = {target, roles.get("id"), roles.get("time"), SPLIT_COLUMN}
     features = [
         name for name in result.columns
-        if name not in reserved and not str(name).startswith("__")
+        if name not in reserved and name not in HIDDEN_COLUMNS
     ]
     notes = []
     for name in features:
@@ -508,6 +511,51 @@ def prepare(
     )
 
     return prepared
+
+
+def item_reader(data: Data) -> Any:
+    """
+    中身を読む関数を, 読めない件の場所と直し方を添えた誤りにする関数
+
+    Parameters
+    ----------
+    data: Data
+        中身を持つデータ
+
+    Returns
+    ----------
+    read: Any
+        位置から中身を読む関数
+    """
+    def read(index: int) -> Any:
+        """
+        1 件の中身を読む関数
+
+        Parameters
+        ----------
+        index: int
+            元のデータの位置
+
+        Returns
+        ----------
+        item: Any
+            中身
+        """
+        # 読めない件はファイルの場所を添えて, 除き方を案内
+        try:
+            item = data.load_item(index)
+        except Exception as error:
+            row = data.frame.iloc[index]
+            where = row.get("path", row.get("file", index))
+            raise ValueError(
+                f"{where} を読めません ({error}). 表の手順 filter_rows で, "
+                "読めない件 (画像は width が欠損, 点群は error がある件) を"
+                "除いてください"
+            ) from error
+
+        return item
+
+    return read
 
 
 def preview(
@@ -668,13 +716,18 @@ def export_dataset(
                 f"{target} はデータセットではないので置き換えません"
             )
 
-    # 前処理を先に済ませ, 隣の一時ディレクトリに書いてから入れ替える
-    prepared = prepare(data, recipe)
+    # 隣の一時ディレクトリで前処理 (中身の配列も 1 件ずつここに書く) を
+    # 済ませてから入れ替える. 失敗したら一時ディレクトリを消す
     final = target
     target = final.with_name(f".{final.name}.writing")
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
+    try:
+        prepared = prepare(data, recipe, item_dir=target)
+    except Exception:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     splits = {}
     for split, frame in prepared.frames.items():
         splits[split] = {
@@ -682,7 +735,6 @@ def export_dataset(
             "rows": int(len(frame)),
         }
         if split in prepared.arrays:
-            np.save(target / f"{split}_items.npy", prepared.arrays[split])
             splits[split]["items"] = f"{split}_items.npy"
             splits[split]["shape"] = list(prepared.arrays[split].shape)
     (target / "recipe.yaml").write_text(
@@ -791,7 +843,8 @@ class Dataset:
         frame = self.frames[split]
         items = self.info["splits"][split].get("items")
         x = (
-            np.load(self.path / items, allow_pickle=False) if items
+            np.load(self.path / items, allow_pickle=False, mmap_mode="r")
+            if items
             else frame[self.features].to_numpy(dtype=np.float32, copy=True)
         )
         y = None
@@ -853,7 +906,12 @@ class Dataset:
         array: np.ndarray
             学習のときと同じ形の配列
         """
-        # 保存した値で手順をかけて配列にする
+        # 画像のファイルの場所は学習のときと同じ読み方で読み, 保存した値で
+        # 手順をかけて配列にする
+        if isinstance(item, (str, Path)) and self.info["kind"] == "image":
+            from ml_eda.media import read_image
+
+            item = read_image(Path(item))
         result = apply_steps(item, self.recipe.get("item_steps", []))
         array = to_array(result, self.info["kind"])
 
@@ -877,6 +935,8 @@ class Dataset:
         import torch
 
         x, y = self.arrays(split)
+        # ファイルから読んだ配列は書き込めないので写してから渡す
+        x = np.array(x)
         tensors = (torch.from_numpy(x),) if y is None else (
             torch.from_numpy(x), torch.from_numpy(y)
         )

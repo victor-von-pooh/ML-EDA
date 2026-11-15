@@ -7,7 +7,9 @@ import numpy as np
 import pandas as pd
 
 from ml_eda.data import Data
-from ml_eda.loaders import Loader, read_head, register_loader
+from ml_eda.loaders import (
+    Loader, guess_encoding, read_head, register_loader
+)
 
 # 画像の拡張子
 IMAGE_EXTENSIONS = (
@@ -40,11 +42,14 @@ def list_files(root: Path, extensions: tuple) -> list[Path]:
     files: list[Path]
         名前の順のファイル (隠しファイルを除く, 上限まで)
     """
-    # 直下と, 1 つ下のディレクトリ (クラスごとのフォルダ) を探す
+    # 直下と, 1 つ下のディレクトリ (クラスごとのフォルダ) を探す. 隠しの
+    # 判定は root より下の名前だけで行う
     files = []
     for depth in ("*", "*/*"):
         for path in root.glob(depth):
-            hidden = any(part.startswith(".") for part in path.parts[-2:])
+            hidden = any(
+                part.startswith(".") for part in path.relative_to(root).parts
+            )
             if path.is_file() and not hidden and (
                 path.suffix.lower() in extensions
             ):
@@ -70,11 +75,14 @@ def labels_of(root: Path, files: list[Path]) -> Optional[list[str]]:
     labels: Optional[list[str]]
         ファイルごとのラベル, 全てが 1 つ下のフォルダに無ければ None
     """
-    # 全てのファイルがクラスのフォルダの中にある場合だけラベル付き
+    # 全てのファイルがクラスのフォルダの中にあり, クラスが 2 つ以上の場合
+    # だけラベル付き (images/ だけのフォルダはラベルにしない)
     parents = [path.parent for path in files]
     if not files or any(parent == root for parent in parents):
         return None
     labels = [parent.name for parent in parents]
+    if len(set(labels)) < 2:
+        return None
 
     return labels
 
@@ -98,7 +106,7 @@ def sniff_image(path: Path) -> float:
     if path.is_file():
         return 0.7 if path.suffix.lower() in IMAGE_EXTENSIONS else 0.0
     files = list_files(path, IMAGE_EXTENSIONS)
-    every = [p for p in path.rglob("*") if p.is_file()][:2000]
+    every = [p for _, p in zip(range(2000), path.rglob("*")) if p.is_file()]
     if not files:
         return 0.0
     score = 0.9 if len(files) >= 0.5 * max(len(every), 1) else 0.4
@@ -120,16 +128,24 @@ def image_header(path: Path) -> dict:
     info: dict
         width, height, channels, mode, format (読めなければ None)
     """
-    # 画素は読まずにヘッダーだけ
+    # 画素は読まずにヘッダーだけ. EXIF の向きが縦横を入れ替える場合は,
+    # 見えるとおりの幅と高さにする
     from PIL import Image
 
     try:
         with Image.open(path) as image:
             mode = image.mode
             channels = len(image.getbands())
+            width, height = image.width, image.height
+            try:
+                if image.getexif().get(0x0112, 1) in (5, 6, 7, 8):
+                    width, height = height, width
+            except Exception:
+                pass
             info = {
-                "width": image.width, "height": image.height,
-                "channels": channels, "mode": mode, "format": image.format,
+                "width": width, "height": height,
+                "channels": 3 if mode == "P" else channels, "mode": mode,
+                "format": image.format,
             }
     except Exception:
         info = {
@@ -154,11 +170,22 @@ def read_image(path: Path) -> np.ndarray:
     array: np.ndarray
         (高さ, 幅) か (高さ, 幅, チャンネル) の uint8 の配列
     """
-    # パレットや 16 ビットの画像は扱いやすい形にそろえる
-    from PIL import Image
+    # EXIF の向きを直し, パレットは RGB, 16 ビットと浮動小数は値の範囲を
+    # 0 から 255 に縮めた 1 チャンネル, 2 値は 0 と 255 の uint8 にそろえる
+    from PIL import Image, ImageOps
 
-    with Image.open(path) as image:
-        if image.mode in ("P", "I;16", "I", "F", "CMYK", "LA", "PA"):
+    with Image.open(path) as opened:
+        image = ImageOps.exif_transpose(opened)
+        if image.mode.startswith("I") or image.mode == "F":
+            values = np.asarray(image, dtype=np.float64)
+            top = 65535.0 if image.mode.startswith("I;16") else float(
+                max(values.max(initial=0), 1)
+            )
+            array = np.clip(values / top * 255, 0, 255).astype(np.uint8)
+            return array
+        if image.mode == "1":
+            return np.asarray(image, dtype=np.uint8) * 255
+        if image.mode in ("P", "PA", "CMYK", "LA", "YCbCr", "LAB", "HSV"):
             image = image.convert("RGBA" if "A" in image.mode else "RGB")
         array = np.asarray(image)
 
@@ -182,10 +209,15 @@ def load_images(path: Path, **options: Any) -> Data:
         1 行が 1 枚の画像のデータ (path, label, width, height, channels,
         mode, format, bytes). 画素は load_item で読む
     """
-    # ファイルの一覧とラベル
+    # ファイルの一覧とラベル (無い場合は置き方を案内)
     root = path if path.is_dir() else path.parent
     files = list_files(path, IMAGE_EXTENSIONS) if path.is_dir() else [path]
     labels = labels_of(root, files) if path.is_dir() else None
+    if not files:
+        raise ValueError(
+            f"{path.name} の直下か 1 つ下に画像がありません (train/cat/x.png "
+            "のような形なら, train のディレクトリを選んでください)"
+        )
 
     # ヘッダーから大きさとモード
     rows = []
@@ -236,11 +268,23 @@ def sniff_text(path: Path) -> float:
     if b"\x00" in head[:4096]:
         return 0.0
     lines = [
-        line for line in head.decode("utf-8", errors="replace").splitlines()
+        line
+        for line in head.decode(guess_encoding(head), errors="replace")
+        .splitlines()
         if line.strip()
-    ][:50]
+    ]
+    # 先頭だけを読んだ場合, 最後の行は途中で切れているので除く
+    if len(head) >= 64 * 1024:
+        lines = lines[:-1]
+    lines = lines[:50]
     if not lines:
         return 0.0
+    # 全ての行が数の並びなら, 文ではなく表か点群
+    numeric = all(
+        re.fullmatch(r"[\s\d.,eE+-]+", line) is not None for line in lines
+    )
+    if numeric:
+        return 0.1
     # どれかの区切り文字が全ての行で同じ数 (1 以上) なら表らしい
     tabular = any(
         len(counts) == 1 and counts != {0}
@@ -270,25 +314,32 @@ def load_text(path: Path, **options: Any) -> Data:
     data: Data
         1 行が 1 つの文のデータ (text, label, length, words)
     """
-    # ディレクトリはファイルごとに 1 つの文, ファイルは 1 行ごとに 1 つの文
-    encoding = options.get("encoding", "utf-8")
+    # ディレクトリはファイルごとに 1 つの文, ファイルは 1 行ごとに 1 つの文.
+    # 文字コードは指定が無ければファイルごとに推定
+    encoding = options.get("encoding")
     rows = []
     if path.is_dir():
         files = list_files(path, (".txt",))
         labels = labels_of(path, files)
         for index, file in enumerate(files):
-            text = file.read_bytes()[:MAX_TEXT_BYTES].decode(
-                encoding, errors="replace"
+            raw = file.read_bytes()[:MAX_TEXT_BYTES]
+            text = raw.decode(
+                encoding or guess_encoding(raw), errors="replace"
             )
             row = {"text": text, "file": file.relative_to(path).as_posix()}
             if labels:
                 row["label"] = labels[index]
             rows.append(row)
     else:
-        content = path.read_text(encoding=encoding, errors="replace")
+        raw = path.read_bytes()
+        content = raw.decode(
+            encoding or guess_encoding(raw[:65536]), errors="replace"
+        )
         rows = [
             {"text": line} for line in content.splitlines() if line.strip()
         ]
+    if not rows:
+        raise ValueError(f"{path.name} に文がありません")
     frame = pd.DataFrame(rows)
 
     # 文の長さと語の数 (分析と絞り込みのため)
@@ -327,9 +378,10 @@ def parse_ply(path: Path) -> dict:
     """
     # ヘッダーの読み込み
     raw = path.read_bytes()
-    end = raw.find(b"end_header")
-    if not raw.startswith(b"ply") or end < 0:
+    found = re.search(rb"^end_header\r?$", raw, re.M)
+    if not raw.startswith(b"ply") or found is None:
         raise ValueError(f"{path.name} は PLY ではありません")
+    end = found.start()
     header = raw[:end].decode("ascii", errors="replace").splitlines()
     body = raw[raw.index(b"\n", end) + 1:]
     form = next(
@@ -396,19 +448,25 @@ def cloud_from_columns(table: dict) -> dict:
         x, y, z が無い場合
     """
     # 名前の決まりで取り出す
+    # 座標は精度を保つ float64 (地理座標など). 色は浮動小数で 1 以下なら
+    # 0 から 1 の値として 255 倍する
     if not all(axis in table for axis in "xyz"):
         raise ValueError("点群に x, y, z の座標がありません")
-    points = np.stack([table[a] for a in "xyz"], axis=1).astype(np.float32)
+    points = np.stack([table[a] for a in "xyz"], axis=1).astype(np.float64)
+    if len(points) == 0:
+        raise ValueError("点が 1 つもありません")
     colors = None
     for keys in (("red", "green", "blue"), ("r", "g", "b")):
         if all(key in table for key in keys):
             colors = np.stack([table[k] for k in keys], axis=1)
-            if colors.max(initial=0) <= 1.0:
+            floating = np.issubdtype(colors.dtype, np.floating)
+            if floating and colors.max(initial=0) <= 1.0:
                 colors = colors * 255
             colors = colors.clip(0, 255).astype(np.uint8)
     normals = None
-    if all(key in table for key in ("nx", "ny", "nz")):
-        normals = np.stack([table[k] for k in ("nx", "ny", "nz")], axis=1)
+    for keys in (("nx", "ny", "nz"), ("normal_x", "normal_y", "normal_z")):
+        if all(key in table for key in keys):
+            normals = np.stack([table[k] for k in keys], axis=1)
     cloud = {"points": points, "colors": colors, "normals": normals}
 
     return cloud
@@ -433,26 +491,46 @@ def parse_pcd(path: Path) -> dict:
     ValueError
         ASCII でない場合
     """
-    # ヘッダーの FIELDS と DATA を読む
+    # ヘッダーの FIELDS, TYPE, COUNT と DATA を読む (COUNT が 2 以上の
+    # フィールドは 名前_番号 の列に分ける)
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     fields: list[str] = []
+    types: list[str] = []
+    counts: list[int] = []
     start = 0
     for number, line in enumerate(lines):
         parts = line.split()
         if parts[:1] == ["FIELDS"]:
             fields = parts[1:]
+        if parts[:1] == ["TYPE"]:
+            types = parts[1:]
+        if parts[:1] == ["COUNT"]:
+            counts = [int(value) for value in parts[1:]]
         if parts[:1] == ["DATA"]:
             if parts[1] != "ascii":
                 raise ValueError("バイナリの PCD は読めません (ASCII だけ)")
             start = number + 1
             break
     values = np.loadtxt(lines[start:], ndmin=2)
-    table = {name: values[:, k] for k, name in enumerate(fields)}
-    if "rgb" in table:
-        packed = table["rgb"].astype(np.float32).view(np.uint32)
-        table["red"] = (packed >> 16) & 255
-        table["green"] = (packed >> 8) & 255
-        table["blue"] = packed & 255
+    counts = counts or [1] * len(fields)
+    names = [
+        name if count == 1 else f"{name}_{k}"
+        for name, count in zip(fields, counts) for k in range(count)
+    ]
+    table = {name: values[:, k] for k, name in enumerate(names)}
+    kinds = dict(zip(fields, types or ["F"] * len(fields)))
+    for key in ("rgb", "rgba"):
+        if key not in table:
+            continue
+        # F は float の中に詰めた値, U と I は整数のまま
+        packed = (
+            table[key].astype(np.float32).view(np.uint32)
+            if kinds.get(key, "F") == "F"
+            else table[key].astype(np.uint64).astype(np.uint32)
+        )
+        table["red"] = ((packed >> 16) & 255).astype(np.uint8)
+        table["green"] = ((packed >> 8) & 255).astype(np.uint8)
+        table["blue"] = (packed & 255).astype(np.uint8)
     cloud = cloud_from_columns(table)
 
     return cloud
@@ -472,22 +550,43 @@ def parse_xyz(path: Path) -> dict:
     cloud: dict
         points, colors (6 列以上なら 4 から 6 列目), normals (None)
     """
-    # .npy は pickle を許さずに, それ以外は文字の表として読む
+    # .npy は pickle を許さずに, それ以外は空白かカンマ区切りの表として
+    # 読む. 先頭の行が数でなければ列の名前にする (1 語なら点の数)
+    header: list[str] = []
     if path.suffix.lower() == ".npy":
         values = np.load(path, allow_pickle=False)
     else:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        rows = [line for line in lines if line.strip()]
-        if rows and len(rows[0].split()) == 1:
+        rows = [line.replace(",", " ") for line in lines if line.strip()]
+        if rows and not re.fullmatch(r"[\s\d.eE+-]+", rows[0]):
+            header = rows.pop(0).split()
+        elif rows and len(rows[0].split()) == 1:
             rows = rows[1:]
         values = np.loadtxt(rows, ndmin=2)
     values = np.asarray(values, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] < 3:
         raise ValueError(f"点群は (点の数, 3 以上) の形にしてください {values.shape}")
+    if len(header) == values.shape[1]:
+        table = {name.lower(): values[:, k] for k, name in enumerate(header)}
+        return cloud_from_columns(table)
     table = {axis: values[:, k] for k, axis in enumerate("xyz")}
-    if values.shape[1] >= 6:
-        table.update({"red": values[:, 3], "green": values[:, 4],
-                      "blue": values[:, 5]})
+
+    # .pts は x y z 強度 r g b. 他は 6 列目まで, 0 から 255 の整数なら色,
+    # 長さ 1 のベクトルなら法線
+    extra = values[:, 4:7] if (
+        path.suffix.lower() == ".pts" and values.shape[1] >= 7
+    ) else values[:, 3:6] if values.shape[1] >= 6 else None
+    if extra is not None:
+        whole = np.all(np.mod(extra, 1) == 0) and extra.min() >= 0 and (
+            extra.max() <= 255
+        )
+        unit = np.allclose(np.linalg.norm(extra, axis=1), 1, atol=1e-3)
+        if whole:
+            table.update({"red": extra[:, 0], "green": extra[:, 1],
+                          "blue": extra[:, 2]})
+        elif unit:
+            table.update({"nx": extra[:, 0], "ny": extra[:, 1],
+                          "nz": extra[:, 2]})
     cloud = cloud_from_columns(table)
 
     return cloud
@@ -548,7 +647,10 @@ def sniff_points(path: Path) -> float:
             shape = np.load(path, mmap_mode="r", allow_pickle=False).shape
         except ValueError:
             return 0.0
-        named = re.search(r"point|cloud|pcd|xyz|lidar", path.name, re.I)
+        named = re.search(
+            r"(^|[_\-.])(points?|cloud|pcd|xyz|lidar)([_\-.]|$)",
+            path.name, re.I
+        )
         if len(shape) == 2 and 3 <= shape[1] <= 9 and shape[0] > 50:
             return 0.85 if named else 0.5
     score = 0.0
@@ -609,12 +711,14 @@ def load_points(path: Path, **options: Any) -> Data:
         1 行が 1 つの点群のデータ (path, label, 点の数, 範囲, 属性).
         点は load_item で読む
     """
-    # ファイルの一覧とラベル
+    # ファイルの一覧とラベル (無い場合は誤り)
     root = path if path.is_dir() else path.parent
     files = (
         list_files(path, (".ply", ".pcd", ".xyz", ".pts"))
         if path.is_dir() else [path]
     )
+    if not files:
+        raise ValueError(f"{path.name} に点群のファイルがありません")
     labels = labels_of(root, files) if path.is_dir() else None
 
     # ファイルごとの点の数と範囲
@@ -625,8 +729,8 @@ def load_points(path: Path, **options: Any) -> Data:
             row["label"] = labels[index]
         try:
             row.update(describe_cloud(read_cloud(file)))
-        except (ValueError, OSError, struct.error) as error:
-            row["error"] = str(error)
+        except (ValueError, OSError, struct.error, IndexError) as error:
+            row["error"] = str(error) or type(error).__name__
         rows.append(row)
     frame = pd.DataFrame(rows)
     roles = {"path": "path"}
@@ -660,10 +764,19 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
         種類ごとの集計 (sizes, channels, brightness など) と, 気付き
         (findings)
     """
-    # 種類ごとの集計
+    # 種類ごとの集計 (ファイルが上限を超えて切った場合は気付きに)
     frame = data.frame
     result: dict = {"kind": data.kind, "count": int(len(frame))}
     findings = []
+    if len(frame) >= MAX_FILES:
+        findings.append({
+            "severity": "warning", "code": "too_many_files",
+            "message": (
+                f"ファイルが多いので, 名前の順で先頭の {MAX_FILES} 件だけを"
+                "読みました (後ろのクラスが欠けている場合があります)"
+            ),
+            "columns": [],
+        })
     if data.kind == "image":
         valid = frame.dropna(subset=["width"])
         unreadable = int(len(frame) - len(valid))

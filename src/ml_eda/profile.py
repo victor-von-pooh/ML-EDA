@@ -98,9 +98,12 @@ def profile(
         from ml_eda.media import describe_items
 
         result["items"] = describe_items(data, seed)
-        result["findings"] = (
-            result["items"].pop("findings") + result["findings"]
-        )
+        # 中身の様子の列 (幅, 色の形式など) が揃っているのは良いことなので,
+        # 定数の気付きは出さない
+        quiet = {"constant", "near_constant"}
+        result["findings"] = result["items"].pop("findings") + [
+            item for item in result["findings"] if item["code"] not in quiet
+        ]
     result = to_json(result)
 
     return result

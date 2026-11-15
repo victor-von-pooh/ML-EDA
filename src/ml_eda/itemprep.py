@@ -23,6 +23,8 @@ class ItemStep:
     params: dict = field(default_factory=dict)
     # 説明
     description: str = ""
+    # 当てはめに全ての学習用の件を使うか (語を数えるだけの軽いもの)
+    fit_all: bool = False
 
 
 # 中身の手順の登録簿
@@ -121,15 +123,42 @@ def grayscale(image: np.ndarray, params: dict, state: dict) -> np.ndarray:
     gray: np.ndarray
         (高さ, 幅) の配列
     """
-    # 色の重みで混ぜる (透明度は除く)
+    # 色の重みで混ぜる (透明度は除く). 他の手順と同じく 0 から 255 の uint8
     array = np.asarray(image, dtype=np.float32)
     if array.ndim == 3:
         rgb = array[:, :, :3]
         weights = np.array([0.299, 0.587, 0.114][:rgb.shape[2]])
         array = (rgb * weights).sum(axis=2) / weights.sum()
-    gray = array
+    gray = np.clip(np.round(array), 0, 255).astype(np.uint8)
 
     return gray
+
+
+def rgb(image: np.ndarray, params: dict, state: dict) -> np.ndarray:
+    """
+    画像を 3 チャンネル (RGB) にする関数 (灰色とカラーが混ざる場合)
+
+    Parameters
+    ----------
+    image: np.ndarray
+        配列
+    params: dict
+        使わない
+    state: dict
+        使わない
+
+    Returns
+    ----------
+    color: np.ndarray
+        (高さ, 幅, 3) の uint8 の配列
+    """
+    # 灰色は 3 つ重ね, 透明度は落とす
+    array = np.asarray(image)
+    if array.ndim == 2:
+        array = np.stack([array] * 3, axis=2)
+    color = array[:, :, :3].astype(np.uint8)
+
+    return color
 
 
 def as_channels(image: np.ndarray) -> np.ndarray:
@@ -169,14 +198,27 @@ def fit_normalize_image(items: list, params: dict) -> dict:
     state: dict
         チャンネルごとの mean と std (0 から 1 の値で)
     """
-    # 0 から 1 にした画素で集計
-    stacked = np.concatenate(
-        [as_channels(item).reshape(as_channels(item).shape[0], -1) / 255.0
-         for item in items], axis=1
-    )
-    std = stacked.std(axis=1)
+    # チャンネルごとの和と二乗和を 1 件ずつ足す (全てを並べない)
+    total = squares = None
+    count = 0
+    for item in items:
+        array = as_channels(item).astype(np.float64) / 255.0
+        flat = array.reshape(array.shape[0], -1)
+        if total is None:
+            total = np.zeros(flat.shape[0])
+            squares = np.zeros(flat.shape[0])
+        if flat.shape[0] != len(total):
+            raise ValueError(
+                "チャンネル数がそろいません. 先に grayscale か rgb で"
+                "そろえてください"
+            )
+        total += flat.sum(axis=1)
+        squares += (flat ** 2).sum(axis=1)
+        count += flat.shape[1]
+    mean = total / count
+    std = np.sqrt(np.maximum(squares / count - mean ** 2, 0))
     state = {
-        "mean": stacked.mean(axis=1).round(6).tolist(),
+        "mean": mean.round(6).tolist(),
         "std": np.where(std > 0, std, 1.0).round(6).tolist(),
     }
 
@@ -203,8 +245,14 @@ def normalize_image(
     normalized: np.ndarray
         (チャンネル, 高さ, 幅) の float32 の配列
     """
-    # 0 から 1 にしてから平均を引き, 標準偏差で割る
+    # 0 から 1 にしてから平均を引き, 標準偏差で割る (チャンネル数を確認)
     array = as_channels(image) / 255.0
+    if array.shape[0] != len(state["mean"]):
+        raise ValueError(
+            f"チャンネル数 {array.shape[0]} が当てはめたとき "
+            f"({len(state['mean'])}) と違います. grayscale か rgb で"
+            "そろえてください"
+        )
     mean = np.array(state["mean"], dtype=np.float32)[:, None, None]
     std = np.array(state["std"], dtype=np.float32)[:, None, None]
     normalized = ((array - mean) / std).astype(np.float32)
@@ -228,13 +276,17 @@ def tokenize(text: str, params: dict) -> list[str]:
     tokens: list[str]
         語 (unit が char なら文字) の並び
     """
-    # 語は英数字の並び (日本語などは 1 文字ずつ), 文字は 1 文字ずつ
+    # 語は文字と数字の並び (漢字, かなは 1 文字ずつ), 記号も 1 つずつ.
+    # 文字は空白以外の 1 文字ずつ
     value = str(text)
     if params.get("lowercase", True):
         value = value.lower()
     if params.get("unit", "word") == "char":
         return [c for c in value if not c.isspace()]
-    tokens = re.findall(r"[a-z0-9]+|[^\sa-z0-9]", value)
+    tokens = re.findall(
+        r"[\u3040-\u30ff\u3400-\u9fff]|[^\W_\u3040-\u30ff\u3400-\u9fff]+"
+        r"|[^\w\s]", value
+    )
 
     return tokens
 
@@ -268,6 +320,36 @@ def fit_vocabulary(items: list, params: dict) -> dict:
     return state
 
 
+# 語彙から番号への辞書 (語彙ごとに 1 度だけ作る)
+INDEX_CACHE: dict[int, dict[str, int]] = {}
+
+
+def vocabulary_index(vocabulary: list) -> dict[str, int]:
+    """
+    語彙の語から番号への辞書を返す関数 (同じ語彙なら作り直さない)
+
+    Parameters
+    ----------
+    vocabulary: list
+        語彙
+
+    Returns
+    ----------
+    index: dict[str, int]
+        語から番号
+    """
+    # 語彙の並びの id で覚える (多くなったら捨てる)
+    key = id(vocabulary)
+    index = INDEX_CACHE.get(key)
+    if index is None or len(index) != len(vocabulary):
+        if len(INDEX_CACHE) > 8:
+            INDEX_CACHE.clear()
+        index = {word: k for k, word in enumerate(vocabulary)}
+        INDEX_CACHE[key] = index
+
+    return index
+
+
 def encode_text(text: str, params: dict, state: dict) -> np.ndarray:
     """
     文を語の番号の並び (決まった長さ) にする関数
@@ -287,7 +369,7 @@ def encode_text(text: str, params: dict, state: dict) -> np.ndarray:
         (length,) の int64 の配列 (短い場合は 0 で埋め, 長い場合は切る)
     """
     # 語彙に無い語は 1
-    index = {word: k for k, word in enumerate(state["vocabulary"])}
+    index = vocabulary_index(state["vocabulary"])
     length = int(params.get("length", 128))
     tokens = tokenize(text, params)[:length]
     ids = np.zeros(length, dtype=np.int64)
@@ -314,9 +396,12 @@ def sample_points(cloud: Any, params: dict, state: dict) -> dict:
     sampled: dict
         点の数をそろえた points (と colors)
     """
-    # 同じ点群からは毎回同じ点を選ぶ
-    points = np.asarray(cloud["points"], dtype=np.float32)
-    points = points[np.isfinite(points).all(axis=1)]
+    # 同じ点群からは毎回同じ点の選択 (有効な点が無い点群は誤り)
+    points = np.asarray(cloud["points"], dtype=np.float64)
+    valid = np.isfinite(points).all(axis=1)
+    points = points[valid]
+    if len(points) == 0:
+        raise ValueError("有効な点が無い点群があります")
     count = int(params.get("points", 1024))
     rng = np.random.default_rng(int(params.get("seed", 0)))
     replace = len(points) < count
@@ -324,9 +409,7 @@ def sample_points(cloud: Any, params: dict, state: dict) -> dict:
     sampled = {"points": points[chosen]}
     colors = cloud.get("colors")
     if colors is not None:
-        sampled["colors"] = np.asarray(colors)[
-            np.isfinite(np.asarray(cloud["points"])).all(axis=1)
-        ][chosen]
+        sampled["colors"] = np.asarray(colors)[valid][chosen]
 
     return sampled
 
@@ -350,7 +433,7 @@ def normalize_cloud(cloud: Any, params: dict, state: dict) -> dict:
         変換した points (色はそのまま)
     """
     # 点群ごとに中心と大きさをそろえる
-    points = np.asarray(cloud["points"], dtype=np.float32)
+    points = np.asarray(cloud["points"], dtype=np.float64)
     centered = points - points.mean(axis=0)
     radius = float(np.linalg.norm(centered, axis=1).max(initial=0.0))
     normalized = {
@@ -374,14 +457,19 @@ def to_array(item: Any, kind: str) -> np.ndarray:
     Returns
     ----------
     array: np.ndarray
-        画像は (チャンネル, 高さ, 幅) の float32, 点群は (点の数, 3) の
-        float32, 文は番号の並び
+        画像は (チャンネル, 高さ, 幅) の float32 (0 から 1, 正規化した
+        場合はその値), 点群は (点の数, 3) の float32, 文は番号の並び
     """
     # 種類ごとの形にそろえる
     if kind == "pointcloud" and isinstance(item, dict):
         return np.asarray(item["points"], dtype=np.float32)
-    if kind == "image" and np.asarray(item).dtype == np.uint8:
-        return as_channels(item) / 255.0
+    if kind == "image":
+        image = np.asarray(item)
+        if image.dtype == np.bool_:
+            image = image.astype(np.uint8) * 255
+        if image.dtype == np.uint8:
+            return as_channels(image) / 255.0
+        return image.astype(np.float32)
     array = np.asarray(item)
 
     return array
@@ -389,7 +477,7 @@ def to_array(item: Any, kind: str) -> np.ndarray:
 
 def run_item_steps(
     load: Callable[[int], Any], train: list[int], splits: dict,
-    steps: list, kind: str
+    steps: list, kind: str, out_dir: Optional[Any] = None, seed: int = 0
 ) -> dict:
     """
     中身の手順を当てはめてかけ, 分割ごとの配列を作る関数
@@ -406,6 +494,11 @@ def run_item_steps(
         item_steps (当てはめた値を state に書き込む)
     kind: str
         種類
+    out_dir: Optional[Any] = None
+        配列を書くディレクトリ (Path). 指定すると 1 件ずつファイルに
+        書き (全てをメモリに並べない), 読み込み専用の配列を返す
+    seed: int = 0
+        当てはめの見本を選ぶ乱数のシード
 
     Returns
     ----------
@@ -417,40 +510,95 @@ def run_item_steps(
     ValueError
         知らない手順, 種類に合わない手順, 形のそろわない中身の場合
     """
-    # 手順の確認
+    # 手順の確認 (文は語彙で番号にしないと学習に渡せない)
     for spec in steps:
         step = ITEM_STEPS.get(spec.get("op"))
         if step is None or step.kind != kind:
             raise ValueError(
                 f"{kind} に使えない中身の手順です: {spec.get('op')}"
             )
+    if kind == "text" and not any(s["op"] == "vocabulary" for s in steps):
+        raise ValueError("文は vocabulary の手順で番号の並びにしてください")
 
-    # 前から順に, 学習用の見本で当てはめる
-    sample = train[:FIT_SAMPLE]
+    # 前から順に, 学習用の無作為な見本 (語彙は全て) で当てはめる
+    rng = np.random.default_rng(seed)
+    sample = (
+        rng.choice(train, FIT_SAMPLE, replace=False).tolist()
+        if len(train) > FIT_SAMPLE else list(train)
+    )
     for number, spec in enumerate(steps):
         step = ITEM_STEPS[spec["op"]]
         if step.fit is None:
             continue
-        items = [apply_steps(load(i), steps[:number]) for i in sample]
+        chosen = train if step.fit_all else sample
+        items = (apply_steps(load(i), steps[:number]) for i in chosen)
         params = {k: v for k, v in spec.items() if k not in ("op", "state")}
-        spec["state"] = step.fit(items, params)
+        spec["state"] = step.fit(list(items), params)
 
-    # 分割ごとに全ての手順をかけて積む
+    # 分割ごとに全ての手順をかけ, 最初の件の形にそろうかを確かめて積む
     arrays = {}
     for name, positions in splits.items():
-        values = [
-            to_array(apply_steps(load(i), steps), kind) for i in positions
-        ]
-        shapes = {value.shape for value in values}
-        if len(shapes) > 1:
-            raise ValueError(
-                f"中身の形がそろいません ({len(shapes)} 種類. 例: "
-                f"{sorted(shapes)[:3]}). 画像は resize, 点群は "
-                "sample_points で形をそろえてください"
-            )
-        arrays[name] = np.stack(values) if values else np.zeros((0,))
+        arrays[name] = stack_items(
+            (to_array(apply_steps(load(i), steps), kind) for i in positions),
+            len(positions), out_dir, name
+        )
 
     return arrays
+
+
+def stack_items(
+    values: Any, count: int, out_dir: Optional[Any], name: str
+) -> np.ndarray:
+    """
+    1 件ずつの配列を, 形を確かめながら 1 つの配列に積む関数
+
+    Parameters
+    ----------
+    values: Any
+        1 件ずつの配列を返すイテレータ
+    count: int
+        件数
+    out_dir: Optional[Any]
+        書くディレクトリ (Path). None ならメモリに積む
+    name: str
+        分割の名前 (ファイルの名前に使う)
+
+    Returns
+    ----------
+    stacked: np.ndarray
+        (件数, ...) の配列
+
+    Raises
+    ----------
+    ValueError
+        形がそろわない場合
+    """
+    # 最初の件で形を決め, 入れ物を用意してから 1 件ずつ入れる
+    stacked: Optional[np.ndarray] = None
+    for number, value in enumerate(values):
+        if stacked is None:
+            shape = (count, *value.shape)
+            stacked = (
+                np.lib.format.open_memmap(
+                    out_dir / f"{name}_items.npy", mode="w+",
+                    dtype=value.dtype, shape=shape
+                )
+                if out_dir is not None
+                else np.empty(shape, dtype=value.dtype)
+            )
+        if value.shape != stacked.shape[1:]:
+            raise ValueError(
+                f"中身の形がそろいません ({stacked.shape[1:]} と "
+                f"{value.shape}). 画像は resize (と grayscale か rgb), "
+                "点群は sample_points で形をそろえてください"
+            )
+        stacked[number] = value
+    if stacked is None:
+        stacked = np.zeros((0,))
+    if isinstance(stacked, np.memmap):
+        stacked.flush()
+
+    return stacked
 
 
 def apply_steps(item: Any, steps: list) -> Any:
@@ -500,6 +648,10 @@ def register_builtin_item_steps() -> None:
         "grayscale", "image", None, grayscale, {}, "灰色 (1 チャンネル) にする"
     ))
     register_item_step(ItemStep(
+        "rgb", "image", None, rgb, {},
+        "3 チャンネル (RGB) にする (灰色とカラーが混ざる場合)"
+    ))
+    register_item_step(ItemStep(
         "normalize", "image", fit_normalize_image, normalize_image, {},
         "画素を学習用の平均と標準偏差で正規化する ((チャンネル, 高さ, 幅) に)"
     ))
@@ -510,7 +662,8 @@ def register_builtin_item_steps() -> None:
         {"max_tokens": "語彙の上限", "min_count": "語彙に入れる最小の出現数",
          "length": "並びの長さ", "lowercase": "小文字にするか",
          "unit": "word (語) か char (文字)"},
-        "学習用の文で語彙を作り, 語の番号の並び (決まった長さ) にする"
+        "学習用の文で語彙を作り, 語の番号の並び (決まった長さ) にする",
+        fit_all=True
     ))
 
     # 点群
