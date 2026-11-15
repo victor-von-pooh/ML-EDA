@@ -475,3 +475,52 @@ def test_panel_needs_shared_times(tmp_path: Path) -> None:
     late = shops[(shops["shop"] == "A") | (shops.index >= 640)]
     late.to_csv(path, index=False)
     assert load_data(path).roles.get("series") == "shop"
+
+
+def test_excel_sheets(tmp_path: Path) -> None:
+    """
+    Excel の全てのシートの名前を記録し, 他のシートを気付きにすることを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 2 枚のシート (読み込みの既定は最初のシート)
+    pytest.importorskip("openpyxl")
+    path = tmp_path / "book.xlsx"
+    with pd.ExcelWriter(path) as writer:
+        pd.DataFrame({"a": [1, 2, 3]}).to_excel(
+            writer, sheet_name="表紙", index=False
+        )
+        pd.DataFrame({"b": [4, 5, 6]}).to_excel(
+            writer, sheet_name="売上", index=False
+        )
+    data = load_data(path)
+    assert data.source["sheets"] == ["表紙", "売上"]
+    assert data.source["sheet"] == "表紙"
+    result = profile(data)
+    assert result["overview"]["sheets"] == ["表紙", "売上"]
+    codes = {item["code"]: item for item in result["findings"]}
+    assert "売上" in codes["multiple_sheets"]["message"]
+
+    # 名前で選んだシート
+    chosen = load_data(path, sheet="売上")
+    assert list(chosen.frame) == ["b"] and chosen.source["sheet"] == "売上"
+    assert load_data(path, sheet=1).source["sheet"] == "売上"
+    assert load_data(path, sheet=np.int64(-1)).source["sheet"] == "売上"
+    with pytest.raises(ValueError, match="シートの番号 5"):
+        load_data(path, sheet=5)
+    with pytest.raises(ValueError, match="シート 無い"):
+        load_data(path, sheet="無い")
+
+    # 1 枚だけなら気付きにしない
+    single = tmp_path / "one.xlsx"
+    pd.DataFrame({"a": [1, 2]}).to_excel(single, index=False)
+    codes = [item["code"] for item in profile(load_data(single))["findings"]]
+    assert "multiple_sheets" not in codes

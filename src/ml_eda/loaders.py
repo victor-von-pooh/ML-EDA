@@ -936,14 +936,34 @@ def load_excel(path: Path, **options: Any) -> Data:
     data: Data
         表か時系列のデータ
     """
-    # openpyxl で 1 つのシートを読み込み
+    # openpyxl で 1 つのシートを読み込み, 全てのシートの名前も記録 (他の
+    # シートがあることを気付きにするため)
+    sheet = options.get("sheet", 0)
     try:
-        frame = pd.read_excel(path, sheet_name=options.get("sheet", 0))
+        with pd.ExcelFile(path) as book:
+            names = [str(name) for name in book.sheet_names]
+            # 番号は範囲の中, 名前は有るものだけ (無いものは日本語の誤り)
+            if isinstance(sheet, (int, np.integer)):
+                if not -len(names) <= int(sheet) < len(names):
+                    raise ValueError(
+                        f"シートの番号 {sheet} がありません (0 から "
+                        f"{len(names) - 1}. シート: {', '.join(names)})"
+                    )
+                current = names[int(sheet)]
+                sheet = int(sheet)
+            elif str(sheet) in names:
+                current = sheet = str(sheet)
+            else:
+                raise ValueError(
+                    f"シート {sheet} がありません (シート: {', '.join(names)})"
+                )
+            frame = pd.read_excel(book, sheet_name=sheet)
     except ImportError as error:
         raise ImportError(
             "Excel を読むには openpyxl が要ります (pip install openpyxl)"
         ) from error
     data = finish_table(frame, options)
+    data.source = {**data.source, "sheets": names, "sheet": current}
 
     return data
 
