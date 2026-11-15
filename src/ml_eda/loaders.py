@@ -317,7 +317,8 @@ def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
     ----------
     name: Optional[str]
         文字の列で, 値が 2 から 200 種類, 1 つの値あたり平均 10 行以上,
-        日時の列との組の重なりが 5 % 未満の最初の列. 無ければ None
+        日時の列との組の重なりが 5 % 未満, 半分以上の時刻に 2 つ以上の値が
+        並ぶ最初の列. 無ければ None
     """
     # 系列ごとに十分な長さがあり, 同じ系列の中で時刻が重ならず, 時刻と系列
     # の組の半分以上が埋まっている列 (注文の表の顧客は, ほとんどの日に注文
@@ -336,9 +337,14 @@ def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
         if not (2 <= count <= 200 and len(frame) / count >= 10):
             continue
         pairs = frame[[time, name]].drop_duplicates().shape[0]
-        if frame.duplicated([time, name]).mean() < 0.05 and (
-            pairs >= 0.5 * times * count
+        if frame.duplicated([time, name]).mean() >= 0.05 or (
+            pairs < 0.5 * times * count
         ):
+            continue
+        # 系列は同じ時刻に並ぶもの (時刻が行ごとに違うレビューのラベルは,
+        # 2 つの値で埋まり方が 5 割になっても系列にしない)
+        shared = (frame.groupby(time)[name].nunique() >= 2).mean()
+        if shared >= 0.5:
             return str(name)
 
     return None
