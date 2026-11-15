@@ -584,7 +584,7 @@ def apply_filter_rows(
     frame: pd.DataFrame
         表
     params: dict
-        column, compare (==, !=, <, <=, >, >=, in, notna), value
+        column, compare (==, !=, <, <=, >, >=, in, notna, isna), value
     state: dict
         使わない
 
@@ -602,7 +602,7 @@ def apply_filter_rows(
         "<": lambda: column < value, "<=": lambda: column <= value,
         ">": lambda: column > value, ">=": lambda: column >= value,
         "in": lambda: column.isin(value or []),
-        "notna": lambda: column.notna(),
+        "notna": lambda: column.notna(), "isna": lambda: column.isna(),
     }
     if op not in comparisons:
         raise ValueError(f"知らない比較です: {op}")
@@ -782,7 +782,8 @@ def register_builtin_steps() -> None:
     ))
     register_step(Step(
         "filter_rows", None, apply_filter_rows,
-        {"column": "列", "compare": "==, !=, <, <=, >, >=, in, notna",
+        {"column": "列",
+         "compare": "==, !=, <, <=, >, >=, in, notna, isna",
          "value": "比べる値"}, "条件に合う行だけを残す", changes_rows=True
     ))
     register_step(Step(
