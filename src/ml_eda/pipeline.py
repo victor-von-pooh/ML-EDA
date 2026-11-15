@@ -10,7 +10,8 @@ import yaml
 
 from ml_eda.data import Data
 from ml_eda.itemprep import (
-    apply_steps, check_item_steps, item_notes, run_item_steps, to_array
+    apply_steps, check_item_steps, fit_item_steps, item_notes,
+    run_item_steps, to_array
 )
 from ml_eda.profile import to_json
 from ml_eda.recipe import (
@@ -540,6 +541,77 @@ def prepare(
     )
 
     return prepared
+
+
+def preview_items(
+    data: Data, recipe: Union[str, Path, dict], count: int = 8,
+    fit_limit: int = 100, seed: int = 0
+) -> dict:
+    """
+    画像, 文, 点群の中身の手順を, 学習用の見本で当てはめて, 数件に
+    かけた前と後を返す関数 (画面で手順の効き方を見るため)
+
+    Parameters
+    ----------
+    data: Data
+        中身を持つデータ
+    recipe: Union[str, Path, dict]
+        レシピ
+    count: int = 8
+        前と後を返す件数 (学習用から無作為に選ぶ)
+    fit_limit: int = 100
+        当てはめに使う学習用の件数の上限 (書き出しより少なくして速くする)
+    seed: int = 0
+        件を選ぶ乱数のシード
+
+    Returns
+    ----------
+    result: dict
+        items (index, label, before (元の中身), after (配列)), steps
+        (当てはめた中身の手順), fit_rows (当てはめに使った件数)
+
+    Raises
+    ----------
+    ValueError
+        中身を持たない種類, 手順の誤り, 学習用の件が無い場合
+    """
+    # 表の手順と分割をかけ, 学習用の位置を決める
+    if data.item_loader is None:
+        raise ValueError("中身を持たない種類です (画像, 文, 点群で使う)")
+    loaded = load_recipe(recipe)
+    check_item_steps(loaded["item_steps"], data.kind)
+    frame, roles = apply_recipe(data, loaded)
+    train = frame.loc[
+        frame[SPLIT_COLUMN] == "train", ROW_COLUMN
+    ].astype(int).tolist()
+    if not train:
+        raise ValueError("学習用の件がありません (割合か絞り込みを見直す)")
+
+    # 少ない見本で当てはめ, 無作為に選んだ件にかける
+    read = item_reader(data)
+    steps = loaded["item_steps"]
+    fit_item_steps(read, train, steps, seed, fit_limit, fit_limit)
+    rng = np.random.default_rng(seed)
+    chosen = sorted(
+        rng.choice(train, min(count, len(train)), replace=False).tolist()
+    )
+    target = roles.get("target") or roles.get("label")
+    items = []
+    for index in chosen:
+        before = read(index)
+        label = data.frame.iloc[index].get(target) if target else None
+        items.append({
+            "index": int(index),
+            "label": None if label is None else str(label),
+            "before": before,
+            "after": to_array(apply_steps(before, steps), data.kind),
+        })
+    result = {
+        "items": items, "steps": steps,
+        "fit_rows": min(len(train), fit_limit),
+    }
+
+    return result
 
 
 def item_reader(data: Data) -> Any:
