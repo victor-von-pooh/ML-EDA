@@ -513,6 +513,11 @@ def test_excel_sheets(tmp_path: Path) -> None:
     chosen = load_data(path, sheet="売上")
     assert list(chosen.frame) == ["b"] and chosen.source["sheet"] == "売上"
     assert load_data(path, sheet=1).source["sheet"] == "売上"
+    assert load_data(path, sheet=np.int64(-1)).source["sheet"] == "売上"
+    with pytest.raises(ValueError, match="シートの番号 5"):
+        load_data(path, sheet=5)
+    with pytest.raises(ValueError, match="シート 無い"):
+        load_data(path, sheet="無い")
 
     # 1 枚だけなら気付きにしない
     single = tmp_path / "one.xlsx"

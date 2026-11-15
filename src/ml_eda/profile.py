@@ -924,7 +924,8 @@ def find_issues(result: dict, target: Optional[str]) -> list[dict]:
         findings.append(finding(
             "info", "multiple_sheets",
             f"このファイルにはシートが {len(sheets)} 枚あります. 読んでいるのは "
-            f"{current} で, 他に {', '.join(others[:5])}"
+            f"「{current}」で, 他に "
+            f"{'、'.join(f'「{name}」' for name in others[:5])}"
             f"{' など' if len(others) > 5 else ''} があります. 他のシートを読む"
             "には, 読み込みの設定の sheet に名前を書いてください", []
         ))

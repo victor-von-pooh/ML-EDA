@@ -942,15 +942,27 @@ def load_excel(path: Path, **options: Any) -> Data:
     try:
         with pd.ExcelFile(path) as book:
             names = [str(name) for name in book.sheet_names]
+            # 番号は範囲の中, 名前は有るものだけ (無いものは日本語の誤り)
+            if isinstance(sheet, (int, np.integer)):
+                if not -len(names) <= int(sheet) < len(names):
+                    raise ValueError(
+                        f"シートの番号 {sheet} がありません (0 から "
+                        f"{len(names) - 1}. シート: {', '.join(names)})"
+                    )
+                current = names[int(sheet)]
+                sheet = int(sheet)
+            elif str(sheet) in names:
+                current = sheet = str(sheet)
+            else:
+                raise ValueError(
+                    f"シート {sheet} がありません (シート: {', '.join(names)})"
+                )
             frame = pd.read_excel(book, sheet_name=sheet)
     except ImportError as error:
         raise ImportError(
             "Excel を読むには openpyxl が要ります (pip install openpyxl)"
         ) from error
     data = finish_table(frame, options)
-    current = names[sheet] if isinstance(sheet, int) and (
-        -len(names) <= sheet < len(names)
-    ) else str(sheet)
     data.source = {**data.source, "sheets": names, "sheet": current}
 
     return data
