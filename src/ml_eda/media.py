@@ -878,6 +878,13 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
         repeated = int(values[values != ""].duplicated().sum())
         result["empty"] = empty
         result["duplicates"] = repeated
+
+        # 文を区切る単位 (文字, 語, 部分語) の比較と vocabulary の勧め
+        from ml_eda.textunits import compare_tokenizers
+
+        result["tokenizers"] = compare_tokenizers(
+            values[values != ""].tolist(), seed
+        )
         if repeated:
             findings.append({
                 "severity": "warning", "code": "duplicate_items",
