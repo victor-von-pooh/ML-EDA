@@ -316,8 +316,13 @@ def run_step(
         ):
             raise ValueError("落とす列の名前を columns に書いてください")
         if "columns" in step.params and spec["op"] != "drop_missing":
+            # 時系列の予測では目的の列の過去の値が最も大事な手がかりなので,
+            # lag の auto は目的の列も選ぶ (ずらすので未来の値は使わない)
+            chosen = {
+                k: v for k, v in roles.items() if k != "target"
+            } if spec["op"] == "lag" else roles
             params["columns"] = resolve_columns(
-                frame, params.get("columns"), roles,
+                frame, params.get("columns"), chosen,
                 WANT.get(spec["op"], "numeric")
             )
         state: dict = {}
