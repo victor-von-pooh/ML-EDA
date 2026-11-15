@@ -381,7 +381,7 @@ def datetime_stats(values: pd.Series) -> dict:
         最初と最後の時刻, 最も多い間隔 (秒)
     """
     # 並べた時刻の差で間隔を求める
-    ordered = pd.to_datetime(values, utc=True).sort_values()
+    ordered = as_datetime(values).sort_values()
     diffs = ordered.diff().dropna().dt.total_seconds()
     positive = diffs[diffs > 0]
     stats = {
@@ -443,17 +443,51 @@ def cramers_v(left: pd.Series, right: pd.Series) -> float:
     value: float
         0 (関連なし) から 1 (一方で他方が決まる)
     """
-    # 分割表から χ² を求めて正規化
+    # 分割表から χ² を求め, 値の種類が多いと大きく出る偏りを補正して
+    # 正規化 (Bergsma の補正)
     table = pd.crosstab(left, right).to_numpy(dtype=float)
     total = table.sum()
-    if total == 0 or min(table.shape) < 2:
+    if total <= 1 or min(table.shape) < 2:
         return 0.0
     expected = table.sum(1, keepdims=True) * table.sum(0, keepdims=True)
     expected = expected / total
     chi2 = float(((table - expected) ** 2 / expected).sum())
-    value = min(math.sqrt(chi2 / total / (min(table.shape) - 1)), 1.0)
+    rows, cols = table.shape
+    phi2 = max(0.0, chi2 / total - (rows - 1) * (cols - 1) / (total - 1))
+    rows_c = rows - (rows - 1) ** 2 / (total - 1)
+    cols_c = cols - (cols - 1) ** 2 / (total - 1)
+    denominator = min(rows_c - 1, cols_c - 1)
+    if denominator <= 0:
+        return 0.0
+    value = min(math.sqrt(phi2 / denominator), 1.0)
 
     return value
+
+
+def as_datetime(values: pd.Series) -> pd.Series:
+    """
+    日時の列に変換する関数 (時差の違う値が混ざる場合だけ UTC にそろえる)
+
+    Parameters
+    ----------
+    values: pd.Series
+        日時か日時の文字の列
+
+    Returns
+    ----------
+    converted: pd.Series
+        日時の列
+    """
+    # 時差の無い列はそのまま, 混ざる列は UTC
+    try:
+        converted = pd.to_datetime(values)
+        if pd.api.types.is_datetime64_any_dtype(converted):
+            return converted
+    except (ValueError, TypeError):
+        pass
+    converted = pd.to_datetime(values, utc=True)
+
+    return converted
 
 
 def correlation_ratio(categories: pd.Series, values: pd.Series) -> float:
@@ -712,7 +746,7 @@ def describe_timeseries(
     """
     # 間隔と, 抜け (最も多い間隔の 1.5 倍より長い) と重なり
     source = full_time if full_time is not None else frame[time]
-    times = pd.to_datetime(source, utc=True).dropna().sort_values()
+    times = as_datetime(source).dropna().sort_values()
     diffs = times.diff().dropna().dt.total_seconds()
     positive = diffs[diffs > 0]
     interval = float(positive.mode().iloc[0]) if len(positive) else None
@@ -736,7 +770,7 @@ def describe_timeseries(
     series = {
         "time": [
             t.isoformat() if pd.notna(t) else None
-            for t in pd.to_datetime(thinned[time], utc=True)
+            for t in as_datetime(thinned[time])
         ],
         "values": {
             name: thinned[name].astype(float).tolist() for name in names
