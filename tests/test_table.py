@@ -593,3 +593,54 @@ def test_time_lag() -> None:
         apply_lag(frame, {**params, "columns": ["shop", "v"], "by": []}, {})
     with pytest.raises(ValueError, match="時刻の列"):
         apply_lag(frame, {**params, "time": "when"}, {})
+
+
+def test_transform_with_lag(tmp_path: Path) -> None:
+    """
+    目的の列の過去の値の列を使うデータセットで, 新しいデータに前処理を
+    かけられることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 目的の列も過去の値にする (columns: auto)
+    days = pd.date_range("2024-01-01", periods=60, freq="D")
+    frame = pd.DataFrame({
+        "date": days.strftime("%Y-%m-%d"),
+        "sales": np.arange(60, dtype=float) * 2 + 1,
+        "temp": np.linspace(0, 10, 60),
+    })
+    path = tmp_path / "s.csv"
+    frame.to_csv(path, index=False)
+    data = load_data(path)
+    recipe = {
+        "target": "sales", "task": "forecasting",
+        "steps": [
+            {"op": "lag", "columns": "auto", "lags": [1]},
+            {"op": "drop_missing"},
+            {"op": "standardize", "columns": "auto"},
+        ],
+        "split": {"method": "time", "valid": 0.2},
+    }
+    export_dataset(data, recipe, tmp_path / "ds")
+    dataset = load_dataset(tmp_path / "ds")
+    assert "sales_lag1" in dataset.features
+
+    # 過去の値を含めて渡すと, 学習のときと同じ値になる (最初の行は過去が
+    # 無いので欠損. 学習用は欠損の行を落とした後の並び)
+    out = dataset.transform(data.frame)
+    train = dataset.frames["train"]
+    assert np.isnan(out["sales_lag1"].iloc[0])
+    assert np.allclose(
+        out["sales_lag1"].iloc[1:1 + len(train)], train["sales_lag1"]
+    )
+
+    # 目的の列が無ければ, 足りない列を挙げた誤り
+    with pytest.raises(ValueError, match="sales の過去の値"):
+        dataset.transform(data.frame.drop(columns=["sales"]))
