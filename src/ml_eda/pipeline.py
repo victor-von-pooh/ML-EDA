@@ -1,4 +1,5 @@
 import datetime as dt
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1026,10 +1027,10 @@ class Dataset:
         result: pd.DataFrame
             学習に使う列だけの表 (当てはめた値をそのまま使う)
         """
-        # 当てはめ直さずに, 保存した値と列で手順を順にかける. 行を増減
-        # する手順と, 目的の列を書き換える手順は飛ばす (入力と行をそろえる).
+        # 当てはめ直さずに, 保存した値と列での手順の適用. 行を増減する手順
+        # と, 目的の列を書き換える手順は除外 (入力と行をそろえるため).
         # 過去の値の列 (lag) は目的の列を読むだけなので, 目的の列 (過去の
-        # 値) があればかけ, 無ければ目的の列を除いてかける
+        # 値) があれば適用, 無ければ目的の列を除いての適用
         result = frame.copy()
         result.columns = [str(name) for name in result.columns]
         for spec in self.recipe["steps"]:
@@ -1048,13 +1049,17 @@ class Dataset:
                 params["columns"] = [c for c in columns if c in result]
                 # 当てはめた列が無ければ, 途中で落ちる前に分かる誤りに
                 # (目的の列の過去の値の列は, 目的の列 (過去の値) が要る)
+                # (落とす列は入力に無くてよい)
                 absent = [c for c in columns if c not in result]
-                if absent and not reads_only:
+                if absent and not reads_only and spec["op"] != "drop_columns":
+                    lagged = re.compile(
+                        rf"{re.escape(str(self.target))}_(lag|mean)\d+"
+                    )
                     hint = (
                         f". 目的の列 {self.target} の過去の値から作る列は, "
                         f"{self.target} の過去の値を含めて渡してください"
                         if self.target and any(
-                            c.startswith(f"{self.target}_") for c in absent
+                            lagged.fullmatch(c) for c in absent
                         ) else ""
                     )
                     raise ValueError(

@@ -644,3 +644,13 @@ def test_transform_with_lag(tmp_path: Path) -> None:
     # 目的の列が無ければ, 足りない列を挙げた誤り
     with pytest.raises(ValueError, match="sales の過去の値"):
         dataset.transform(data.frame.drop(columns=["sales"]))
+
+    # 学習のときに落とした列は, 新しいデータに無くてよい
+    recipe["steps"] = [
+        {"op": "drop_columns", "columns": ["temp"]}, *recipe["steps"]
+    ]
+    export_dataset(data, recipe, tmp_path / "ds2")
+    dropped = load_dataset(tmp_path / "ds2")
+    assert list(dropped.transform(data.frame.drop(columns=["temp"]))) == [
+        "sales_lag1"
+    ]
