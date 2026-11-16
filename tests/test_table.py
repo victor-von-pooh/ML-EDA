@@ -809,3 +809,55 @@ def test_transform_target_indicator_and_lag(tmp_path: Path) -> None:
     assert np.allclose(
         out["y_lag1"].iloc[1:], np.log1p(frame["y"]).iloc[:-1]
     )
+
+
+def test_transform_row_steps_before_lag(tmp_path: Path) -> None:
+    """
+    推論のときも行を落とす手順で過去の値の前後関係をそろえ, 行の並びは
+    入力のままにすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 重複した行と, 条件で落とす行を含む系列
+    frame = pd.DataFrame({
+        "kind": ["a", "a", "a", "b", "a", "a", "a", "a"],
+        "y": [1.0, 2.0, 2.0, 9.0, 3.0, 4.0, 5.0, 6.0],
+    })
+    frame.loc[2] = frame.loc[1]
+    path = tmp_path / "s.csv"
+    frame.to_csv(path, index=False)
+    recipe = {
+        "target": "y", "task": "regression",
+        "steps": [
+            {"op": "drop_duplicates"},
+            {"op": "filter_rows", "column": "kind", "compare": "==",
+             "value": "a"},
+            {"op": "lag", "columns": ["y"], "lags": [1]},
+            {"op": "drop_missing"},
+        ],
+        "split": {"method": "random", "valid": 0.2, "seed": 0},
+    }
+    export_dataset(load_data(path), recipe, tmp_path / "ds")
+    dataset = load_dataset(tmp_path / "ds")
+
+    # 重複は残した行と同じ値, 落とした行は欠損と手順の名前
+    out = dataset.transform(frame)
+    assert len(out) == len(frame)
+    lag = out["y_lag1"].tolist()
+    assert np.isnan(lag[0]) and lag[1] == 1.0 and lag[2] == 1.0
+    assert np.isnan(lag[3])
+    assert lag[4:] == [2.0, 3.0, 4.0, 5.0]
+    assert out.attrs["dropped"] == {0: "drop_missing", 3: "filter_rows"}
+
+    # 目的の列の欠損 (先の予測) は欠損の手順で落とさない
+    future = frame.copy()
+    future.loc[len(future)] = ["a", np.nan]
+    out = dataset.transform(future)
+    assert out["y_lag1"].iloc[-1] == 6.0

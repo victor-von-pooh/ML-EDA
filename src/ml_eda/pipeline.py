@@ -16,7 +16,8 @@ from ml_eda.itemprep import (
 )
 from ml_eda.profile import to_json
 from ml_eda.recipe import (
-    STEPS, WANT, category_key, load_recipe, resolve_columns, to_plain
+    HIDDEN, STEPS, WANT, category_key, load_recipe, resolve_columns,
+    to_plain
 )
 
 # データセットの説明の形式の版
@@ -929,6 +930,47 @@ def export_dataset(
     return info
 
 
+def restore_rows(
+    frame: pd.DataFrame, count: int, copies: dict[int, int],
+    dropped: dict[int, str]
+) -> pd.DataFrame:
+    """
+    行を落とした表を, 入力の行の並びに戻す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        行の名前が入力の行の位置の表
+    count: int
+        入力の行の数
+    copies: dict[int, int]
+        重複として落とした行から残した行
+    dropped: dict[int, str]
+        落とした行から手順の名前
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        入力と同じ行の数の表 (重複は残した行の値, 落とした行は欠損).
+        attrs["dropped"] に落とした行の位置から手順の名前
+    """
+    # 重複した行は残した行の値 (残した行が後で落ちたら同じく落とす)
+    result = frame.reindex(range(count))
+    lost = dict(dropped)
+    for row in sorted(copies):
+        kept = copies[row]
+        while kept in copies:
+            kept = copies[kept]
+        if kept in frame.index:
+            result.loc[row] = frame.loc[kept]
+        elif kept in lost:
+            lost[row] = lost[kept]
+    result = result.reset_index(drop=True)
+    result.attrs["dropped"] = lost
+
+    return result
+
+
 def without_column(state: dict, name: str) -> dict:
     """
     当てはめた値から 1 つの列を除く関数
@@ -1054,16 +1096,24 @@ class Dataset:
         Returns
         ----------
         result: pd.DataFrame
-            学習に使う列だけの表 (当てはめた値をそのまま使う)
+            学習に使う列だけの表 (当てはめた値をそのまま使う). 行は入力と
+            同じ並びで, 行を落とす手順で落ちた行は欠損. 落ちた行と手順の
+            名前は result.attrs["dropped"] (行の位置から手順の名前)
         """
-        # 当てはめ直さずに, 保存した値と列での手順の適用. 行を増減する手順
-        # は除外 (入力と行をそろえるため). 目的の列を書き換える手順は,
+        # 当てはめ直さずに, 保存した値と列での手順の適用. 行を落とす手順は,
+        # 過去の値の列の前後関係を学習のときとそろえるためにかけ, 最後に
+        # 入力の行の並びに戻す (重複した行は残した行と同じ値, 落とした行は
+        # 欠損). 目的の列を書き換える手順は,
         # 過去の値の列 (lag) が目的の列を読み, 目的の列 (過去の値) を
         # 渡された場合は学習のときと同じく目的の列にもかけ (lag が同じ
         # 値を読むように), それ以外は目的の列だけを除いてかける (同じ
         # 手順で変えた特徴量は学習のときと同じ値に)
         result = frame.copy()
         result.columns = [str(name) for name in result.columns]
+        result.index = pd.RangeIndex(len(result))
+        count = len(result)
+        copies: dict[int, int] = {}
+        dropped: dict[int, str] = {}
         target = self.target
         keep_target = bool(target) and target in result.columns and any(
             spec["op"] == "lag"
@@ -1076,14 +1126,15 @@ class Dataset:
             columns = state.get("columns", [])
             reads_only = spec["op"] == "lag"
             if step.changes_rows:
+                result = self.drop_rows(result, spec, copies, dropped)
                 continue
-            dropped = False
+            dropped_target = False
             if target and target in columns and not (
                 reads_only or keep_target
             ):
                 state = without_column(state, target)
                 columns = state["columns"]
-                dropped = True
+                dropped_target = True
                 if not columns:
                     continue
             params = {
@@ -1113,7 +1164,7 @@ class Dataset:
             result = step.apply(result, params, state)
             # 除いた目的の列の欠損の印は, 学習のときと同じ 0 (目的の列が
             # 欠損した行は学習に使わない)
-            if dropped and spec.get("indicator"):
+            if dropped_target and spec.get("indicator"):
                 result[f"{target}_missing"] = 0
         # 学習に使う列が足りない場合は, 黙って落とさずに誤りにする
         missing = [c for c in self.features if c not in result.columns]
@@ -1123,7 +1174,104 @@ class Dataset:
                 " (元のデータと同じ列を渡してください. カンマ付きの数などは "
                 "load_data で読んだ後の形にそろえてください)"
             )
-        result = result[self.features]
+        result = restore_rows(result[self.features], count, copies, dropped)
+
+        return result
+
+    def known_columns(self) -> set[str]:
+        """
+        学習に使う列と, 手順が読み書きする列の名前を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        names: set[str]
+            列の名前 (目的の列を除く)
+        """
+        # 学習に使う列と, 手順に書いた列と決めた列
+        names = set(self.features)
+        for spec in self.recipe["steps"]:
+            for value in (
+                spec.get("columns"), spec.get("state", {}).get("columns")
+            ):
+                if isinstance(value, str) and value != "auto":
+                    names.add(value)
+                elif isinstance(value, list):
+                    names.update(str(v) for v in value)
+        names.discard(str(self.target))
+
+        return names
+
+    def drop_rows(
+        self, frame: pd.DataFrame, spec: dict, copies: dict[int, int],
+        dropped: dict[int, str]
+    ) -> pd.DataFrame:
+        """
+        推論のときに行を落とす手順をかけ, 落とした行を覚える関数
+
+        Parameters
+        ----------
+        frame: pd.DataFrame
+            表 (行の名前は入力の行の位置)
+        spec: dict
+            行を落とす手順
+        copies: dict[int, int]
+            重複として落とした行から残した行 (書き足す)
+        dropped: dict[int, str]
+            落とした行から手順の名前 (書き足す)
+
+        Returns
+        ----------
+        result: pd.DataFrame
+            行を落とした表
+
+        Raises
+        ----------
+        ValueError
+            絞る列が入力に無い場合
+        """
+        # 重複は残した行を覚える. 欠損と条件は目的の列を見ない (推論の
+        # ときは目的の列が分からない行を予測するため)
+        op = spec["op"]
+        params = {k: v for k, v in spec.items() if k not in ("op", "state")}
+        target = self.target
+        if op == "drop_duplicates":
+            columns = params.get("columns")
+            subset = [c for c in frame.columns if c not in HIDDEN] if (
+                columns in (None, "auto", [])
+            ) else [c for c in ([columns] if isinstance(columns, str)
+                                else columns) if c in frame.columns]
+            if not subset:
+                return frame
+            codes = frame.groupby(subset, dropna=False, sort=False).ngroup()
+            first = pd.Series(frame.index, index=frame.index).groupby(
+                codes
+            ).transform("first")
+            twin = frame.duplicated(subset=subset, keep="first")
+            copies.update({int(r): int(first[r]) for r in frame.index[twin]})
+            result = frame[~twin]
+            return result
+        if op == "drop_missing":
+            columns = params.get("columns")
+            names = sorted(self.known_columns()) if columns in (
+                None, "auto"
+            ) else ([columns] if isinstance(columns, str) else list(columns))
+            subset = [c for c in names if c in frame.columns and c != target]
+            lost = frame[subset].isna().any(axis=1)
+        else:
+            column = params.get("column")
+            if column == target:
+                return frame
+            if column not in frame.columns:
+                raise ValueError(f"{op} にかける列がありません: {column}")
+            kept = STEPS[op].apply(frame, params, spec.get("state", {}))
+            lost = ~frame.index.isin(kept.index)
+            lost = pd.Series(lost, index=frame.index)
+        dropped.update({int(r): op for r in frame.index[lost]})
+        result = frame[~lost]
 
         return result
 
