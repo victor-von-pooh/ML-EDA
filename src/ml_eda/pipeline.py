@@ -929,6 +929,35 @@ def export_dataset(
     return info
 
 
+def without_column(state: dict, name: str) -> dict:
+    """
+    当てはめた値から 1 つの列を除く関数
+
+    Parameters
+    ----------
+    state: dict
+        手順の当てはめた値 (columns と, 列ごとの値の辞書)
+    name: str
+        除く列の名前
+
+    Returns
+    ----------
+    result: dict
+        name を除いた写し
+    """
+    # 列の並びと, 列の名前を鍵にした辞書 (values, categories, bounds)
+    result = {}
+    for key, value in state.items():
+        if key == "columns":
+            result[key] = [c for c in value if c != name]
+        elif isinstance(value, dict):
+            result[key] = {k: v for k, v in value.items() if k != name}
+        else:
+            result[key] = value
+
+    return result
+
+
 @dataclass
 class Dataset:
     # 書き出したディレクトリ
@@ -1028,20 +1057,35 @@ class Dataset:
             学習に使う列だけの表 (当てはめた値をそのまま使う)
         """
         # 当てはめ直さずに, 保存した値と列での手順の適用. 行を増減する手順
-        # と, 目的の列を書き換える手順は除外 (入力と行をそろえるため).
-        # 過去の値の列 (lag) は目的の列を読むだけなので, 目的の列 (過去の
-        # 値) があれば適用, 無ければ目的の列を除いての適用
+        # は除外 (入力と行をそろえるため). 目的の列を書き換える手順は,
+        # 過去の値の列 (lag) が目的の列を読み, 目的の列 (過去の値) を
+        # 渡された場合は学習のときと同じく目的の列にもかけ (lag が同じ
+        # 値を読むように), それ以外は目的の列だけを除いてかける (同じ
+        # 手順で変えた特徴量は学習のときと同じ値に)
         result = frame.copy()
         result.columns = [str(name) for name in result.columns]
+        target = self.target
+        keep_target = bool(target) and target in result.columns and any(
+            spec["op"] == "lag"
+            and target in spec.get("state", {}).get("columns", [])
+            for spec in self.recipe["steps"]
+        )
         for spec in self.recipe["steps"]:
             step = STEPS[spec["op"]]
             state = spec.get("state", {})
             columns = state.get("columns", [])
             reads_only = spec["op"] == "lag"
-            if step.changes_rows or (
-                self.target and self.target in columns and not reads_only
-            ):
+            if step.changes_rows:
                 continue
+            dropped = False
+            if target and target in columns and not (
+                reads_only or keep_target
+            ):
+                state = without_column(state, target)
+                columns = state["columns"]
+                dropped = True
+                if not columns:
+                    continue
             params = {
                 k: v for k, v in spec.items() if k not in ("op", "state")
             }
@@ -1067,6 +1111,10 @@ class Dataset:
                         f"{', '.join(absent)}{hint}"
                     )
             result = step.apply(result, params, state)
+            # 除いた目的の列の欠損の印は, 学習のときと同じ 0 (目的の列が
+            # 欠損した行は学習に使わない)
+            if dropped and spec.get("indicator"):
+                result[f"{target}_missing"] = 0
         # 学習に使う列が足りない場合は, 黙って落とさずに誤りにする
         missing = [c for c in self.features if c not in result.columns]
         if missing:
