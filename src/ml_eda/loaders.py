@@ -302,6 +302,10 @@ def guess_delimiter(text: str) -> str:
     return delimiter
 
 
+# 系列を分ける列の値の種類の上限 (店や商品, センサーごとなど)
+MAX_SERIES = 10000
+
+
 def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
     """
     日時の列と組にすると行が重ならない, 系列を分ける列を探す関数
@@ -316,7 +320,7 @@ def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
     Returns
     ----------
     name: Optional[str]
-        文字の列で, 値が 2 から 200 種類, 1 つの値あたり平均 10 行以上,
+        文字の列で, 値が 2 から 10000 種類, 1 つの値あたり平均 10 行以上,
         日時の列との組の重なりが 5 % 未満, 1 割以上の時刻に 2 つ以上の値が
         並ぶ最初の列. 無ければ None
     """
@@ -334,7 +338,7 @@ def panel_of(frame: pd.DataFrame, time: str) -> Optional[str]:
         ):
             continue
         count = column.nunique()
-        if not (2 <= count <= 200 and len(frame) / count >= 10):
+        if not (2 <= count <= MAX_SERIES and len(frame) / count >= 10):
             continue
         pairs = frame[[time, name]].drop_duplicates().shape[0]
         if frame.duplicated([time, name]).mean() >= 0.05 or (
