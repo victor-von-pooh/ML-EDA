@@ -84,9 +84,15 @@ def profile(
     target_result = (
         describe_target(frame, target, columns) if target else None
     )
+    # 複数の系列は, 間引く前の最も長い系列で間隔と自己相関を求める (時刻
+    # で間引いた見本では, 系列が多いと時刻が少なくなりすぎる)
+    timeline = frame
+    if data.kind == "timeseries" and data.roles.get("series") and sampled:
+        timeline = data.frame.copy(deep=False)
+        timeline.columns = unique_names(list(timeline.columns))
     series = (
         describe_timeseries(
-            frame, data.roles["time"], columns, full_time,
+            timeline, data.roles["time"], columns, full_time,
             data.roles.get("series"),
             int(data.frame[data.roles["series"]].nunique())
             if data.roles.get("series") in data.frame.columns else 1

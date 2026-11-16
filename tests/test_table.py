@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -685,15 +686,19 @@ def test_time_lag_internal_names() -> None:
     assert list(result.columns[:4]) == list(frame.columns)
 
 
-def test_many_series(tmp_path: Path) -> None:
+def test_many_series(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
-    200 本を超える系列 (商品ごとの売上など) も系列を分ける列にすることを
-    確かめる関数
+    200 本を超える系列 (商品ごとの売上など) も系列を分ける列にし, 見本で
+    分析しても時刻の間隔が正しいことを確かめる関数
 
     Parameters
     ----------
     tmp_path: Path
         pytest が用意する一時ディレクトリ
+    monkeypatch: pytest.MonkeyPatch
+        見本の行の数を小さくするため
 
     Returns
     ----------
@@ -712,3 +717,9 @@ def test_many_series(tmp_path: Path) -> None:
     assert data.roles.get("series") == "item"
     result = profile(data)
     assert result["timeseries"]["series_count"] == 600
+
+    # 見本で分析するほど多くても, 間隔は間引く前の最も長い系列で (1 日)
+    monkeypatch.setattr(sys.modules["ml_eda.profile"], "SAMPLE_ROWS", 1000)
+    sampled = profile(data)
+    assert sampled["overview"]["sampled"]
+    assert sampled["timeseries"]["interval_seconds"] == 86400
