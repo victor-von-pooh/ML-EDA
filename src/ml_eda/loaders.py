@@ -420,6 +420,10 @@ def japanese_date(value: str) -> str:
     text: str
         直した値 (日本語の日時でなければそのまま)
     """
+    # 文字でない値 (欠損) はそのまま
+    if not isinstance(value, str):
+        return value
+
     # 年月日, 年月, 時分秒 (欠けた分と秒は 0)
     text = re.sub(r"(\d{4})年(\d{1,2})月(\d{1,2})日?\s*", r"\1-\2-\3 ", value)
     text = re.sub(r"(\d{4})年(\d{1,2})月(?!\d)", r"\1-\2", text)

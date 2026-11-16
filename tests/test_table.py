@@ -861,3 +861,63 @@ def test_transform_row_steps_before_lag(tmp_path: Path) -> None:
     future.loc[len(future)] = ["a", np.nan]
     out = dataset.transform(future)
     assert out["y_lag1"].iloc[-1] == 6.0
+
+
+def test_transform_target_gaps_and_twins(tmp_path: Path) -> None:
+    """
+    目的の列が途中で欠けた履歴でも過去の値を学習のときとそろえ, 同じ名前
+    の列を誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 3 行目の目的の列が欠けた系列 (学習のときはこの行を除いてずらす)
+    frame = pd.DataFrame({"y": [1.0, 2.0, None, 4.0, 5.0, 6.0, 7.0, 8.0]})
+    path = tmp_path / "g.csv"
+    frame.to_csv(path, index=False)
+    recipe = {
+        "target": "y", "task": "regression",
+        "steps": [{"op": "lag", "columns": ["y"], "lags": [1]}],
+        "split": {"method": "random", "valid": 0.25, "seed": 0},
+    }
+    export_dataset(load_data(path), recipe, tmp_path / "ds")
+    dataset = load_dataset(tmp_path / "ds")
+
+    # 分かる行は分かる行だけで, 欠けた行は全ての行でずらした値
+    out = dataset.transform(frame)
+    lag = out["y_lag1"].tolist()
+    assert np.isnan(lag[0])
+    assert lag[1:] == [1.0, 2.0, 2.0, 4.0, 5.0, 6.0, 7.0]
+
+    # 同じ名前の列
+    twins = pd.concat([frame, frame], axis=1)
+    with pytest.raises(ValueError, match="同じ名前の列"):
+        dataset.transform(twins)
+
+
+def test_load_dates_with_blank_cells(tmp_path: Path) -> None:
+    """
+    日付の列に空のセルがある表を読めることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 日本語の書き方と空のセルが混ざった日付
+    path = tmp_path / "d.csv"
+    path.write_text("date,v\n2024-01-01,1\n,2\n2024年1月3日,3\n",
+                    encoding="utf-8")
+    data = load_data(path)
+    assert pd.api.types.is_datetime64_any_dtype(data.frame["date"])
+    assert data.frame["date"].isna().sum() == 1
