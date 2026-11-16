@@ -723,3 +723,47 @@ def test_many_series(
     sampled = profile(data)
     assert sampled["overview"]["sampled"]
     assert sampled["timeseries"]["interval_seconds"] == 86400
+
+
+def test_transform_keeps_features_of_target_steps(tmp_path: Path) -> None:
+    """
+    目的の列と特徴量を同じ手順で変えたレシピでも, 新しいデータの特徴量に
+    学習のときと同じ変換をかけることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 目的の列 y と特徴量 x を同じ手順で対数, 切り詰め, 標準化
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame({
+        "x": rng.uniform(10, 100, 40), "y": rng.uniform(100, 900, 40)
+    })
+    path = tmp_path / "r.csv"
+    frame.to_csv(path, index=False)
+    recipe = {
+        "target": "y", "task": "regression",
+        "steps": [
+            {"op": "log", "columns": ["x", "y"]},
+            {"op": "clip", "columns": ["x", "y"]},
+            {"op": "standardize", "columns": ["x", "y"]},
+        ],
+        "split": {"method": "random", "valid": 0.2, "seed": 0},
+    }
+    export_dataset(load_data(path), recipe, tmp_path / "ds")
+    dataset = load_dataset(tmp_path / "ds")
+
+    # 目的の列の有る無しに依らず, 当てはめた値で変えた x
+    steps = {s["op"]: s for s in dataset.recipe["steps"]}
+    low, high = steps["clip"]["state"]["bounds"]["x"]
+    center, scale = steps["standardize"]["state"]["values"]["x"]
+    expected = (np.log1p(frame["x"]).clip(low, high) - center) / scale
+    for given in (frame, frame.drop(columns=["y"])):
+        out = dataset.transform(given)
+        assert list(out.columns) == ["x"]
+        assert np.allclose(out["x"], expected)
