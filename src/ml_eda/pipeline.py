@@ -1057,12 +1057,19 @@ class Dataset:
             学習に使う列だけの表 (当てはめた値をそのまま使う)
         """
         # 当てはめ直さずに, 保存した値と列での手順の適用. 行を増減する手順
-        # は除外し, 目的の列を書き換える手順は目的の列だけを除いて適用
-        # (入力と行をそろえ, 同じ手順で変えた特徴量は学習のときと同じに).
-        # 過去の値の列 (lag) は目的の列を読むだけなので, 目的の列 (過去の
-        # 値) があれば適用, 無ければ目的の列を除いての適用
+        # は除外 (入力と行をそろえるため). 目的の列を書き換える手順は,
+        # 過去の値の列 (lag) が目的の列を読み, 目的の列 (過去の値) を
+        # 渡された場合は学習のときと同じく目的の列にもかけ (lag が同じ
+        # 値を読むように), それ以外は目的の列だけを除いてかける (同じ
+        # 手順で変えた特徴量は学習のときと同じ値に)
         result = frame.copy()
         result.columns = [str(name) for name in result.columns]
+        target = self.target
+        keep_target = bool(target) and target in result.columns and any(
+            spec["op"] == "lag"
+            and target in spec.get("state", {}).get("columns", [])
+            for spec in self.recipe["steps"]
+        )
         for spec in self.recipe["steps"]:
             step = STEPS[spec["op"]]
             state = spec.get("state", {})
@@ -1070,9 +1077,13 @@ class Dataset:
             reads_only = spec["op"] == "lag"
             if step.changes_rows:
                 continue
-            if self.target and self.target in columns and not reads_only:
-                state = without_column(state, self.target)
+            dropped = False
+            if target and target in columns and not (
+                reads_only or keep_target
+            ):
+                state = without_column(state, target)
                 columns = state["columns"]
+                dropped = True
                 if not columns:
                     continue
             params = {
@@ -1100,6 +1111,10 @@ class Dataset:
                         f"{', '.join(absent)}{hint}"
                     )
             result = step.apply(result, params, state)
+            # 除いた目的の列の欠損の印は, 学習のときと同じ 0 (目的の列が
+            # 欠損した行は学習に使わない)
+            if dropped and spec.get("indicator"):
+                result[f"{target}_missing"] = 0
         # 学習に使う列が足りない場合は, 黙って落とさずに誤りにする
         missing = [c for c in self.features if c not in result.columns]
         if missing:

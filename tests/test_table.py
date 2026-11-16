@@ -767,3 +767,45 @@ def test_transform_keeps_features_of_target_steps(tmp_path: Path) -> None:
         out = dataset.transform(given)
         assert list(out.columns) == ["x"]
         assert np.allclose(out["x"], expected)
+
+
+def test_transform_target_indicator_and_lag(tmp_path: Path) -> None:
+    """
+    目的の列の欠損の印と, 変えた目的の列の過去の値の列を, 推論のときも
+    学習のときと同じに作ることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # x と y の欠損の印, y を対数にしてから過去の値
+    frame = pd.DataFrame({
+        "x": [1.0, None, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        "y": [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0],
+    })
+    path = tmp_path / "t.csv"
+    frame.to_csv(path, index=False)
+    recipe = {
+        "target": "y", "task": "regression",
+        "steps": [
+            {"op": "impute", "columns": ["x", "y"], "indicator": True},
+            {"op": "log", "columns": ["x", "y"]},
+            {"op": "lag", "columns": ["y"], "lags": [1]},
+        ],
+        "split": {"method": "random", "valid": 0.2, "seed": 0},
+    }
+    export_dataset(load_data(path), recipe, tmp_path / "ds")
+    dataset = load_dataset(tmp_path / "ds")
+    assert "y_missing" in dataset.features
+
+    # 印は 0, 過去の値は対数にした y をずらした値
+    out = dataset.transform(frame)
+    assert (out["y_missing"] == 0).all()
+    assert np.allclose(
+        out["y_lag1"].iloc[1:], np.log1p(frame["y"]).iloc[:-1]
+    )
