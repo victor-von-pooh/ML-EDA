@@ -654,3 +654,32 @@ def test_transform_with_lag(tmp_path: Path) -> None:
     assert list(dropped.transform(data.frame.drop(columns=["temp"]))) == [
         "sales_lag1"
     ]
+
+
+def test_time_lag_internal_names() -> None:
+    """
+    内部の列の名前 (__time など) と同じ名前の列があっても, 時刻でずらせる
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # __time, __row, __by0 という名前の列をずらす
+    frame = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-04"]),
+        "__by0": ["A", "A", "A"],
+        "__time": [1.0, 2.0, 4.0],
+        "__row": [10.0, 20.0, 40.0],
+    })
+    result = apply_lag(frame, {
+        "columns": ["__time", "__row"], "lags": [1], "windows": [2],
+        "by": ["__by0"], "time": "date",
+    }, {})
+    assert result["__time_lag1"].tolist()[1:] == [1.0, 2.0]
+    assert result["__row_mean2"].tolist()[1:] == [10.0, 20.0]
+    assert list(result.columns[:4]) == list(frame.columns)

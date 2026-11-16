@@ -917,13 +917,23 @@ def apply_time_lag(
 
     # 過去の値の表 (系列と時刻ごとに 1 つ. 重なれば後の行) と, 探す側の表
     result = frame.copy()
-    keys = [f"__by{k}" for k in range(len(by))]
+    # 内部の列の名前 (表の列と重ならない名前)
+    taken = {str(name) for name in frame.columns}
+
+    def fresh(name: str) -> str:
+        while name in taken:
+            name = f"_{name}"
+        taken.add(name)
+        return name
+
+    time_key, row_key = fresh("__time"), fresh("__row")
+    keys = [fresh(f"__by{k}") for k in range(len(by))]
     base = pd.DataFrame(
         {key: frame[name].astype(str).to_numpy() for key, name in zip(
             keys, by
         )}, index=frame.index
     )
-    base["__time"] = times
+    base[time_key] = times
     columns = [
         name for name in resolve_columns(frame, params.get("columns"), {})
         if name not in by and name != time
@@ -937,18 +947,18 @@ def apply_time_lag(
             f"時刻でずらす列は数値にしてください: {', '.join(text)}"
         )
     rows = pd.concat([base, frame[columns]], axis=1).dropna(
-        subset=["__time"]
-    ).sort_values("__time", kind="stable")
-    known = rows.drop_duplicates(keys + ["__time"], keep="last")
+        subset=[time_key]
+    ).sort_values(time_key, kind="stable")
+    known = rows.drop_duplicates(keys + [time_key], keep="last")
     for lag in params.get("lags", [1]):
         wanted = base.copy()
-        wanted["__time"] = base["__time"] - step * int(lag)
-        wanted["__row"] = np.arange(len(base))
+        wanted[time_key] = base[time_key] - step * int(lag)
+        wanted[row_key] = np.arange(len(base))
         found = pd.merge_asof(
-            wanted.dropna(subset=["__time"]).sort_values("__time"),
-            known, on="__time", by=keys or None, direction="backward",
+            wanted.dropna(subset=[time_key]).sort_values(time_key),
+            known, on=time_key, by=keys or None, direction="backward",
             tolerance=pd.Timedelta(0) if match == "exact" else None
-        ).set_index("__row")
+        ).set_index(row_key)
         for name in columns:
             values = np.full(len(base), np.nan)
             values[found.index.to_numpy()] = found[name].to_numpy(
@@ -958,19 +968,19 @@ def apply_time_lag(
 
     # 移動平均は w × freq 前からその時刻の前まで (その時刻は含めない. 同じ
     # 時刻の行は全て平均に入れ, 期間にある値だけの平均)
-    positions = base.assign(__row=np.arange(len(base)))
+    positions = base.assign(**{row_key: np.arange(len(base))})
     for window in params.get("windows", []):
         span = step * int(window)
-        indexed = rows.set_index("__time")
+        indexed = rows.set_index(time_key)
         rolled = (
             indexed.groupby(keys, dropna=False)[columns] if keys
             else indexed[columns]
         ).rolling(span, closed="left").mean().reset_index()
-        rolled = rolled.drop_duplicates(keys + ["__time"], keep="last")
-        merged = positions.merge(rolled, on=keys + ["__time"], how="inner")
+        rolled = rolled.drop_duplicates(keys + [time_key], keep="last")
+        merged = positions.merge(rolled, on=keys + [time_key], how="inner")
         for name in columns:
             values = np.full(len(base), np.nan)
-            values[merged["__row"].to_numpy()] = merged[name].to_numpy(
+            values[merged[row_key].to_numpy()] = merged[name].to_numpy(
                 dtype=float, na_value=np.nan
             )
             result[f"{name}_mean{window}"] = values
