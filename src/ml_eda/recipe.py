@@ -815,6 +815,7 @@ def apply_lag(
         時刻の順に並んだ表
     params: dict
         columns, lags (ずらし幅の並び), windows (移動平均の幅の並び),
+        gap (移動平均をいくつ前から始めるか. 既定 1),
         by (系列を分ける列の並び. 店ごとの売上のように, 複数の系列が同じ
         時刻に並ぶ場合は, 系列ごとにずらす), time と freq と match (時刻で
         ずらす場合. apply_time_lag)
@@ -839,6 +840,7 @@ def apply_lag(
     missing = [name for name in by if name not in frame.columns]
     if missing:
         raise ValueError(f"系列を分ける列がありません: {', '.join(missing)}")
+    gap = window_gap(params)
     if params.get("time"):
         return apply_time_lag(result, params, by)
     for name in resolve_columns(frame, params.get("columns"), {}):
@@ -856,13 +858,137 @@ def apply_lag(
         for window in params.get("windows", []):
             mean = (
                 groups.transform(
-                    lambda s, w=int(window): s.shift(1).rolling(w).mean()
+                    lambda s, w=int(window), g=gap: s.shift(g).rolling(
+                        w
+                    ).mean()
                 ) if groups is not None
-                else column.shift(1).rolling(int(window)).mean()
+                else column.shift(gap).rolling(int(window)).mean()
             )
-            result[f"{name}_mean{window}"] = mean
+            result[mean_name(name, window, gap)] = mean
 
     return result
+
+
+def window_gap(params: dict) -> int:
+    """
+    移動平均をいくつ前から始めるか (gap) を確かめて返す関数
+
+    Parameters
+    ----------
+    params: dict
+        lag の手順の引数
+
+    Returns
+    ----------
+    gap: int
+        1 以上の整数 (既定 1. 1 なら 1 つ前から)
+
+    Raises
+    ----------
+    ValueError
+        1 以上の整数でない場合
+    """
+    # 1 以上の整数の確認 (真偽値は除く)
+    value = params.get("gap", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"gap は 1 以上の整数にしてください: {value}")
+    gap = value
+
+    return gap
+
+
+def mean_name(name: str, window: Any, gap: int) -> str:
+    """
+    移動平均の列の名前を作る関数
+
+    Parameters
+    ----------
+    name: str
+        元の列の名前
+    window: Any
+        移動平均の幅
+    gap: int
+        いくつ前から始めるか
+
+    Returns
+    ----------
+    column: str
+        <列>_mean<幅> (gap が 1 でなければ <列>_mean<幅>_gap<gap>)
+    """
+    # 既定の gap の名前は前の版と同じ
+    column = f"{name}_mean{window}" + (f"_gap{gap}" if gap != 1 else "")
+
+    return column
+
+
+def window_means(
+    rows: pd.DataFrame, base: pd.DataFrame, keys: list, time_key: str,
+    columns: list, shift: pd.Timedelta, span: pd.Timedelta
+) -> dict[str, np.ndarray]:
+    """
+    行ごとに, [時刻 - shift - span, 時刻 - shift) にある値の平均を求める
+    関数
+
+    Parameters
+    ----------
+    rows: pd.DataFrame
+        時刻の順に並べた, 系列の鍵と時刻と値の表
+    base: pd.DataFrame
+        求める行の系列の鍵と時刻 (元の表の並び)
+    keys: list
+        系列の鍵の列 (無ければ空)
+    time_key: str
+        時刻の列
+    columns: list
+        平均を求める列
+    shift: pd.Timedelta
+        窓の終わりを前にずらす長さ
+    span: pd.Timedelta
+        窓の長さ
+
+    Returns
+    ----------
+    means: dict[str, np.ndarray]
+        列ごとの, 元の表の並びの平均 (窓に値が無ければ欠損)
+    """
+    # 系列ごとの累積和と値の数 (同じ時刻の行は全て入る)
+    ordered = rows.reset_index(drop=True)
+    totals = ordered[keys + [time_key]].copy()
+    grouped = ordered.groupby(keys, dropna=False) if keys else None
+    for name in columns:
+        filled = ordered[name].fillna(0.0).astype(float)
+        counted = ordered[name].notna().astype(float)
+        totals[f"{name}__sum"] = (
+            filled.groupby([ordered[k] for k in keys]).cumsum()
+            if grouped is not None else filled.cumsum()
+        )
+        totals[f"{name}__count"] = (
+            counted.groupby([ordered[k] for k in keys]).cumsum()
+            if grouped is not None else counted.cumsum()
+        )
+
+    # 窓の両端より前の累積 (端の時刻ちょうどは含めない)
+    edges = {}
+    for edge, offset in (("hi", shift), ("lo", shift + span)):
+        query = base[keys].copy()
+        query["__at"] = base[time_key] - offset
+        query["__row"] = np.arange(len(base))
+        found = pd.merge_asof(
+            query.dropna(subset=["__at"]).sort_values("__at"),
+            totals, left_on="__at", right_on=time_key, by=keys or None,
+            direction="backward", allow_exact_matches=False
+        ).set_index("__row")
+        edges[edge] = found.reindex(np.arange(len(base)))
+    means = {}
+    for name in columns:
+        total = (edges["hi"][f"{name}__sum"].fillna(0.0)
+                 - edges["lo"][f"{name}__sum"].fillna(0.0))
+        count = (edges["hi"][f"{name}__count"].fillna(0.0)
+                 - edges["lo"][f"{name}__count"].fillna(0.0))
+        valid = (count > 0) & base[time_key].notna().to_numpy()
+        means[name] = np.where(valid, total / count.where(count > 0), np.nan)
+
+    return means
 
 
 def apply_time_lag(
@@ -876,7 +1002,7 @@ def apply_time_lag(
     frame: pd.DataFrame
         表 (並びは問わない. 返す表は元の並び)
     params: dict
-        columns, lags, windows, time (時刻の列), freq (1 つ分の間隔.
+        columns, lags, windows, gap, time (時刻の列), freq (1 つ分の間隔.
         1D, 1h など), match (previous はその時刻が無ければそれより前で
         最も近い値, exact は無ければ欠損. 既定 previous)
     by: list
@@ -967,10 +1093,19 @@ def apply_time_lag(
             result[f"{name}_lag{lag}"] = values
 
     # 移動平均は w × freq 前からその時刻の前まで (その時刻は含めない. 同じ
-    # 時刻の行は全て平均に入れ, 期間にある値だけの平均)
+    # 時刻の行は全て平均に入れ, 期間にある値だけの平均). gap が g なら, 窓を
+    # (g - 1) × freq だけ前にずらし, 累積和で窓の平均を直接求める (ずらした
+    # 時刻に行が無い休みの日も, 窓に値があれば平均を出す)
+    gap = window_gap(params)
     positions = base.assign(**{row_key: np.arange(len(base))})
     for window in params.get("windows", []):
         span = step * int(window)
+        if gap > 1:
+            means = window_means(rows, base, keys, time_key, columns,
+                                 step * (gap - 1), span)
+            for name in columns:
+                result[mean_name(name, window, gap)] = means[name]
+            continue
         indexed = rows.set_index(time_key)
         rolled = (
             indexed.groupby(keys, dropna=False)[columns] if keys
@@ -983,7 +1118,7 @@ def apply_time_lag(
             values[merged[row_key].to_numpy()] = merged[name].to_numpy(
                 dtype=float, na_value=np.nan
             )
-            result[f"{name}_mean{window}"] = values
+            result[mean_name(name, window, gap)] = values
 
     return result
 
@@ -1076,6 +1211,8 @@ def register_builtin_steps() -> None:
         "lag", None, apply_lag,
         {"columns": columns, "lags": "ずらし幅の並び",
          "windows": "移動平均の幅の並び",
+         "gap": "移動平均をいくつ前から始めるか (既定 1. 決める時点で 1 つ前が"
+                "分からないなら 2)",
          "by": "系列を分ける列の並び (店ごとなど. 省略すると 1 つの系列)",
          "time": "時刻でずらす場合の時刻の列 (省略すると行でずらす)",
          "freq": "時刻でずらす 1 つ分の間隔 (1D, 1h など. 既定 1D)",
