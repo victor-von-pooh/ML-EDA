@@ -925,7 +925,7 @@ def test_load_dates_with_blank_cells(tmp_path: Path) -> None:
 
 def test_lag_window_gap() -> None:
     """
-    移動平均を何つ前から始めるか (gap) を, 行でずらす場合と時刻でずらす
+    移動平均をいくつ前から始めるか (gap) を, 行でずらす場合と時刻でずらす
     場合の両方で確かめる関数
 
     Parameters
@@ -948,6 +948,27 @@ def test_lag_window_gap() -> None:
     times = apply_lag(frame, {"columns": ["v"], "lags": [2], "windows": [2],
                               "gap": 2, "time": "date"}, {})
     assert list(times["v_mean2_gap2"].iloc[3:]) == [1.5, 2.5]
+
+    # 窓が一部だけ埋まる行と, gap を付けてもずらした値は変わらない
+    assert times["v_mean2_gap2"].iloc[2] == 1.0
+    assert list(times["v_lag2"].iloc[2:]) == [1.0, 2.0, 3.0]
+
+    # 休みの日 (3 日) を挟んでも, 窓に値があれば平均を出す. 系列ごと
+    holiday = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-04",
+                                "2024-01-05", "2024-01-01", "2024-01-03"]),
+        "shop": ["A", "A", "A", "A", "B", "B"],
+        "v": [1.0, 2.0, 4.0, 5.0, 10.0, 30.0],
+    })
+    gapped = apply_lag(holiday, {
+        "columns": ["v"], "lags": [2], "windows": [2], "gap": 2,
+        "time": "date", "by": ["shop"],
+    }, {})
+    assert gapped.loc[2, "v_mean2_gap2"] == 1.5
+    assert gapped.loc[3, "v_mean2_gap2"] == 2.0
+    # 店 B の 3 日は 1 日と 2 日の窓 (B の 1 日の 10 だけ. A の値は入らない)
+    assert gapped.loc[5, "v_mean2_gap2"] == 10.0
+    assert np.isnan(gapped.loc[4, "v_mean2_gap2"])
 
     # 既定 (gap 1) の列の名前は前と同じ. 1 以上の整数でなければ誤り
     plain = apply_lag(frame, {"columns": ["v"], "windows": [2]}, {})
