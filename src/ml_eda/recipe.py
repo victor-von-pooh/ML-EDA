@@ -853,16 +853,69 @@ def apply_lag(
                 groups.shift(int(lag)) if groups is not None
                 else column.shift(int(lag))
             )
+        gap = window_gap(params)
         for window in params.get("windows", []):
             mean = (
                 groups.transform(
-                    lambda s, w=int(window): s.shift(1).rolling(w).mean()
+                    lambda s, w=int(window): s.shift(gap).rolling(w).mean()
                 ) if groups is not None
-                else column.shift(1).rolling(int(window)).mean()
+                else column.shift(gap).rolling(int(window)).mean()
             )
-            result[f"{name}_mean{window}"] = mean
+            result[mean_name(name, window, gap)] = mean
 
     return result
+
+
+def window_gap(params: dict) -> int:
+    """
+    移動平均を何つ前から始めるか (gap) を確かめて返す関数
+
+    Parameters
+    ----------
+    params: dict
+        lag の手順の引数
+
+    Returns
+    ----------
+    gap: int
+        1 以上の整数 (既定 1. 1 なら 1 つ前から)
+
+    Raises
+    ----------
+    ValueError
+        1 以上の整数でない場合
+    """
+    # 真偽値は整数として扱わない
+    value = params.get("gap", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"gap は 1 以上の整数にしてください: {value}")
+    gap = value
+
+    return gap
+
+
+def mean_name(name: str, window: Any, gap: int) -> str:
+    """
+    移動平均の列の名前を作る関数
+
+    Parameters
+    ----------
+    name: str
+        元の列の名前
+    window: Any
+        移動平均の幅
+    gap: int
+        何つ前から始めるか
+
+    Returns
+    ----------
+    column: str
+        <列>_mean<幅> (gap が 1 でなければ <列>_mean<幅>_gap<gap>)
+    """
+    # 既定の gap の名前は前の版と同じ
+    column = f"{name}_mean{window}" + (f"_gap{gap}" if gap != 1 else "")
+
+    return column
 
 
 def apply_time_lag(
@@ -967,8 +1020,11 @@ def apply_time_lag(
             result[f"{name}_lag{lag}"] = values
 
     # 移動平均は w × freq 前からその時刻の前まで (その時刻は含めない. 同じ
-    # 時刻の行は全て平均に入れ, 期間にある値だけの平均)
+    # 時刻の行は全て平均に入れ, 期間にある値だけの平均). gap が g なら, 窓を
+    # (g - 1) × freq だけ前にずらす (その時刻の (g - 1) つ前の時刻の平均)
+    gap = window_gap(params)
     positions = base.assign(**{row_key: np.arange(len(base))})
+    positions[time_key] = positions[time_key] - step * (gap - 1)
     for window in params.get("windows", []):
         span = step * int(window)
         indexed = rows.set_index(time_key)
@@ -983,7 +1039,7 @@ def apply_time_lag(
             values[merged[row_key].to_numpy()] = merged[name].to_numpy(
                 dtype=float, na_value=np.nan
             )
-            result[f"{name}_mean{window}"] = values
+            result[mean_name(name, window, gap)] = values
 
     return result
 
@@ -1076,6 +1132,8 @@ def register_builtin_steps() -> None:
         "lag", None, apply_lag,
         {"columns": columns, "lags": "ずらし幅の並び",
          "windows": "移動平均の幅の並び",
+         "gap": "移動平均を何つ前から始めるか (既定 1. 決める時点で 1 つ前が"
+                "分からないなら 2)",
          "by": "系列を分ける列の並び (店ごとなど. 省略すると 1 つの系列)",
          "time": "時刻でずらす場合の時刻の列 (省略すると行でずらす)",
          "freq": "時刻でずらす 1 つ分の間隔 (1D, 1h など. 既定 1D)",

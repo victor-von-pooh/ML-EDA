@@ -921,3 +921,38 @@ def test_load_dates_with_blank_cells(tmp_path: Path) -> None:
     data = load_data(path)
     assert pd.api.types.is_datetime64_any_dtype(data.frame["date"])
     assert data.frame["date"].isna().sum() == 1
+
+
+def test_lag_window_gap() -> None:
+    """
+    移動平均を何つ前から始めるか (gap) を, 行でずらす場合と時刻でずらす
+    場合の両方で確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 1, 2, 3, 4, 5 日の値. gap 2 の 2 日の平均は 2 つ前と 3 つ前
+    frame = pd.DataFrame({
+        "date": pd.date_range("2024-01-01", periods=5),
+        "v": [1.0, 2.0, 3.0, 4.0, 5.0],
+    })
+    rows = apply_lag(frame, {"columns": ["v"], "lags": [2], "windows": [2],
+                             "gap": 2}, {})
+    assert list(rows["v_mean2_gap2"].iloc[3:]) == [1.5, 2.5]
+    assert np.isnan(rows["v_mean2_gap2"].iloc[2])
+    times = apply_lag(frame, {"columns": ["v"], "lags": [2], "windows": [2],
+                              "gap": 2, "time": "date"}, {})
+    assert list(times["v_mean2_gap2"].iloc[3:]) == [1.5, 2.5]
+
+    # 既定 (gap 1) の列の名前は前と同じ. 1 以上の整数でなければ誤り
+    plain = apply_lag(frame, {"columns": ["v"], "windows": [2]}, {})
+    assert plain["v_mean2"].iloc[2] == 1.5
+    for bad in (0, 1.5, True, "2"):
+        with pytest.raises(ValueError, match="gap"):
+            apply_lag(frame, {"columns": ["v"], "windows": [2], "gap": bad},
+                      {})
