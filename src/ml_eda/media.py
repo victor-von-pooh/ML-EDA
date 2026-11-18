@@ -1,5 +1,7 @@
+import hashlib
 import re
 import struct
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -156,6 +158,35 @@ def image_header(path: Path) -> dict:
     return info
 
 
+def file_digest(path: Path) -> Optional[str]:
+    """
+    ファイルの中身の SHA-256 を求める関数
+
+    同じ画像を見つけるため
+
+    Parameters
+    ----------
+    path: Path
+        ファイル
+
+    Returns
+    ----------
+    digest: Optional[str]
+        16 進の文字 (読めなければ None)
+    """
+    # 大きなファイルでもメモリに載せないよう, 1 MiB ずつの読み込み
+    hasher = hashlib.sha256()
+    try:
+        with open(path, "rb") as stream:
+            for chunk in iter(partial(stream.read, 1 << 20), b""):
+                hasher.update(chunk)
+    except OSError:
+        return None
+    digest = hasher.hexdigest()
+
+    return digest
+
+
 def read_image(path: Path) -> np.ndarray:
     """
     画像を numpy の配列として読む関数
@@ -207,7 +238,7 @@ def load_images(path: Path, **options: Any) -> Data:
     ----------
     data: Data
         1 行が 1 枚の画像のデータ (path, label, width, height, channels,
-        mode, format, bytes). 画素は load_item で読む
+        mode, format, bytes, digest). 画素は load_item で読む
     """
     # ファイルの一覧とラベル (無い場合は置き方を案内)
     root = path if path.is_dir() else path.parent
@@ -227,6 +258,7 @@ def load_images(path: Path, **options: Any) -> Data:
             row["label"] = labels[index]
         row.update(image_header(file))
         row["bytes"] = file.stat().st_size
+        row["digest"] = file_digest(file)
         rows.append(row)
     frame = pd.DataFrame(rows)
     roles = {"path": "path"}
@@ -823,6 +855,22 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
                 ),
                 "columns": ["width", "height"],
             })
+        if "digest" in frame.columns:
+            # 同じ画像 (ファイルの中身が同じ. 分割をまたぐと検証が甘くなる)
+            digests = frame["digest"].dropna()
+            repeated = int(digests.duplicated().sum())
+            result["duplicates"] = repeated
+            if repeated:
+                findings.append({
+                    "severity": "warning", "code": "duplicate_items",
+                    "message": (
+                        f"同じ画像 (ファイルの中身が同じ) が {repeated} 件"
+                        "あります (2 回目以降の数). 学習用と検証用に分かれる"
+                        "と正解率が甘くなるので, drop_duplicates (columns: "
+                        "[digest]) で落としてください"
+                    ),
+                    "columns": ["digest"],
+                })
         if len(result["modes"]) > 1:
             findings.append({
                 "severity": "info", "code": "mixed_modes",

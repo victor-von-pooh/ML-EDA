@@ -37,8 +37,8 @@ class Step:
 # 手順の登録簿
 STEPS: dict[str, Step] = {}
 
-# 処理の間だけ使う列 (分割, 日時の写し, 元の行の位置)
-HIDDEN = ("__split__", "__time__", "__row__")
+# 処理の間だけ使う列 (分割, 日時の写し, 元の行の位置, グループの写し)
+HIDDEN = ("__split__", "__time__", "__row__", "__group__")
 
 # columns が auto のときに選ぶ列の型 (書いていない手順は数値の列)
 WANT = {
@@ -541,9 +541,12 @@ def apply_drop_missing(
     result: pd.DataFrame
         行を落とした表
     """
-    # 指定の列に欠損がある行を落とす
+    # 指定の列 (省略すると処理の間だけ使う列を除く全ての列) に欠損がある
+    # 行の削除
     columns = params.get("columns")
-    subset = None if columns in (None, "auto") else (
+    subset = [c for c in frame.columns if c not in HIDDEN] if columns in (
+        None, "auto"
+    ) else (
         [columns] if isinstance(columns, str) else list(columns)
     )
     result = frame.dropna(subset=subset)

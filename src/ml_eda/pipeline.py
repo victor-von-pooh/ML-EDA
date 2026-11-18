@@ -14,7 +14,7 @@ from ml_eda.itemprep import (
     apply_steps, check_item_steps, fit_item_steps, item_notes,
     run_item_steps, to_array
 )
-from ml_eda.profile import to_json
+from ml_eda.profile import finding, to_json
 from ml_eda.recipe import (
     HIDDEN, STEPS, WANT, category_key, load_recipe, resolve_columns,
     to_plain
@@ -23,11 +23,15 @@ from ml_eda.recipe import (
 # データセットの説明の形式の版
 DATASET_FORMAT_VERSION = 1
 
-# 分割を表す列と, 分割に使う日時の写し (処理の間だけ使う)
+# 分割を表す列と, 分割に使う日時とグループの写し (処理の間だけ使う)
 SPLIT_COLUMN = "__split__"
 TIME_COLUMN = "__time__"
 ROW_COLUMN = "__row__"
-HIDDEN_COLUMNS = (SPLIT_COLUMN, TIME_COLUMN, ROW_COLUMN)
+GROUP_COLUMN = "__group__"
+HIDDEN_COLUMNS = (SPLIT_COLUMN, TIME_COLUMN, ROW_COLUMN, GROUP_COLUMN)
+
+# 重なりの例として挙げる値の数
+OVERLAP_EXAMPLES = 3
 
 # 目的の列があるのにタスクを決めていない場合の注意
 NO_TASK_NOTE = (
@@ -54,6 +58,8 @@ class Prepared:
     notes: list = field(default_factory=list)
     # 画像, 文, 点群の中身の手順をかけた, 分割ごとの配列
     arrays: dict = field(default_factory=dict)
+    # 分割の後に分かる気付き (分割をまたぐグループや画像の重なり)
+    findings: list = field(default_factory=list)
 
 
 def split_counts(count: int, valid: float, test: float) -> tuple[int, int]:
@@ -313,6 +319,145 @@ def first_fit(steps: list) -> int:
     return position
 
 
+def group_column(frame: pd.DataFrame, split: dict) -> Optional[str]:
+    """
+    レシピの分割に書いたグループの列の名前を返す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        手順をかける前の表 (列の名前は文字)
+    split: dict
+        レシピの分割 (column がグループの列)
+
+    Returns
+    ----------
+    name: Optional[str]
+        グループの列の名前 (書いていなければ None)
+
+    Raises
+    ----------
+    ValueError
+        書いた列が表に無い場合
+    """
+    # 空の文字は書いていないものと同じ扱い (画面で選び直した場合など)
+    column = split.get("column")
+    if column is None or column == "":
+        return None
+    name = str(column)
+    if name not in frame.columns:
+        raise ValueError(f"グループの列 (split.column) がありません: {name}")
+
+    return name
+
+
+def count_overlap(keys: pd.Series, splits: pd.Series) -> dict:
+    """
+    同じ値が複数の分割にまたがる様子を数える関数
+
+    Parameters
+    ----------
+    keys: pd.Series
+        行ごとの値 (グループや画像のハッシュ. 欠損は数えない)
+    splits: pd.Series
+        行ごとの分割の名前 (keys と同じ並び)
+
+    Returns
+    ----------
+    overlap: dict
+        values (またがる値の数), rows (その値を持つ行の数), examples
+        (またがる値の例)
+    """
+    # 値ごとの分割の数が 2 以上のものの集計
+    known = keys.notna().to_numpy()
+    frame = pd.DataFrame({
+        "key": keys[known].astype(str).to_numpy(),
+        "split": splits[known].to_numpy(),
+    })
+    spans = frame.groupby("key", sort=True)["split"].nunique()
+    shared = spans[spans > 1].index
+    overlap = {
+        "values": int(len(shared)),
+        "rows": int(frame["key"].isin(shared).sum()),
+        "examples": [str(key) for key in shared[:OVERLAP_EXAMPLES]],
+    }
+
+    return overlap
+
+
+def overlap_findings(
+    data: Data, recipe: dict, result: pd.DataFrame
+) -> list[dict]:
+    """
+    分割をまたぐグループと画像の重なりを気付きにする関数
+
+    確かめるのは元の行の値 (分割の前の手順で変える前). 同じ人や同じ
+    画像が学習用と検証用の両方にあると, 新しい人や画像に当てはめる力を
+    甘く測るため
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        読み込んだレシピ
+    result: pd.DataFrame
+        分割の列と元の行の位置の列を持つ, 手順をかけた表
+
+    Returns
+    ----------
+    findings: list[dict]
+        group_overlap と item_overlap の気付き
+    """
+    # 元の表の, 残った行の値と分割
+    source = data.frame.copy(deep=False)
+    source.columns = [str(name) for name in source.columns]
+    rows = result[ROW_COLUMN].to_numpy()
+    splits = result[SPLIT_COLUMN].reset_index(drop=True)
+    method = recipe["split"].get("method", "random")
+    findings = []
+    if method == "none":
+        return findings
+
+    # グループの列の同じ値
+    group = group_column(source, recipe["split"])
+    if group:
+        keys = source[group].iloc[rows].reset_index(drop=True)
+        overlap = count_overlap(keys, splits)
+        if overlap["values"]:
+            usual = (
+                "時刻の順の分割では, 同じものが過去と未来にまたがるのは普通"
+                "です. " if method == "time" else ""
+            )
+            findings.append(finding(
+                "info" if method == "time" else "warning", "group_overlap",
+                f"{group} の同じ値が {overlap['values']} 個 (計 "
+                f"{overlap['rows']} 行) 複数の分割にまたがります (例: "
+                f"{', '.join(overlap['examples'])}). 学習用にいる人や物を"
+                "検証用で当てると, 新しい人や物に当てはめる力より甘く"
+                f"測ります. {usual}新しい {group} に当てはめるなら, 分割を "
+                f"group (column: {group}) にしてください",
+                [group]
+            ))
+
+    # 同じ画像 (ファイルの中身が同じ)
+    if data.kind == "image" and "digest" in source.columns:
+        keys = source["digest"].iloc[rows].reset_index(drop=True)
+        overlap = count_overlap(keys, splits)
+        if overlap["values"]:
+            findings.append(finding(
+                "warning", "item_overlap",
+                f"同じ画像 (ファイルの中身が同じ) が {overlap['values']} "
+                f"種類 (計 {overlap['rows']} 枚) 複数の分割にまたがります. "
+                "検証用に学習用と同じ画像があると正解率が甘くなるので, "
+                "分割の前に drop_duplicates (columns: [digest]) で落として"
+                "ください",
+                ["digest"]
+            ))
+
+    return findings
+
+
 def run_step(
     frame: pd.DataFrame, spec: dict, roles: dict, number: int,
     fit_rows: Optional[pd.Series]
@@ -427,19 +572,28 @@ def apply_recipe(
         frame = frame[frame[target].notna()]
     steps = recipe["steps"] if upto is None else recipe["steps"][:upto]
 
-    # 分割の前の手順, 分割, 分割の後の手順. 時刻の順の分割に使う日時は,
-    # 手順で日時の列を落としても使えるように別の列に写しておく
+    # 分割の前の手順, 分割, 分割の後の手順. 分割に使う日時とグループの
+    # 列は, 手順で落としても使えるように別の列への写し
     time = roles.get("time")
     if time and time in frame.columns:
         frame[TIME_COLUMN] = frame[time]
+    group = group_column(frame, recipe["split"])
+    if group:
+        frame[GROUP_COLUMN] = frame[group]
     head = first_fit(steps)
     for number, spec in enumerate(steps[:head], 1):
         frame = run_step(frame, spec, roles, number, None)
     if frame.empty:
         raise ValueError("手順の後に行が残りませんでした")
     split_roles = {**roles, "time": TIME_COLUMN} if time else roles
-    frame[SPLIT_COLUMN] = assign_splits(frame, recipe["split"], split_roles)
-    frame = frame.drop(columns=[TIME_COLUMN], errors="ignore")
+    split = recipe["split"]
+    if group:
+        # 手順で値を変えた (表記をそろえたなど) 列が残っていれば, その値
+        if group in frame.columns:
+            frame[GROUP_COLUMN] = frame[group]
+        split = {**split, "column": GROUP_COLUMN}
+    frame[SPLIT_COLUMN] = assign_splits(frame, split, split_roles)
+    frame = frame.drop(columns=[TIME_COLUMN, GROUP_COLUMN], errors="ignore")
     for number, spec in enumerate(steps[head:], head + 1):
         frame = run_step(
             frame, spec, roles, number, frame[SPLIT_COLUMN] == "train"
@@ -496,7 +650,8 @@ def prepare(
     Returns
     ----------
     prepared: Prepared
-        分割ごとの表, 当てはめたレシピ, 学習に使う列, クラス
+        分割ごとの表, 当てはめたレシピ, 学習に使う列, クラス, 分割を
+        またぐ重なりの気付き
 
     Raises
     ----------
@@ -545,18 +700,23 @@ def prepare(
         for n in names
     }
 
+    # 分割をまたぐグループと画像の重なり (文は注意にも足す)
+    findings = overlap_findings(data, recipe, result)
+    overlaps = [item["message"] for item in findings]
+
     # 画像, 文, 点群は中身の手順で配列にする (表の列は学習に使わない)
     arrays: dict = {}
     if data.item_loader is not None:
         check_item_steps(recipe["item_steps"], data.kind)
         rows = data.frame.iloc[result[ROW_COLUMN].tolist()]
         notes = item_notes(rows, recipe["item_steps"], data.kind)
+        notes.extend(overlaps)
         if target and recipe["task"] == "none":
             notes.append(NO_TASK_NOTE)
         if not read_items:
             return Prepared(
                 frames=frames, recipe=recipe, features=[], target=target,
-                classes=classes, notes=notes
+                classes=classes, notes=notes, findings=findings
             )
         arrays = run_item_steps(
             item_reader(data), positions.get("train", []), positions,
@@ -565,7 +725,7 @@ def prepare(
         )
         prepared = Prepared(
             frames=frames, recipe=recipe, features=[], target=target,
-            classes=classes, notes=notes, arrays=arrays
+            classes=classes, notes=notes, arrays=arrays, findings=findings
         )
         return prepared
 
@@ -585,11 +745,12 @@ def prepare(
             )
         elif result[name].isna().any():
             notes.append(f"{name} に欠損が残っています (impute で埋める)")
+    notes.extend(overlaps)
     if target and recipe["task"] == "none":
         notes.append(NO_TASK_NOTE)
     prepared = Prepared(
         frames=frames, recipe=recipe, features=features, target=target,
-        classes=classes, notes=notes
+        classes=classes, notes=notes, findings=findings
     )
 
     return prepared
