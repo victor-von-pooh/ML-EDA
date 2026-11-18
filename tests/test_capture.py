@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ml_eda import detect, load_data, prepare, profile
+from ml_eda import capture_layout, detect, load_data, prepare, profile
 
 Image = pytest.importorskip("PIL.Image")
 
@@ -278,3 +278,35 @@ def test_capture_review_cases(tmp_path: Path) -> None:
     assert load_data(lost).frame.loc[0, "view_gap"] == pytest.approx(
         240, abs=0.5
     )
+
+
+def test_capture_layout(tmp_path: Path) -> None:
+    """
+    上から見たカメラの配置と, 最も大きい隙間の位置を確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 半周 (0 から 180 度) は 180 度の隙間. カメラは中心から 1.5 m
+    place = write_capture(tmp_path / "half", [0, 45, 90, 135, 180], 200)
+    layout = capture_layout(load_data(place).load_item(0))
+    assert layout["orbit"] and layout["gap"] == pytest.approx(180, abs=0.5)
+    reach = [math.hypot(c["x"], c["y"]) for c in layout["cameras"]]
+    assert reach == pytest.approx([1.5] * 5, abs=1e-6)
+
+    # 隙間の始まりの方位から隙間の分だけ進むと, 次のカメラ
+    angles = sorted(math.degrees(math.atan2(c["y"], c["x"]))
+                    for c in layout["cameras"])
+    end = (layout["gap_from"] + layout["gap"] + 180) % 360 - 180
+    assert min(abs(end - a) for a in angles) < 0.5
+
+    # その場で向きだけ変えた撮影の位置は無し
+    still = write_capture(tmp_path / "still", [0, 30, 60], 200, radius=0.0)
+    layout = capture_layout(load_data(still).load_item(0))
+    assert not layout["orbit"] and layout["cameras"][0]["x"] is None
