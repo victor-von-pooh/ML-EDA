@@ -313,6 +313,88 @@ def view_center(poses: list[np.ndarray]) -> Optional[np.ndarray]:
     return center
 
 
+def orbit_of(
+    poses: list[np.ndarray], up: np.ndarray, sign: float,
+    distance: Optional[float]
+) -> Optional[dict]:
+    """
+    物の中心と, 上から見た (上の向きに垂直な面に写した) カメラの位置を
+    求める関数
+
+    Parameters
+    ----------
+    poses: list[np.ndarray]
+        カメラから世界への 4 x 4 の姿勢
+    up: np.ndarray
+        世界の上の向き
+    sign: float
+        視線がカメラの Z 軸のどちら向きか
+    distance: Optional[float]
+        撮影距離 (深度の中央値. 無ければ None)
+
+    Returns
+    ----------
+    orbit: Optional[dict]
+        center (世界の座標), axes (面の 2 つの向き), flat (中心からの面の
+        上の位置 (枚数, 2). メートル). 物の周りを回った撮影でない (中心が
+        決まらない, 中心が半分以上のカメラの後ろ, カメラが中心からほぼ
+        動いていない) 場合は None
+    """
+    # 中心が決まり, 半分以上のカメラの前にあること
+    orbit: Optional[dict] = None
+    center = view_center(poses)
+    if center is None:
+        return orbit
+    ahead = [
+        float((center - pose[:3, 3]) @ (sign * pose[:3, 2])) > 0
+        for pose in poses
+    ]
+    if sum(ahead) * 2 < len(poses):
+        return orbit
+
+    # 上の向きに垂直な面の 2 つの向きと, 写した位置
+    base = np.array([1.0, 0.0, 0.0])
+    if abs(float(base @ up)) > 0.9:
+        base = np.array([0.0, 0.0, 1.0])
+    first = base - (base @ up) * up
+    first = first / np.linalg.norm(first)
+    second = np.cross(up, first)
+    offsets = np.array([pose[:3, 3] for pose in poses]) - center
+    flat = np.stack([offsets @ first, offsets @ second], axis=1)
+
+    # 中心から十分に離れていること
+    reach = float(np.median(np.linalg.norm(flat, axis=1)))
+    limit = ORBIT_RATIO * distance if distance else ORBIT_METERS
+    if reach < limit:
+        return orbit
+    orbit = {"center": center, "axes": (first, second), "flat": flat}
+
+    return orbit
+
+
+def widest_gap(flat: np.ndarray) -> tuple[float, float]:
+    """
+    上から見たカメラの方位の, 最も大きい隙間とその始まりを求める関数
+
+    Parameters
+    ----------
+    flat: np.ndarray
+        中心からの面の上の位置 (枚数, 2)
+
+    Returns
+    ----------
+    gap: tuple[float, float]
+        隙間 (度) と, 隙間の始まりの方位 (度. -180 から 180)
+    """
+    # 方位の隣どうしの差の最大 (一周を含む)
+    angles = np.sort(np.degrees(np.arctan2(flat[:, 1], flat[:, 0])))
+    steps = np.diff(np.concatenate([angles, [angles[0] + 360.0]]))
+    widest = int(np.argmax(steps))
+    gap = (float(steps[widest]), float(angles[widest]))
+
+    return gap
+
+
 def view_gap_of(
     poses: list[np.ndarray], up: np.ndarray, sign: float,
     distance: Optional[float]
@@ -334,43 +416,68 @@ def view_gap_of(
     Returns
     ----------
     gap: float
-        最も大きい隙間 (0 から 360). 物の周りを回った撮影でない (中心が
-        決まらない, 中心が多くのカメラの後ろ, カメラが中心からほぼ動いて
-        いない) 場合は NaN
+        最も大きい隙間 (0 から 360). 物の周りを回った撮影でない場合は NaN
     """
-    # 中心が決まり, 半分以上のカメラの前にあること
-    gap = math.nan
-    center = view_center(poses)
-    if center is None:
-        return gap
-    positions = np.array([pose[:3, 3] for pose in poses])
-    ahead = [
-        float((center - pose[:3, 3]) @ (sign * pose[:3, 2])) > 0
-        for pose in poses
-    ]
-    if sum(ahead) * 2 < len(poses):
-        return gap
-
-    # 上の向きに垂直な面に写した位置が, 中心から十分に離れていること
-    offsets = positions - center
-    flat = offsets - np.outer(offsets @ up, up)
-    reach = float(np.median(np.linalg.norm(flat, axis=1)))
-    limit = ORBIT_RATIO * distance if distance else ORBIT_METERS
-    if reach < limit:
-        return gap
-
-    # 方位の隣どうしの差の最大 (一周を含む)
-    base = np.array([1.0, 0.0, 0.0])
-    if abs(float(base @ up)) > 0.9:
-        base = np.array([0.0, 0.0, 1.0])
-    first = base - (base @ up) * up
-    first = first / np.linalg.norm(first)
-    second = np.cross(up, first)
-    angles = np.sort(np.degrees(np.arctan2(flat @ second, flat @ first)))
-    steps = np.diff(np.concatenate([angles, [angles[0] + 360.0]]))
-    gap = float(steps.max())
+    # 回った撮影の, 上から見た位置の方位
+    orbit = orbit_of(poses, up, sign, distance)
+    gap = math.nan if orbit is None else widest_gap(orbit["flat"])[0]
 
     return gap
+
+
+def capture_layout(item: dict, distance: Optional[float] = None) -> dict:
+    """
+    1 回の撮影のカメラを, 物の中心から上から見た配置にする関数 (画面で
+    周回の欠けを描くため)
+
+    Parameters
+    ----------
+    item: dict
+        load_item で読んだ撮影の中身
+    distance: Optional[float] = None
+        撮影距離 (表の distance_median. 回った撮影かの判定に使う)
+
+    Returns
+    ----------
+    layout: dict
+        orbit (回った撮影か), cameras (各枚の frame (番号), x, y (中心か
+        らの面の上の位置. メートル. 回った撮影でなければ None),
+        tracked), gap (最も大きい隙間 (度) か None), gap_from (隙間の
+        始まりの方位 (度. x 軸から y 軸へ) か None)
+    """
+    # 追跡できた枚で中心と面を決め, 全ての枚をその面に写す
+    convention = {"coordinate_convention": item.get("convention") or {}}
+    sign = forward_sign(convention)
+    tracked = [
+        frame["pose"] for frame in item["frames"]
+        if frame.get("pose") is not None and frame.get("tracking") in (
+            None, "TRACKING"
+        )
+    ]
+    orbit = None
+    if len(tracked) >= 2:
+        orbit = orbit_of(
+            tracked, up_of(convention, tracked, sign), sign, distance
+        )
+    cameras = []
+    for index, frame in enumerate(item["frames"]):
+        place = None
+        if orbit is not None and frame.get("pose") is not None:
+            offset = frame["pose"][:3, 3] - orbit["center"]
+            place = [float(offset @ axis) for axis in orbit["axes"]]
+        cameras.append({
+            "frame": index,
+            "x": place[0] if place else None,
+            "y": place[1] if place else None,
+            "tracked": frame.get("tracking") in (None, "TRACKING"),
+        })
+    gap = widest_gap(orbit["flat"]) if orbit is not None else None
+    layout = {
+        "orbit": orbit is not None, "cameras": cameras,
+        "gap": gap[0] if gap else None, "gap_from": gap[1] if gap else None,
+    }
+
+    return layout
 
 
 def depth_scale(depth: dict) -> float:
