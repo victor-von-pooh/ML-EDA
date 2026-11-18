@@ -504,6 +504,13 @@ def prepare(
         手順の失敗, 目的の列が手順で消えた場合, 学習用の行が無い場合,
         回帰の目的の列が数値でない場合
     """
+    # 多視点の撮影は, 今は読み込みと分析だけ
+    if data.kind == "capture":
+        raise ValueError(
+            "多視点の撮影は, 今は読み込みと分析だけです (前処理と書き出し"
+            "は, 多視点の学習の正解の形が決まってから)"
+        )
+
     # 分割と手順
     recipe = load_recipe(recipe)
     result, roles = apply_recipe(data, recipe)
