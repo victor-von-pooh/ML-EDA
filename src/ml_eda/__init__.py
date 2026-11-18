@@ -1,5 +1,6 @@
 from ml_eda import media  # noqa: F401 (画像, 文, 点群の読み込みを登録)
 from ml_eda import capture  # noqa: F401 (多視点の撮影の読み込みを登録)
+from ml_eda.capture import capture_layout
 from ml_eda.data import KINDS, Data
 from ml_eda.itemprep import ITEM_STEPS, describe_item_steps
 from ml_eda.loaders import (
@@ -13,7 +14,6 @@ from ml_eda.profile import profile
 from ml_eda.recipe import (
     STEPS, Step, describe_steps, load_recipe, register_step
 )
-from ml_eda.capture import capture_layout
 from ml_eda.textunits import compare_tokenizers
 
 __version__ = "0.1.0"

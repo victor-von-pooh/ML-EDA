@@ -286,7 +286,7 @@ def view_center(poses: list[np.ndarray]) -> Optional[np.ndarray]:
     各枚の視線 (の直線) に最も近い点 (撮った物の中心) を求める関数
 
     視線の直線への距離は向きの符号に依らないので, 前か後ろかは使わない
-    (前にあるかは view_gap_of で確かめる)
+    (前にあるかは orbit_of で確かめる)
 
     Parameters
     ----------
@@ -440,18 +440,20 @@ def capture_layout(item: dict, distance: Optional[float] = None) -> dict:
     Returns
     ----------
     layout: dict
-        orbit (回った撮影か), cameras (各枚の frame (番号), x, y (中心か
-        らの面の上の位置. メートル. 回った撮影でなければ None),
-        tracked), gap (最も大きい隙間 (度) か None), gap_from (隙間の
-        始まりの方位 (度. x 軸から y 軸へ) か None)
+        orbit (回った撮影か), cameras (各枚の frame (番号), x, y (中心
+        からの面の上の位置. メートル. 回った撮影でないか, 姿勢の無い枚は
+        None), tracked), gap (最も大きい隙間 (度) か None), gap_from
+        (隙間の始まりの方位 (度) か None). 方位は上から見て反時計回り
+        (x 軸から y 軸へ. y は上向きの座標で描く), 隙間は gap_from から
+        同じ向きに gap 度
     """
-    # 追跡できた枚で中心と面を決め, 全ての枚をその面に写す
+    # 追跡できた枚で決めた中心と面と, 全ての枚の面の上の位置
     convention = {"coordinate_convention": item.get("convention") or {}}
     sign = forward_sign(convention)
     tracked = [
         frame["pose"] for frame in item["frames"]
-        if frame.get("pose") is not None and frame.get("tracking") in (
-            None, "TRACKING"
+        if frame.get("pose") is not None and frame.get("tracking") == (
+            "TRACKING"
         )
     ]
     orbit = None
@@ -469,7 +471,7 @@ def capture_layout(item: dict, distance: Optional[float] = None) -> dict:
             "frame": index,
             "x": place[0] if place else None,
             "y": place[1] if place else None,
-            "tracked": frame.get("tracking") in (None, "TRACKING"),
+            "tracked": frame.get("tracking") == "TRACKING",
         })
     gap = widest_gap(orbit["flat"]) if orbit is not None else None
     layout = {
@@ -711,7 +713,7 @@ def capture_item(root: Path, frame: pd.DataFrame, index: int) -> dict:
             **{key: str(value) if value else None
                for key, value in places.items()},
             "pose": pose_of(entry),
-            "tracking": entry.get("tracking_state"),
+            "tracking": entry.get("tracking_state", "TRACKING"),
         })
     cloud = inside(
         capture, (transforms.get("point_cloud") or {}).get("file_path")

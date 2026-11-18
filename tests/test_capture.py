@@ -306,7 +306,7 @@ def test_capture_layout(tmp_path: Path) -> None:
     end = (layout["gap_from"] + layout["gap"] + 180) % 360 - 180
     assert min(abs(end - a) for a in angles) < 0.5
 
-    # その場で向きだけ変えた撮影は, 位置を出さない
+    # その場で向きだけ変えた撮影の位置は無し
     still = write_capture(tmp_path / "still", [0, 30, 60], 200, radius=0.0)
     layout = capture_layout(load_data(still).load_item(0))
     assert not layout["orbit"] and layout["cameras"][0]["x"] is None
