@@ -541,10 +541,11 @@ def apply_drop_missing(
     result: pd.DataFrame
         行を落とした表
     """
-    # 指定の列 (省略すると処理の間だけ使う列を除く全ての列) に欠損がある
-    # 行の削除
+    # 指定の列 (省略するとグループの写しを除く全ての列) に欠損がある行の
+    # 削除 (グループの写しは落とした列の欠損を残すので見ない. 時刻の写しは
+    # 今までどおり見る)
     columns = params.get("columns")
-    subset = [c for c in frame.columns if c not in HIDDEN] if columns in (
+    subset = [c for c in frame.columns if c != "__group__"] if columns in (
         None, "auto"
     ) else (
         [columns] if isinstance(columns, str) else list(columns)

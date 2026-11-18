@@ -342,10 +342,8 @@ def group_column(frame: pd.DataFrame, split: dict) -> Optional[str]:
     """
     # 空の文字は書いていないものと同じ扱い (画面で選び直した場合など)
     column = split.get("column")
-    if column is None or column == "":
-        return None
-    name = str(column)
-    if name not in frame.columns:
+    name = None if column is None or column == "" else str(column)
+    if name is not None and name not in frame.columns:
         raise ValueError(f"グループの列 (split.column) がありません: {name}")
 
     return name

@@ -176,13 +176,14 @@ def file_digest(path: Path) -> Optional[str]:
     """
     # 大きなファイルでもメモリに載せないよう, 1 MiB ずつの読み込み
     hasher = hashlib.sha256()
+    digest: Optional[str] = None
     try:
         with open(path, "rb") as stream:
             for chunk in iter(partial(stream.read, 1 << 20), b""):
                 hasher.update(chunk)
+        digest = hasher.hexdigest()
     except OSError:
-        return None
-    digest = hasher.hexdigest()
+        digest = None
 
     return digest
 
@@ -232,7 +233,8 @@ def load_images(path: Path, **options: Any) -> Data:
     path: Path
         ディレクトリか画像のファイル
     **options: Any
-        使わない
+        digest (既定 True. False なら中身の hash を求めない. 大きな
+        フォルダで全てのファイルを読む時間を省くため)
 
     Returns
     ----------
@@ -258,7 +260,8 @@ def load_images(path: Path, **options: Any) -> Data:
             row["label"] = labels[index]
         row.update(image_header(file))
         row["bytes"] = file.stat().st_size
-        row["digest"] = file_digest(file)
+        if options.get("digest", True):
+            row["digest"] = file_digest(file)
         rows.append(row)
     frame = pd.DataFrame(rows)
     roles = {"path": "path"}

@@ -401,11 +401,22 @@ def test_group_overlap(tmp_path: Path) -> None:
     after = preview(table(frame), recipe, 1)["after"]["columns"]
     assert [column["name"] for column in after] == ["x", "y"]
 
-    # 落とした列の欠損では, drop_missing (列の指定なし) で行を落とさない
+    # 落とした列の欠損で, drop_missing (列の指定なし) が行を落とさないこと
     missing = frame.assign(customer=[None] * 4 + list(frame["customer"][4:]))
     recipe["steps"].append({"op": "drop_missing"})
     frames = prepare(table(missing), recipe).frames
     assert sum(len(part) for part in frames.values()) == 100
+
+    # 時刻の写しの欠損は今までどおり落とす (時刻の列を落とした後も)
+    stamped = Data(kind="timeseries", frame=frame.assign(
+        t=[pd.NaT] + list(pd.date_range("2024-01-01", periods=99, freq="D"))
+    ), roles={"time": "t"})
+    timed = {"target": "y", "task": "classification",
+             "steps": [{"op": "drop_columns", "columns": ["t", "customer"]},
+                       {"op": "drop_missing"}],
+             "split": {"method": "time", "valid": 0.2, "seed": 0}}
+    frames = prepare(stamped, timed).frames
+    assert sum(len(part) for part in frames.values()) == 99
 
     # 時刻の順の分割では, 同じものが過去と未来にまたがるのは普通 (info)
     frame["t"] = pd.date_range("2024-01-01", periods=100, freq="D")

@@ -572,3 +572,7 @@ def test_image_duplicates(tmp_path: Path) -> None:
     prepared = prepare(data, recipe, read_items=False)
     assert prepared.findings == []
     assert sum(len(frame) for frame in prepared.frames.values()) == 12
+
+    # 中身の hash を省ける (大きなフォルダ)
+    quick = load_data(tmp_path / "pets", digest=False)
+    assert "digest" not in quick.frame.columns
