@@ -594,7 +594,7 @@ def test_text_unlabeled(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 正解の無い文は, 学習用に無い文字だけでできている
+    # 学習用に無い文字だけの, 正解の無い文
     frame = pd.DataFrame({
         "review": ["良い", "悪い", "良い良い", "悪い悪い", "ゾゾ", "ヌヌ"],
         "label": ["good", "bad", "good", "bad", None, None],
@@ -608,13 +608,13 @@ def test_text_unlabeled(tmp_path: Path) -> None:
         "split": {"method": "none", "unlabeled": "keep"},
     }
 
-    # 中身を読まない場合も分割の件数は分かる
+    # 中身を読まない場合の分割の件数
     preview = prepare(data, recipe, read_items=False)
     assert {name: len(f) for name, f in preview.frames.items()} == {
         "train": 4, "unlabeled": 2
     }
 
-    # 語彙に無い文字は 1, 埋め草は 0
+    # 語彙に無い文字の 1 と埋め草の 0
     info = export_dataset(data, recipe, tmp_path / "ds")
     assert info["splits"]["unlabeled"]["shape"] == [2, 4]
     dataset = load_dataset(tmp_path / "ds")

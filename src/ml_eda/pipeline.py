@@ -630,7 +630,8 @@ def sorted_classes(values: pd.Series) -> list[str]:
 
 
 def unlabeled_split(
-    data: Data, recipe: dict, target: str, features: list, columns: list
+    data: Data, recipe: dict, target: str, features: list[str],
+    columns: list[str]
 ) -> tuple[pd.DataFrame, list[int]]:
     """
     目的の列の欠けた行に, 学習用で当てはめた前処理をかける関数
@@ -646,9 +647,9 @@ def unlabeled_split(
         当てはめた値を含むレシピ
     target: str
         目的の列
-    features: list
+    features: list[str]
         学習に使う列 (画像などは空)
-    columns: list
+    columns: list[str]
         学習用の分割の表の列 (同じ並びにそろえる)
 
     Returns
@@ -668,8 +669,9 @@ def unlabeled_split(
     source.columns = [str(name) for name in source.columns]
     missing = source[target].isna().to_numpy()
     if not missing.any():
-        empty = pd.DataFrame(columns=columns)
-        return empty, []
+        frame = pd.DataFrame(columns=columns)
+        rows: list[int] = []
+        return frame, rows
 
     # 推論と同じかけ方 (過去の値の列の前後関係も推論と同じ)
     reader = Dataset(
@@ -697,9 +699,9 @@ def unlabeled_split(
         if name == target:
             values[name] = np.full(len(rows), np.nan)
         elif name in applied.columns:
-            values[name] = applied[name].iloc[rows].to_numpy()
+            values[name] = applied[name].iloc[rows].reset_index(drop=True)
         elif name in source.columns:
-            values[name] = source[name].iloc[rows].to_numpy()
+            values[name] = source[name].iloc[rows].reset_index(drop=True)
         else:
             values[name] = np.full(len(rows), np.nan)
     frame = pd.DataFrame(values, index=range(len(rows)), columns=columns)
@@ -796,7 +798,7 @@ def prepare(
         if name not in reserved and name not in HIDDEN_COLUMNS
     ]
 
-    # 目的の列の欠けた行は, 学習用で当てはめた値で unlabeled の分割に
+    # 目的の列の欠けた行の, 学習用で当てはめた値での unlabeled の分割
     if keep:
         extra, extra_rows = unlabeled_split(
             data, recipe, target, features, list(frames["train"].columns)
@@ -841,6 +843,11 @@ def prepare(
             )
         elif result[name].isna().any():
             notes.append(f"{name} に欠損が残っています (impute で埋める)")
+        elif UNLABELED in frames and frames[UNLABELED][name].isna().any():
+            notes.append(
+                f"{name} の欠損が {UNLABELED} の分割にだけ残っています "
+                "(impute で埋める)"
+            )
     notes.extend(overlaps)
     if target and recipe["task"] == "none":
         notes.append(NO_TASK_NOTE)
@@ -1465,6 +1472,9 @@ class Dataset:
                 columns = state["columns"]
                 dropped_target = True
                 if not columns:
+                    # 目的の列だけの手順も, 欠損の印の列は学習のときと同じ 0
+                    if spec.get("indicator"):
+                        result[f"{target}_missing"] = 0
                     continue
             params = {
                 k: v for k, v in spec.items() if k not in ("op", "state")

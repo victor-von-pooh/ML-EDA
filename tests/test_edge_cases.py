@@ -520,7 +520,7 @@ def test_unlabeled_split(tmp_path: Path) -> None:
     assert np.allclose(unlabeled["x"].drop(index=5), expected)
     assert not unlabeled[kept.features].isna().any().any()
 
-    # 書き出しは版 1 のまま, unlabeled の分割は目的の値を返さない
+    # 版 1 のままの書き出しと, 目的の値の無い unlabeled の分割
     recipe["split"]["unlabeled"] = "keep"
     info = export_dataset(table(frame), recipe, tmp_path / "ds")
     assert info["format_version"] == 1
@@ -563,7 +563,7 @@ def test_unlabeled_split_cases() -> None:
         prepare(table(frame), {"split": {"method": "none",
                                          "unlabeled": "keep"}})
 
-    # 欠けた行が無ければ unlabeled の分割は作らない
+    # 欠けた行が無い場合の, unlabeled の分割の無い書き出し
     recipe = {
         "target": "y", "task": "classification",
         "split": {"method": "none", "unlabeled": "keep"},
@@ -571,7 +571,7 @@ def test_unlabeled_split_cases() -> None:
     prepared = prepare(table(frame.iloc[:40]), recipe)
     assert set(prepared.frames) == {"train"}
 
-    # 目的の列の過去の値は, 推論と同じく分かる値を読む
+    # 推論と同じく分かる値を読む, 目的の列の過去の値
     series = pd.DataFrame({
         "t": np.arange(10.0),
         "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, None, None],
@@ -589,3 +589,36 @@ def test_unlabeled_split_cases() -> None:
     ]
     assert unlabeled["y_lag1"].iloc[0] == 8.0
     assert np.isnan(unlabeled["y_lag1"].iloc[1])
+
+
+def test_unlabeled_target_indicator() -> None:
+    """
+    目的の列だけを補完して欠損の印を足す手順でも, keep の書き出しと
+    欠損の残る列の注意ができることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 目的の列だけの欠損の印 (推論では 0)
+    frame = pd.DataFrame({
+        "x": np.arange(10.0),
+        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, None, None, 10.0],
+    })
+    recipe = {
+        "target": "y", "task": "regression",
+        "steps": [{"op": "impute", "columns": ["y"], "indicator": True}],
+        "split": {"method": "none", "unlabeled": "keep"},
+    }
+    prepared = prepare(table(frame), recipe)
+    assert prepared.frames["unlabeled"]["y_missing"].tolist() == [0, 0]
+
+    # unlabeled の分割にだけ残る欠損の注意
+    frame.loc[8, "x"] = np.nan
+    recipe["steps"] = []
+    prepared = prepare(table(frame), recipe)
+    assert any("unlabeled の分割にだけ" in note for note in prepared.notes)
