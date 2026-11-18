@@ -252,7 +252,10 @@ def load_images(path: Path, **options: Any) -> Data:
             "のような形なら, train のディレクトリを選んでください)"
         )
 
-    # ヘッダーから大きさとモード
+    # ヘッダーから大きさとモード (画面からの設定は文字で来る)
+    hashing = options.get("digest", True)
+    if isinstance(hashing, str):
+        hashing = hashing.strip().lower() not in ("false", "0", "no", "")
     rows = []
     for index, file in enumerate(files):
         row = {"path": file.relative_to(root).as_posix()}
@@ -260,7 +263,7 @@ def load_images(path: Path, **options: Any) -> Data:
             row["label"] = labels[index]
         row.update(image_header(file))
         row["bytes"] = file.stat().st_size
-        if options.get("digest", True):
+        if hashing:
             row["digest"] = file_digest(file)
         rows.append(row)
     frame = pd.DataFrame(rows)
@@ -976,7 +979,10 @@ def register_collections() -> None:
     # 1 件ずつの中身を持つ種類
     register_loader(Loader(
         "image_folder", "image", IMAGE_EXTENSIONS, sniff_image, load_images,
-        {}, "画像 (1 枚か, <クラス>/<画像> のディレクトリ. Pillow が要る)"
+        {"digest": "中身の hash を求めるか (既定 true. false で, 大きな"
+                   "フォルダの全てのファイルを読む時間を省く. 同じ画像の"
+                   "気付きは出ない)"},
+        "画像 (1 枚か, <クラス>/<画像> のディレクトリ. Pillow が要る)"
     ))
     register_loader(Loader(
         "text_lines", "text", (".txt",), sniff_text, load_text,
