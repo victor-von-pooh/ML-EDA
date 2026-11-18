@@ -1,4 +1,5 @@
 from ml_eda import media  # noqa: F401 (画像, 文, 点群の読み込みを登録)
+from ml_eda import capture  # noqa: F401 (多視点の撮影の読み込みを登録)
 from ml_eda.data import KINDS, Data
 from ml_eda.itemprep import ITEM_STEPS, describe_item_steps
 from ml_eda.loaders import (

@@ -1,0 +1,175 @@
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from ml_eda import detect, load_data, prepare, profile
+
+Image = pytest.importorskip("PIL.Image")
+
+
+def look_at(position: np.ndarray, center: np.ndarray) -> list:
+    """
+    位置から中心を向くカメラの姿勢 (OpenGL の -Z が前, カメラから世界) を
+    作る関数
+
+    Parameters
+    ----------
+    position: np.ndarray
+        カメラの位置
+    center: np.ndarray
+        見る点
+
+    Returns
+    ----------
+    pose: list
+        4 x 4 の行列の並び
+    """
+    # 前 (-Z) が中心を向き, 上 (+Y) が世界の上に近い
+    forward = center - position
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, [0.0, 1.0, 0.0])
+    right = right / np.linalg.norm(right)
+    up = np.cross(right, forward)
+    pose = np.eye(4)
+    pose[:3, 0], pose[:3, 1], pose[:3, 2] = right, up, -forward
+    pose[:3, 3] = position
+
+    return pose.tolist()
+
+
+def write_capture(
+    place: Path, angles: list, confidence: int, lost: int = 0
+) -> Path:
+    """
+    中心の周りの方位から撮った撮影 (深度 1.5 m, 信頼度は一定) を書く関数
+
+    Parameters
+    ----------
+    place: Path
+        撮影のディレクトリ
+    angles: list
+        カメラの方位 (度)
+    confidence: int
+        信頼度の画像の値
+    lost: int = 0
+        追跡できなかった枚の数 (先頭から)
+
+    Returns
+    ----------
+    place: Path
+        撮影のディレクトリ
+    """
+    # 画像 (中身は使わない), 生の深度 (左の列だけ欠け), 信頼度
+    for name in ("images", "raw_depth", "confidence"):
+        (place / name).mkdir(parents=True)
+    center = np.array([0.0, 0.0, -1.0])
+    frames = []
+    for index, angle in enumerate(angles):
+        rad = math.radians(angle)
+        position = center + 1.5 * np.array([math.sin(rad), 0.2, math.cos(rad)])
+        Image.new("RGB", (8, 6)).save(place / "images" / f"{index}.jpg")
+        depth = np.full((9, 16), 1500, dtype=np.uint16)
+        depth[:, 0] = 0
+        Image.fromarray(depth).save(place / "raw_depth" / f"{index}.png")
+        conf = np.full((9, 16), confidence, dtype=np.uint8)
+        conf[:, 0] = 0
+        Image.fromarray(conf).save(place / "confidence" / f"{index}.png")
+        frames.append({
+            "file_path": f"images/{index}.jpg",
+            "transform_matrix": look_at(position, center),
+            "tracking_state": "PAUSED" if index < lost else "TRACKING",
+            "raw_depth_file_path": f"raw_depth/{index}.png",
+            "confidence_file_path": f"confidence/{index}.png",
+        })
+    transforms = {
+        "fl_x": 10.0, "fl_y": 10.0, "cx": 4.0, "cy": 3.0, "w": 8, "h": 6,
+        "depth": {"depth_format": "png16_millimeter", "invalid_value": 0},
+        "coordinate_convention": {"world_up": [0.0, 1.0, 0.0]},
+        "capture": {"device_model": "試しの端末"},
+        "frames": frames,
+    }
+    (place / "transforms.json").write_text(
+        json.dumps(transforms), encoding="utf-8"
+    )
+
+    return place
+
+
+def test_captures(tmp_path: Path) -> None:
+    """
+    多視点の撮影を 1 件 1 行で読み, 深度, 距離, 方位の隙間と気付きを
+    出すことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 一周 (30 度おき) と, 半周だけで信頼度の低い撮影, 追跡の切れた撮影
+    root = tmp_path / "captures"
+    write_capture(root / "a_round", list(range(0, 360, 30)), 200)
+    write_capture(root / "b_half", [0, 45, 90, 135, 180], 50)
+    write_capture(root / "c_lost", list(range(0, 360, 45)), 200, lost=2)
+    (root / "d_broken").mkdir()
+    (root / "d_broken" / "transforms.json").write_text("{}", "utf-8")
+    assert detect(root)[0]["loader"] == "capture"
+    data = load_data(root)
+    assert data.kind == "capture"
+    frame = data.frame.set_index("path")
+    assert frame.loc["a_round", "frames"] == 12
+    assert frame.loc["a_round", "view_gap"] == pytest.approx(30, abs=0.5)
+    assert frame.loc["b_half", "view_gap"] == pytest.approx(180, abs=0.5)
+    assert frame.loc["a_round", "depth_valid"] == pytest.approx(15 / 16)
+    assert frame.loc["b_half", "depth_confident"] == 0
+    assert frame.loc["a_round", "distance_median"] == pytest.approx(1.5)
+    assert frame.loc["c_lost", "tracked"] == 6
+    assert frame.loc["a_round", "device"] == "試しの端末"
+    assert isinstance(frame.loc["d_broken", "error"], str)
+
+    # 気付き: 読めない, 追跡, 信頼度, 周回の欠け
+    codes = {item["code"] for item in profile(data)["findings"]}
+    assert {"unreadable_items", "tracking_lost", "low_depth_confidence",
+            "view_gap"} <= codes
+
+    # 1 件の中身と, 撮影 1 つの場所
+    item = data.load_item(0)
+    assert len(item["frames"]) == 12
+    assert item["frames"][0]["pose"].shape == (4, 4)
+    assert Path(item["frames"][0]["image"]).is_file()
+    one = load_data(root / "a_round")
+    assert list(one.frame["path"]) == ["a_round"]
+    assert one.load_item(0)["intrinsics"]["w"] == 8
+
+
+def test_capture_limits(tmp_path: Path) -> None:
+    """
+    信頼度の下限の誤りと, 前処理が今は対象外であることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 信頼度の下限は 0 から 255 の整数. 下げると信頼できる画素が増える
+    place = write_capture(tmp_path / "c", [0, 90, 180, 270], 50)
+    with pytest.raises(ValueError, match="min_confidence"):
+        load_data(place, min_confidence=300)
+    low = load_data(place, min_confidence=10).frame
+    assert low.loc[0, "depth_confident"] == pytest.approx(15 / 16)
+
+    # 前処理と書き出しは対象外
+    recipe = {"format_version": 1, "target": None, "task": "none",
+              "steps": [], "split": {"method": "random", "valid": 0.5}}
+    with pytest.raises(ValueError, match="読み込みと分析だけ"):
+        prepare(load_data(place), recipe)
