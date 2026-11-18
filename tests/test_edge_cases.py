@@ -6,7 +6,9 @@ import pandas as pd
 import pytest
 import yaml
 
-from ml_eda import Data, export_dataset, load_data, prepare, preview, profile
+from ml_eda import (
+    Data, export_dataset, load_data, load_dataset, prepare, preview, profile
+)
 
 
 def table(frame: pd.DataFrame) -> Data:
@@ -437,3 +439,153 @@ def test_group_overlap(tmp_path: Path) -> None:
     recipe["split"]["column"] = "patient"
     with pytest.raises(ValueError, match="split.column"):
         prepare(series, recipe)
+
+
+def unlabeled_table() -> pd.DataFrame:
+    """
+    目的の列の欠けた行を持つ表を作る関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    frame: pd.DataFrame
+        数値の列 x (欠損あり), カテゴリの列 city, 目的の列 y (後ろの 20 行
+        は欠損) の表
+    """
+    # 正解の付いた 40 行と, 値の大きく違う正解の無い 20 行
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame({
+        "x": np.concatenate([rng.normal(0, 1, 40), np.full(20, 1000.0)]),
+        "city": list("AB") * 30,
+        "y": [0, 1] * 20 + [None] * 20,
+    })
+    frame.loc[[3, 45], "x"] = np.nan
+    frame.loc[50, "city"] = None
+
+    return frame
+
+
+def test_unlabeled_split(tmp_path: Path) -> None:
+    """
+    split.unlabeled: keep で目的の列の欠けた行を unlabeled の分割に残し,
+    正解の付いた分割と当てはめた値は drop と同じことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 当てはめる手順と, 行を絞る手順
+    frame = unlabeled_table()
+    recipe = {
+        "target": "y", "task": "classification",
+        "steps": [
+            {"op": "drop_missing", "columns": ["city"]},
+            {"op": "impute", "columns": ["x"], "strategy": "median"},
+            {"op": "standardize", "columns": ["x"]},
+            {"op": "one_hot", "columns": ["city"]},
+        ],
+        "split": {
+            "method": "stratified", "valid": 0.25, "test": 0.25, "seed": 0,
+        },
+    }
+    dropped = prepare(table(frame), recipe)
+    kept = prepare(
+        table(frame),
+        {**recipe, "split": {**recipe["split"], "unlabeled": "keep"}}
+    )
+
+    # 正解の付いた分割と当てはめた値は drop と同じ
+    assert set(dropped.frames) == {"train", "valid", "test"}
+    assert set(kept.frames) == {"train", "valid", "test", "unlabeled"}
+    for name in ("train", "valid", "test"):
+        pd.testing.assert_frame_equal(kept.frames[name], dropped.frames[name])
+    assert kept.recipe["steps"] == dropped.recipe["steps"]
+    assert kept.features == dropped.features
+
+    # 正解の無い行は学習用の値で前処理 (city の欠けた 1 行は落ちる)
+    unlabeled = kept.frames["unlabeled"]
+    assert len(unlabeled) == 19 and unlabeled["y"].isna().all()
+    assert list(unlabeled.columns) == list(kept.frames["train"].columns)
+    state = kept.recipe["steps"][2]["state"]
+    mean, scale = state["values"]["x"]
+    expected = (1000.0 - mean) / scale
+    assert np.allclose(unlabeled["x"].drop(index=5), expected)
+    assert not unlabeled[kept.features].isna().any().any()
+
+    # 書き出しは版 1 のまま, unlabeled の分割は目的の値を返さない
+    recipe["split"]["unlabeled"] = "keep"
+    info = export_dataset(table(frame), recipe, tmp_path / "ds")
+    assert info["format_version"] == 1
+    assert info["splits"]["unlabeled"]["rows"] == 19
+    assert (tmp_path / "ds" / info["splits"]["unlabeled"]["file"]).is_file()
+    dataset = load_dataset(tmp_path / "ds")
+    x, y = dataset.arrays("unlabeled")
+    assert x.shape == (19, len(dataset.features)) and y is None
+    _, y = dataset.arrays("train")
+    assert y is not None and y.dtype == np.int64
+
+    # 推論と同じ前処理の値
+    rows = frame[frame["y"].isna() & frame["city"].notna()]
+    applied = dataset.transform(rows.reset_index(drop=True))
+    pd.testing.assert_frame_equal(
+        applied.reset_index(drop=True),
+        dataset.frames["unlabeled"][dataset.features], check_dtype=False
+    )
+
+
+def test_unlabeled_split_cases() -> None:
+    """
+    split.unlabeled の誤り, 欠けた行の無い場合, 目的の列の過去の値の列を
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 知らない値と, 目的の列の無いレシピの keep は誤り
+    frame = unlabeled_table()
+    with pytest.raises(ValueError, match="drop か keep"):
+        prepare(table(frame), {"split": {"method": "none",
+                                         "unlabeled": "yes"}})
+    with pytest.raises(ValueError, match="目的の列が要ります"):
+        prepare(table(frame), {"split": {"method": "none",
+                                         "unlabeled": "keep"}})
+
+    # 欠けた行が無ければ unlabeled の分割は作らない
+    recipe = {
+        "target": "y", "task": "classification",
+        "split": {"method": "none", "unlabeled": "keep"},
+    }
+    prepared = prepare(table(frame.iloc[:40]), recipe)
+    assert set(prepared.frames) == {"train"}
+
+    # 目的の列の過去の値は, 推論と同じく分かる値を読む
+    series = pd.DataFrame({
+        "t": np.arange(10.0),
+        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, None, None],
+    })
+    recipe = {
+        "target": "y", "task": "regression",
+        "steps": [{"op": "lag", "columns": ["y"], "lags": [1]}],
+        "split": {"method": "none", "unlabeled": "keep"},
+    }
+    prepared = prepare(table(series), recipe)
+    train = prepared.frames["train"]
+    unlabeled = prepared.frames["unlabeled"]
+    assert len(train) == 8 and train["y_lag1"].iloc[1:].tolist() == [
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0
+    ]
+    assert unlabeled["y_lag1"].iloc[0] == 8.0
+    assert np.isnan(unlabeled["y_lag1"].iloc[1])

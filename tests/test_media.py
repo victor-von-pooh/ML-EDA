@@ -578,3 +578,47 @@ def test_image_duplicates(tmp_path: Path) -> None:
     assert "digest" not in quick.frame.columns
     quick = load_data(tmp_path / "pets", digest="false")
     assert "digest" not in quick.frame.columns
+
+
+def test_text_unlabeled(tmp_path: Path) -> None:
+    """
+    正解の無い文を unlabeled の分割に残し, 語彙は正解の付いた学習用の文
+    だけで作ることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 正解の無い文は, 学習用に無い文字だけでできている
+    frame = pd.DataFrame({
+        "review": ["良い", "悪い", "良い良い", "悪い悪い", "ゾゾ", "ヌヌ"],
+        "label": ["good", "bad", "good", "bad", None, None],
+    })
+    path = tmp_path / "reviews.csv"
+    frame.to_csv(path, index=False)
+    data = load_data(path, text_column="review")
+    recipe = {
+        "target": "label", "task": "classification",
+        "item_steps": [{"op": "vocabulary", "unit": "char", "length": 4}],
+        "split": {"method": "none", "unlabeled": "keep"},
+    }
+
+    # 中身を読まない場合も分割の件数は分かる
+    preview = prepare(data, recipe, read_items=False)
+    assert {name: len(f) for name, f in preview.frames.items()} == {
+        "train": 4, "unlabeled": 2
+    }
+
+    # 語彙に無い文字は 1, 埋め草は 0
+    info = export_dataset(data, recipe, tmp_path / "ds")
+    assert info["splits"]["unlabeled"]["shape"] == [2, 4]
+    dataset = load_dataset(tmp_path / "ds")
+    x, y = dataset.arrays("unlabeled")
+    assert y is None and x.tolist() == [[1, 1, 0, 0]] * 2
+    _, y = dataset.arrays("train")
+    assert sorted(y.tolist()) == [0, 0, 1, 1]

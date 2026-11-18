@@ -17,6 +17,9 @@ TASKS = ("classification", "regression", "forecasting", "none")
 # 分割のしかた
 SPLIT_METHODS = ("random", "stratified", "time", "group", "none")
 
+# 目的の列の欠けた行の扱い (落とすか, unlabeled の分割に残すか)
+UNLABELED_MODES = ("drop", "keep")
+
 
 @dataclass
 class Step:
@@ -1308,6 +1311,11 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     method = loaded["split"].get("method", "random")
     if method not in SPLIT_METHODS:
         raise ValueError(f"知らない分割のしかたです: {method}")
+    unlabeled = loaded["split"].get("unlabeled", "drop")
+    if unlabeled not in UNLABELED_MODES:
+        raise ValueError(
+            f"split.unlabeled は drop か keep にしてください: {unlabeled}"
+        )
 
     return loaded
 

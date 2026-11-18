@@ -41,6 +41,9 @@ NO_TASK_NOTE = (
 # 分割の名前
 SPLITS = ("train", "valid", "test")
 
+# 目的の列の欠けた行を残す分割の名前 (split.unlabeled: keep の場合)
+UNLABELED = "unlabeled"
+
 
 @dataclass
 class Prepared:
@@ -626,6 +629,84 @@ def sorted_classes(values: pd.Series) -> list[str]:
     return classes
 
 
+def unlabeled_split(
+    data: Data, recipe: dict, target: str, features: list, columns: list
+) -> tuple[pd.DataFrame, list[int]]:
+    """
+    目的の列の欠けた行に, 学習用で当てはめた前処理をかける関数
+
+    推論のとき (Dataset.transform) と同じかけ方で, 当てはめ直さない.
+    行を絞る手順で落ちた行は除く
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        当てはめた値を含むレシピ
+    target: str
+        目的の列
+    features: list
+        学習に使う列 (画像などは空)
+    columns: list
+        学習用の分割の表の列 (同じ並びにそろえる)
+
+    Returns
+    ----------
+    frame: pd.DataFrame
+        学習に使う列は前処理の後の値, 他の列は元の値, 目的の列は欠損の表
+    rows: list[int]
+        残した行の元のデータでの位置
+
+    Raises
+    ----------
+    ValueError
+        前処理をかけられない場合
+    """
+    # 目的の列の欠けた行の位置
+    source = data.frame.copy(deep=False)
+    source.columns = [str(name) for name in source.columns]
+    missing = source[target].isna().to_numpy()
+    if not missing.any():
+        empty = pd.DataFrame(columns=columns)
+        return empty, []
+
+    # 推論と同じかけ方 (過去の値の列の前後関係も推論と同じ)
+    reader = Dataset(
+        path=Path("."), recipe=recipe, frames={},
+        info={
+            "kind": data.kind, "task": recipe["task"], "target": target,
+            "features": [{"name": name} for name in features],
+        }
+    )
+    try:
+        applied = reader.transform(source)
+    except ValueError as error:
+        raise ValueError(
+            f"目的の列の欠けた行 ({UNLABELED}) の前処理で失敗しました: "
+            f"{error}"
+        ) from error
+    dropped = set(applied.attrs.get("dropped", {}))
+    rows = [
+        int(row) for row in np.flatnonzero(missing) if int(row) not in dropped
+    ]
+
+    # 学習用の表と同じ列 (前処理の値, 元の値, 欠損の順に選ぶ)
+    values = {}
+    for name in columns:
+        if name == target:
+            values[name] = np.full(len(rows), np.nan)
+        elif name in applied.columns:
+            values[name] = applied[name].iloc[rows].to_numpy()
+        elif name in source.columns:
+            values[name] = source[name].iloc[rows].to_numpy()
+        else:
+            values[name] = np.full(len(rows), np.nan)
+    frame = pd.DataFrame(values, index=range(len(rows)), columns=columns)
+
+    return frame, rows
+
+
 def prepare(
     data: Data, recipe: Union[str, Path, dict],
     item_dir: Optional[Path] = None, read_items: bool = True
@@ -672,6 +753,12 @@ def prepare(
         raise ValueError(f"目的の列 {target} が手順で消えました")
     if not (result[SPLIT_COLUMN] == "train").any():
         raise ValueError("学習用の行がありません (割合か絞り込みを見直す)")
+    keep = recipe["split"].get("unlabeled", "drop") == "keep"
+    if keep and not target:
+        raise ValueError(
+            "split.unlabeled: keep には目的の列が要ります (目的の列の欠けた"
+            "行を残すため)"
+        )
 
     # 目的の列の形 (分類は番号, 回帰は数値)
     classes: list = []
@@ -702,6 +789,22 @@ def prepare(
     findings = overlap_findings(data, recipe, result)
     overlaps = [item["message"] for item in findings]
 
+    # 学習に使う列 (画像などは中身の配列を使うので無し. 役割の列を除く)
+    reserved = {target, roles.get("id"), roles.get("time"), SPLIT_COLUMN}
+    features = [] if data.item_loader is not None else [
+        name for name in result.columns
+        if name not in reserved and name not in HIDDEN_COLUMNS
+    ]
+
+    # 目的の列の欠けた行は, 学習用で当てはめた値で unlabeled の分割に
+    if keep:
+        extra, extra_rows = unlabeled_split(
+            data, recipe, target, features, list(frames["train"].columns)
+        )
+        if extra_rows:
+            frames[UNLABELED] = extra
+            positions[UNLABELED] = extra_rows
+
     # 画像, 文, 点群は中身の手順で配列にする (表の列は学習に使わない)
     arrays: dict = {}
     if data.item_loader is not None:
@@ -727,12 +830,7 @@ def prepare(
         )
         return prepared
 
-    # 学習に使う列 (役割の列を除く) と, 数値でない列の注意
-    reserved = {target, roles.get("id"), roles.get("time"), SPLIT_COLUMN}
-    features = [
-        name for name in result.columns
-        if name not in reserved and name not in HIDDEN_COLUMNS
-    ]
+    # 数値でない列の注意
     notes = []
     for name in features:
         if not pd.api.types.is_numeric_dtype(result[name]):
@@ -1221,14 +1319,15 @@ class Dataset:
         Parameters
         ----------
         split: str
-            train, valid, test のどれか
+            train, valid, test, unlabeled のどれか
 
         Returns
         ----------
         x: np.ndarray
             (件数, 列の数) の float32 の配列
         y: Optional[np.ndarray]
-            目的の値 (分類は int64 の番号, 回帰は float32), 無ければ None
+            目的の値 (分類は int64 の番号, 回帰は float32). 目的の列が
+            無い場合と, 目的の値が全て欠けた分割 (unlabeled) は None
         """
         # 特徴量 (画像などは中身の配列) と目的の値を取り出す
         frame = self.frames[split]
@@ -1239,7 +1338,11 @@ class Dataset:
             else frame[self.features].to_numpy(dtype=np.float32, copy=True)
         )
         y = None
-        if self.target:
+        labeled = (
+            bool(self.target) and self.target in frame.columns
+            and bool(frame[self.target].notna().any())
+        )
+        if labeled:
             dtype = (
                 np.int64 if self.info["task"] == "classification"
                 else np.float32
@@ -1508,12 +1611,13 @@ class Dataset:
         Parameters
         ----------
         split: str
-            train, valid, test のどれか
+            train, valid, test, unlabeled のどれか
 
         Returns
         ----------
         tensors: tuple
-            (特徴量, 目的の値) のテンソル (目的の列が無ければ特徴量だけ)
+            (特徴量, 目的の値) のテンソル (目的の値が無ければ特徴量だけ.
+            unlabeled の分割も)
         """
         # PyTorch は使うときだけ読み込む
         import torch
