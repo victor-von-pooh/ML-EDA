@@ -576,3 +576,5 @@ def test_image_duplicates(tmp_path: Path) -> None:
     # 中身の hash を省ける (大きなフォルダ)
     quick = load_data(tmp_path / "pets", digest=False)
     assert "digest" not in quick.frame.columns
+    quick = load_data(tmp_path / "pets", digest="false")
+    assert "digest" not in quick.frame.columns
