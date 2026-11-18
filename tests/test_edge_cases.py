@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from ml_eda import Data, export_dataset, load_data, prepare, preview, profile
 
@@ -349,3 +350,90 @@ def test_transform_needs_columns(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="落とす列"):
         prepare(table(frame), {"steps": [{"op": "drop_columns",
                                           "columns": "auto"}]})
+
+
+def test_group_overlap(tmp_path: Path) -> None:
+    """
+    グループの列の同じ値が分割をまたぐと気付きにし, グループの分割は
+    手順で列を落としても使えることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 20 人 × 5 行の無作為な分割 (同じ人が分割をまたぐ)
+    frame = pd.DataFrame({
+        "x": np.arange(100.0), "customer": np.repeat(np.arange(20), 5),
+        "y": [0, 1] * 50,
+    })
+    recipe = {
+        "target": "y", "task": "classification",
+        "split": {"method": "random", "valid": 0.3, "column": "customer"},
+    }
+    prepared = prepare(table(frame), recipe)
+    assert [item["code"] for item in prepared.findings] == ["group_overlap"]
+    item = prepared.findings[0]
+    assert item["severity"] == "warning" and item["columns"] == ["customer"]
+    assert "group (column: customer)" in item["message"]
+    assert item["message"] in prepared.notes
+    json.dumps(prepared.findings)
+
+    # 書き出した dataset.yaml の注意と, 変わらない約束の版
+    export_dataset(table(frame), recipe, tmp_path / "ds")
+    described = yaml.safe_load(
+        (tmp_path / "ds" / "dataset.yaml").read_text(encoding="utf-8")
+    )
+    assert described["format_version"] == 1
+    assert item["message"] in described["notes"]
+
+    # 分割の前に列を落としても, 落とす前の値で分けるグループの分割
+    recipe["split"]["method"] = "group"
+    recipe["steps"] = [{"op": "drop_columns", "columns": ["customer"]}]
+    prepared = prepare(table(frame), recipe)
+    assert prepared.findings == [] and "customer" not in prepared.features
+    valid = set(prepared.frames["valid"]["x"] // 5)
+    assert valid and not valid & set(prepared.frames["train"]["x"] // 5)
+    after = preview(table(frame), recipe, 1)["after"]["columns"]
+    assert [column["name"] for column in after] == ["x", "y"]
+
+    # 落とした列の欠損で, drop_missing (列の指定なし) が行を落とさないこと
+    missing = frame.assign(customer=[None] * 4 + list(frame["customer"][4:]))
+    recipe["steps"].append({"op": "drop_missing"})
+    frames = prepare(table(missing), recipe).frames
+    assert sum(len(part) for part in frames.values()) == 100
+
+    # 時刻の写しの欠損は今までどおり落とす (時刻の列を落とした後も)
+    stamped = Data(kind="timeseries", frame=frame.assign(
+        t=[pd.NaT] + list(pd.date_range("2024-01-01", periods=99, freq="D"))
+    ), roles={"time": "t"})
+    timed = {"target": "y", "task": "classification",
+             "steps": [{"op": "drop_columns", "columns": ["t", "customer"]},
+                       {"op": "drop_missing"}],
+             "split": {"method": "time", "valid": 0.2, "seed": 0}}
+    frames = prepare(stamped, timed).frames
+    assert sum(len(part) for part in frames.values()) == 99
+
+    # 時刻の順の分割では, 同じものが過去と未来にまたがるのは普通 (info)
+    frame["t"] = pd.date_range("2024-01-01", periods=100, freq="D")
+    frame["customer"] = np.tile(np.arange(20), 5)
+    series = Data(kind="timeseries", frame=frame, roles={"time": "t"})
+    recipe = {
+        "target": "y", "task": "classification",
+        "split": {"method": "time", "valid": 0.3, "column": "customer"},
+    }
+    findings = prepare(series, recipe).findings
+    assert [item["severity"] for item in findings] == ["info"]
+
+    # 欠損はグループにせず, 空の列名は書いていないもの, 無い列は誤り
+    frame["customer"] = [None] * 99 + [1]
+    assert prepare(series, recipe).findings == []
+    recipe["split"]["column"] = ""
+    assert prepare(series, recipe).findings == []
+    recipe["split"]["column"] = "patient"
+    with pytest.raises(ValueError, match="split.column"):
+        prepare(series, recipe)

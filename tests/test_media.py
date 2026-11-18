@@ -524,3 +524,55 @@ def test_text_normalize(tmp_path: Path) -> None:
     numbers = pd.DataFrame({"a": [1.0, 2.0]})
     with pytest.raises(ValueError, match="文字の列"):
         apply_normalize_text(numbers, {"columns": ["a"]}, {})
+
+
+def test_image_duplicates(tmp_path: Path) -> None:
+    """
+    同じ画像 (ファイルの中身が同じ) をデータの中と分割をまたぐ重なりの
+    気付きにし, drop_duplicates で落とせることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 12 枚と, cat の 1 枚の写し 6 枚
+    write_images(tmp_path / "pets")
+    copied = (tmp_path / "pets" / "cat" / "1.png").read_bytes()
+    for index in range(6):
+        (tmp_path / "pets" / "cat" / f"copy{index}.png").write_bytes(copied)
+    data = load_data(tmp_path / "pets")
+    assert data.frame["digest"].str.len().eq(64).all()
+    assert data.frame["digest"].nunique() == 12
+
+    # データの中の同じ画像
+    result = profile(data, target="label")
+    found = {item["code"]: item for item in result["findings"]}
+    assert found["duplicate_items"]["columns"] == ["digest"]
+    assert result["items"]["duplicates"] == 6
+
+    # 分割をまたぐ同じ画像 (中身を読まずに確かめる)
+    recipe = {
+        "target": "label", "task": "classification",
+        "steps": [],
+        "split": {"method": "random", "valid": 0.5, "seed": 0},
+        "item_steps": [{"op": "normalize"}],
+    }
+    prepared = prepare(data, recipe, read_items=False)
+    codes = [item["code"] for item in prepared.findings]
+    assert codes == ["item_overlap"]
+    assert prepared.findings[0]["message"] in prepared.notes
+
+    # 分割の前に同じ画像を落とした場合
+    recipe["steps"] = [{"op": "drop_duplicates", "columns": ["digest"]}]
+    prepared = prepare(data, recipe, read_items=False)
+    assert prepared.findings == []
+    assert sum(len(frame) for frame in prepared.frames.values()) == 12
+
+    # 中身の hash を省ける (大きなフォルダ)
+    quick = load_data(tmp_path / "pets", digest=False)
+    assert "digest" not in quick.frame.columns
