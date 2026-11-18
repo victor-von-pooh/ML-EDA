@@ -10,7 +10,9 @@ from ml_eda import detect, load_data, prepare, profile
 Image = pytest.importorskip("PIL.Image")
 
 
-def look_at(position: np.ndarray, center: np.ndarray) -> list:
+def look_at(
+    position: np.ndarray, center: np.ndarray, up: np.ndarray
+) -> list:
     """
     位置から中心を向くカメラの姿勢 (OpenGL の -Z が前, カメラから世界) を
     作る関数
@@ -21,16 +23,18 @@ def look_at(position: np.ndarray, center: np.ndarray) -> list:
         カメラの位置
     center: np.ndarray
         見る点
+    up: np.ndarray
+        世界の上の向き
 
     Returns
     ----------
     pose: list
         4 x 4 の行列の並び
     """
-    # 前 (-Z) が中心を向き, 上 (+Y) が世界の上に近い
+    # 前 (-Z) が中心を向き, カメラの上 (+Y) が世界の上に近い
     forward = center - position
     forward = forward / np.linalg.norm(forward)
-    right = np.cross(forward, [0.0, 1.0, 0.0])
+    right = np.cross(forward, up)
     right = right / np.linalg.norm(right)
     up = np.cross(right, forward)
     pose = np.eye(4)
@@ -41,7 +45,8 @@ def look_at(position: np.ndarray, center: np.ndarray) -> list:
 
 
 def write_capture(
-    place: Path, angles: list, confidence: int, lost: int = 0
+    place: Path, angles: list, confidence: int, lost: int = 0,
+    z_up: bool = False, radius: float = 1.5
 ) -> Path:
     """
     中心の周りの方位から撮った撮影 (深度 1.5 m, 信頼度は一定) を書く関数
@@ -56,6 +61,10 @@ def write_capture(
         信頼度の画像の値
     lost: int = 0
         追跡できなかった枚の数 (先頭から)
+    z_up: bool = False
+        世界の上を Z にし, 座標の決まり (world_up) を書かない
+    radius: float = 1.5
+        中心からカメラまでの水平の距離 (0 ならその場で向きだけ変える)
 
     Returns
     ----------
@@ -66,10 +75,17 @@ def write_capture(
     for name in ("images", "raw_depth", "confidence"):
         (place / name).mkdir(parents=True)
     center = np.array([0.0, 0.0, -1.0])
+    up = np.array([0.0, 0.0, 1.0] if z_up else [0.0, 1.0, 0.0])
     frames = []
     for index, angle in enumerate(angles):
         rad = math.radians(angle)
-        position = center + 1.5 * np.array([math.sin(rad), 0.2, math.cos(rad)])
+        ring = [math.sin(rad), math.cos(rad), 0.3] if z_up else [
+            math.sin(rad), 0.3, math.cos(rad)
+        ]
+        position = center + radius * np.array(ring)
+        target = center if radius else position + np.array(
+            [math.sin(rad), 0.0, math.cos(rad)]
+        )
         Image.new("RGB", (8, 6)).save(place / "images" / f"{index}.jpg")
         depth = np.full((9, 16), 1500, dtype=np.uint16)
         depth[:, 0] = 0
@@ -79,7 +95,7 @@ def write_capture(
         Image.fromarray(conf).save(place / "confidence" / f"{index}.png")
         frames.append({
             "file_path": f"images/{index}.jpg",
-            "transform_matrix": look_at(position, center),
+            "transform_matrix": look_at(position, target, up),
             "tracking_state": "PAUSED" if index < lost else "TRACKING",
             "raw_depth_file_path": f"raw_depth/{index}.png",
             "confidence_file_path": f"confidence/{index}.png",
@@ -87,10 +103,11 @@ def write_capture(
     transforms = {
         "fl_x": 10.0, "fl_y": 10.0, "cx": 4.0, "cy": 3.0, "w": 8, "h": 6,
         "depth": {"depth_format": "png16_millimeter", "invalid_value": 0},
-        "coordinate_convention": {"world_up": [0.0, 1.0, 0.0]},
         "capture": {"device_model": "試しの端末"},
         "frames": frames,
     }
+    if not z_up:
+        transforms["coordinate_convention"] = {"world_up": [0.0, 1.0, 0.0]}
     (place / "transforms.json").write_text(
         json.dumps(transforms), encoding="utf-8"
     )
@@ -173,3 +190,63 @@ def test_capture_limits(tmp_path: Path) -> None:
               "steps": [], "split": {"method": "random", "valid": 0.5}}
     with pytest.raises(ValueError, match="読み込みと分析だけ"):
         prepare(load_data(place), recipe)
+
+
+def test_capture_review_cases(tmp_path: Path) -> None:
+    """
+    撮影のディレクトリの外の場所, 単位の書き方, 形の違う信頼度, 上が Z の
+    世界, その場で向きだけ変えた撮影, 追跡できなかった枚の扱いを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 外を指す場所 (絶対パスと ..) は無いものとし, 中身にも出さない
+    place = write_capture(tmp_path / "out", list(range(0, 360, 60)), 200)
+    (tmp_path / "secret.png").write_bytes(b"x")
+    transforms = json.loads((place / "transforms.json").read_text("utf-8"))
+    transforms["frames"][0]["file_path"] = str(tmp_path / "secret.png")
+    transforms["frames"][1]["file_path"] = "../secret.png"
+    transforms["frames"][2]["raw_depth_file_path"] = "../secret.png"
+    transforms["point_cloud"] = {"file_path": "../secret.png"}
+    transforms["depth"]["depth_format"] = "PNG16_Millimeter"
+    (place / "transforms.json").write_text(json.dumps(transforms), "utf-8")
+    data = load_data(place)
+    row = data.frame.iloc[0]
+    assert row["missing_files"] == 2 and np.isnan(row["points"])
+    assert row["distance_median"] == pytest.approx(1.5)
+    item = data.load_item(0)
+    assert item["frames"][0]["image"] is None
+    assert item["frames"][2]["raw_depth"] is None
+    assert item["point_cloud"] is None and item["frames"][3]["raw_depth"]
+
+    # 信頼度の画像の形が違う枚は数えない (撮影は読める)
+    Image.fromarray(np.zeros((4, 4), dtype=np.uint8)).save(
+        place / "confidence" / "3.png"
+    )
+    assert load_data(place).frame["error"].isna().all()
+
+    # 上が Z で world_up の無い一周 (60 度おき) は, カメラの上の軸から
+    up_z = write_capture(tmp_path / "z", list(range(0, 360, 60)), 200,
+                         z_up=True)
+    assert load_data(up_z).frame.loc[0, "view_gap"] == pytest.approx(
+        60, abs=0.5
+    )
+
+    # その場で向きだけ変えた撮影は, 方位の隙間を出さない
+    still = write_capture(tmp_path / "still", [0, 30, 60, 90], 200,
+                          radius=0.0)
+    assert np.isnan(load_data(still).frame.loc[0, "view_gap"])
+
+    # 追跡できなかった枚は方位から除く (一周の半分が追跡できない)
+    lost = write_capture(tmp_path / "lost", list(range(0, 360, 60)), 200,
+                         lost=3)
+    assert load_data(lost).frame.loc[0, "view_gap"] == pytest.approx(
+        240, abs=0.5
+    )

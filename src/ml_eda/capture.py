@@ -16,6 +16,9 @@ TRANSFORMS = "transforms.json"
 # 撮影を探すディレクトリの数の上限 (並べたディレクトリの直下だけ)
 MAX_CAPTURES = 10_000
 
+# 読めるかを確かめる撮影の数 (先頭から)
+SNIFF_CAPTURES = 3
+
 # 信頼できる深度とする信頼度の既定 (0 から 255)
 MIN_CONFIDENCE = 128
 
@@ -25,11 +28,17 @@ LOW_CONFIDENT = 0.3
 # 周回の欠けとする方位の隙間 (度)
 WIDE_GAP = 90.0
 
+# 物の周りを回ったとみなす, 中心からカメラまでの水平の距離の下限
+# (深度の中央値に対する割合. 深度が無ければメートル)
+ORBIT_RATIO = 0.1
+ORBIT_METERS = 0.05
+
 # 撮影の列の並び
 COLUMNS = (
     "path", "frames", "tracked", "width", "height", "fl_x", "device",
-    "depth_valid", "depth_confident", "distance_min", "distance_median",
-    "distance_max", "view_gap", "points", "missing_files", "error",
+    "depth_source", "depth_valid", "depth_confident", "distance_min",
+    "distance_median", "distance_max", "view_gap", "points",
+    "missing_files", "error",
 )
 
 
@@ -45,7 +54,7 @@ def find_captures(path: Path) -> list[Path]:
     Returns
     ----------
     captures: list[Path]
-        撮影のディレクトリ (名前の順. 無ければ空)
+        撮影のディレクトリ (名前の順. 上限まで. 無ければ空)
     """
     # 自身が撮影ならそれだけ, 違えば直下のディレクトリ
     if not path.is_dir():
@@ -74,20 +83,19 @@ def sniff_capture(path: Path) -> float:
     Returns
     ----------
     score: float
-        確からしさ (撮影のディレクトリか, それを並べたディレクトリなら
-        高く, 違えば 0)
+        確からしさ (先頭の撮影のどれかが読めれば, 画像のディレクトリより
+        高く. 無ければ 0)
     """
-    # 画像のディレクトリとしても読めるので, それより高く
-    captures = find_captures(path)
-    if not captures:
-        score = 0.0
-        return score
-    try:
-        transforms = read_transforms(captures[0])
-    except (OSError, ValueError):
-        score = 0.0
-        return score
-    score = 0.97 if transforms.get("frames") else 0.0
+    # 先頭の数件のどれかが frames を持てば撮影
+    score = 0.0
+    for capture in find_captures(path)[:SNIFF_CAPTURES]:
+        try:
+            transforms = read_transforms(capture)
+        except (OSError, ValueError):
+            continue
+        if transforms["frames"]:
+            score = 0.97
+            return score
 
     return score
 
@@ -124,6 +132,58 @@ def read_transforms(capture: Path) -> dict:
     return transforms
 
 
+def inside(capture: Path, name: Any) -> Optional[Path]:
+    """
+    transforms.json に書かれた場所を, 撮影のディレクトリの中に限って返す
+    関数
+
+    Parameters
+    ----------
+    capture: Path
+        撮影のディレクトリ
+    name: Any
+        書かれた場所 (撮影のディレクトリからの相対)
+
+    Returns
+    ----------
+    path: Optional[Path]
+        ファイルの場所 (文字でない, 撮影のディレクトリの外 (絶対パスや
+        ..), 無い場合は None)
+    """
+    # 実体の場所が撮影のディレクトリの下にあるファイルだけ
+    path: Optional[Path] = None
+    if not isinstance(name, str) or not name:
+        return path
+    try:
+        resolved = (capture / name).resolve()
+        if resolved.is_relative_to(capture.resolve()) and resolved.is_file():
+            path = resolved
+    except (OSError, ValueError):
+        path = None
+
+    return path
+
+
+def is_tracked(frame: dict) -> bool:
+    """
+    1 枚が追跡できていたかを返す関数
+
+    Parameters
+    ----------
+    frame: dict
+        transforms.json の frames の 1 つ
+
+    Returns
+    ----------
+    tracked: bool
+        tracking_state が TRACKING か, 書かれていないか
+    """
+    # 書かれていない枚は追跡できたとする
+    tracked = frame.get("tracking_state", "TRACKING") == "TRACKING"
+
+    return tracked
+
+
 def pose_of(frame: dict) -> Optional[np.ndarray]:
     """
     1 枚のカメラの姿勢 (カメラから世界への 4 x 4) を返す関数
@@ -138,7 +198,7 @@ def pose_of(frame: dict) -> Optional[np.ndarray]:
     pose: Optional[np.ndarray]
         4 x 4 の行列 (無いか形が違えば None)
     """
-    # 4 x 4 の数の並び
+    # 4 x 4 の有限の数の並び
     try:
         pose: Optional[np.ndarray] = np.asarray(
             frame["transform_matrix"], dtype=np.float64
@@ -146,7 +206,7 @@ def pose_of(frame: dict) -> Optional[np.ndarray]:
     except (KeyError, TypeError, ValueError):
         pose = None
         return pose
-    if pose is None or pose.shape != (4, 4) or not np.isfinite(pose).all():
+    if pose.shape != (4, 4) or not np.isfinite(pose).all():
         pose = None
 
     return pose
@@ -175,78 +235,157 @@ def forward_sign(transforms: dict) -> float:
     return sign
 
 
-def view_center(poses: list[np.ndarray], sign: float) -> np.ndarray:
+def up_of(
+    transforms: dict, poses: list[np.ndarray], sign: float
+) -> np.ndarray:
     """
-    各枚の視線に最も近い点 (撮った物の中心) を求める関数
+    世界の上の向きを返す関数
+
+    Parameters
+    ----------
+    transforms: dict
+        transforms.json の中身
+    poses: list[np.ndarray]
+        カメラから世界への 4 x 4 の姿勢
+    sign: float
+        視線がカメラの Z 軸のどちら向きか (OpenCV はカメラの上が -Y)
+
+    Returns
+    ----------
+    up: np.ndarray
+        長さ 1 の向き (world_up が無いか形が違えば, 各カメラの上の軸の
+        平均)
+    """
+    # 書かれた world_up, 無ければカメラの上の軸の平均
+    written = (transforms.get("coordinate_convention") or {}).get("world_up")
+    try:
+        up = np.asarray(written, dtype=np.float64)
+        if up.shape != (3,) or not np.isfinite(up).all():
+            raise ValueError("world_up の形が違います")
+    except (TypeError, ValueError):
+        up = np.mean([pose[:3, 1] for pose in poses], axis=0) * (-sign)
+    norm = float(np.linalg.norm(up))
+    up = up / norm if norm > 1e-9 else np.array([0.0, 1.0, 0.0])
+
+    return up
+
+
+def view_center(poses: list[np.ndarray]) -> Optional[np.ndarray]:
+    """
+    各枚の視線 (の直線) に最も近い点 (撮った物の中心) を求める関数
+
+    視線の直線への距離は向きの符号に依らないので, 前か後ろかは使わない
+    (前にあるかは view_gap_of で確かめる)
 
     Parameters
     ----------
     poses: list[np.ndarray]
         カメラから世界への 4 x 4 の姿勢
-    sign: float
-        視線がカメラの Z 軸のどちら向きか
 
     Returns
     ----------
-    center: np.ndarray
-        世界の座標 (視線がほぼ平行で決まらなければ, カメラの位置の平均)
+    center: Optional[np.ndarray]
+        世界の座標 (視線がほぼ平行で決まらなければ None)
     """
     # 視線への距離の 2 乗の和が最小の点 (最小二乗)
-    positions = np.array([pose[:3, 3] for pose in poses])
     system = np.zeros((3, 3))
     value = np.zeros(3)
     for pose in poses:
-        direction = sign * pose[:3, 2]
-        direction = direction / max(np.linalg.norm(direction), 1e-12)
-        projector = np.eye(3) - np.outer(direction, direction)
+        axis = pose[:3, 2] / max(float(np.linalg.norm(pose[:3, 2])), 1e-12)
+        projector = np.eye(3) - np.outer(axis, axis)
         system += projector
         value += projector @ pose[:3, 3]
-    if np.linalg.cond(system) > 1e6:
-        center = positions.mean(axis=0)
-        return center
-    center = np.linalg.solve(system, value)
+    center: Optional[np.ndarray] = None
+    if np.linalg.cond(system) < 1e6:
+        center = np.linalg.solve(system, value)
 
     return center
 
 
-def view_gap(
-    positions: np.ndarray, center: np.ndarray, up: np.ndarray
+def view_gap_of(
+    poses: list[np.ndarray], up: np.ndarray, sign: float,
+    distance: Optional[float]
 ) -> float:
     """
     中心から見たカメラの方位の, 最も大きい隙間 (度) を求める関数
 
     Parameters
     ----------
-    positions: np.ndarray
-        カメラの位置 (枚数, 3)
-    center: np.ndarray
-        撮った物の中心
+    poses: list[np.ndarray]
+        追跡できた枚のカメラから世界への 4 x 4 の姿勢
     up: np.ndarray
         世界の上の向き
+    sign: float
+        視線がカメラの Z 軸のどちら向きか
+    distance: Optional[float]
+        撮影距離 (深度の中央値. 無ければ None)
 
     Returns
     ----------
     gap: float
-        最も大きい隙間 (0 から 360. 1 枚なら 360)
+        最も大きい隙間 (0 から 360). 物の周りを回った撮影でない (中心が
+        決まらない, 中心が多くのカメラの後ろ, カメラが中心からほぼ動いて
+        いない) 場合は NaN
     """
-    # 上の向きに垂直な面に写した方位の, 隣どうしの差の最大 (一周を含む)
-    up = up / max(np.linalg.norm(up), 1e-12)
+    # 中心が決まり, 半分以上のカメラの前にあること
+    gap = math.nan
+    center = view_center(poses)
+    if center is None:
+        return gap
+    positions = np.array([pose[:3, 3] for pose in poses])
+    ahead = [
+        float((center - pose[:3, 3]) @ (sign * pose[:3, 2])) > 0
+        for pose in poses
+    ]
+    if sum(ahead) * 2 < len(poses):
+        return gap
+
+    # 上の向きに垂直な面に写した位置が, 中心から十分に離れていること
     offsets = positions - center
     flat = offsets - np.outer(offsets @ up, up)
+    reach = float(np.median(np.linalg.norm(flat, axis=1)))
+    limit = ORBIT_RATIO * distance if distance else ORBIT_METERS
+    if reach < limit:
+        return gap
+
+    # 方位の隣どうしの差の最大 (一周を含む)
     base = np.array([1.0, 0.0, 0.0])
-    if abs(base @ up) > 0.9:
+    if abs(float(base @ up)) > 0.9:
         base = np.array([0.0, 0.0, 1.0])
     first = base - (base @ up) * up
     first = first / np.linalg.norm(first)
     second = np.cross(up, first)
     angles = np.sort(np.degrees(np.arctan2(flat @ second, flat @ first)))
-    if len(angles) < 2:
-        gap = 360.0
-        return gap
     steps = np.diff(np.concatenate([angles, [angles[0] + 360.0]]))
     gap = float(steps.max())
 
     return gap
+
+
+def depth_scale(depth: dict) -> float:
+    """
+    深度の画像の値をメートルにする倍率を返す関数
+
+    Parameters
+    ----------
+    depth: dict
+        transforms.json の depth
+
+    Returns
+    ----------
+    scale: float
+        millimeter なら 0.001, centimeter なら 0.01, meter なら 1, 他は
+        0.001
+    """
+    # 大文字と小文字は区別しない. 分からなければミリ
+    form = str(depth.get("depth_format", "")).lower()
+    scale = 0.001
+    if "centi" in form:
+        scale = 0.01
+    elif "meter" in form and "milli" not in form:
+        scale = 1.0
+
+    return scale
 
 
 def depth_stats(
@@ -260,7 +399,7 @@ def depth_stats(
     capture: Path
         撮影のディレクトリ
     frames: list[dict]
-        transforms.json の frames
+        追跡できた枚の transforms.json の frames
     depth: dict
         transforms.json の depth (形式と欠けの値)
     min_confidence: int
@@ -269,39 +408,48 @@ def depth_stats(
     Returns
     ----------
     stats: dict
-        depth_valid, depth_confident, distance_min, distance_median,
-        distance_max (深度の画像が無ければ空)
+        depth_source (raw, smoothed, mixed), depth_valid,
+        depth_confident, distance_min, distance_median, distance_max
+        (深度の画像が無ければ空)
     """
-    # 16 bit の深度 (ミリかメートル) と 8 bit の信頼度. 欠けは invalid_value.
-    # 生の深度があればそれを使う (信頼度は生の深度と組. 穴を埋めた深度は
-    # 欠けが無い)
+    # 生の深度 (信頼度と組) を優先. 穴を埋めた深度には欠けがほぼ無い
     from PIL import Image
 
-    scale = 1.0 if "meter" in str(depth.get("depth_format", "")) and (
-        "milli" not in str(depth.get("depth_format", ""))
-    ) else 0.001
-    invalid = depth.get("invalid_value", 0)
-    valid_rates, confident_rates, medians = [], [], []
+    scale = depth_scale(depth)
+    invalid = depth.get("invalid_value")
+    invalid = invalid if isinstance(invalid, (int, float)) else 0
+    valid_rates, confident_rates, medians, sources = [], [], [], set()
     for frame in frames:
-        name = frame.get("raw_depth_file_path")
-        if not isinstance(name, str) or not (capture / name).is_file():
-            name = frame.get("depth_file_path")
-        if not isinstance(name, str) or not (capture / name).is_file():
+        path = inside(capture, frame.get("raw_depth_file_path"))
+        source = "raw"
+        if path is None:
+            path = inside(capture, frame.get("depth_file_path"))
+            source = "smoothed"
+        if path is None:
             continue
-        with Image.open(capture / name) as image:
+        sources.add(source)
+        with Image.open(path) as image:
             values = np.asarray(image, dtype=np.float64)
         valid = values != invalid
         valid_rates.append(float(valid.mean()))
         if valid.any():
             medians.append(float(np.median(values[valid])) * scale)
-        name = frame.get("confidence_file_path")
-        if isinstance(name, str) and (capture / name).is_file():
-            with Image.open(capture / name) as image:
-                confidence = np.asarray(image, dtype=np.float64)
+
+        # 信頼度 (形が合わなければその枚は数えない)
+        path = inside(capture, frame.get("confidence_file_path"))
+        if path is None:
+            continue
+        with Image.open(path) as image:
+            confidence = np.asarray(image, dtype=np.float64)
+        if confidence.shape == valid.shape:
             confident_rates.append(
                 float(((confidence >= min_confidence) & valid).mean())
             )
     stats: dict = {}
+    if sources:
+        stats["depth_source"] = sources.pop() if len(sources) == 1 else (
+            "mixed"
+        )
     if valid_rates:
         stats["depth_valid"] = float(np.mean(valid_rates))
     if confident_rates:
@@ -330,12 +478,12 @@ def ply_points(path: Path) -> Optional[int]:
     count: Optional[int]
         点の数 (読めなければ None)
     """
-    # ヘッダーの element vertex の行だけ
+    # ヘッダーの element vertex の行だけ (1 行は長さを限って読む)
     count: Optional[int] = None
     try:
         with open(path, "rb") as file:
             for _ in range(200):
-                line = file.readline().decode("ascii", "ignore").strip()
+                line = file.readline(1024).decode("ascii", "ignore").strip()
                 if line.startswith("element vertex"):
                     count = int(line.split()[-1])
                 if line == "end_header" or not line:
@@ -364,45 +512,45 @@ def describe_capture(
     Returns
     ----------
     row: dict
-        COLUMNS の値 (path は呼び出し側が入れる)
+        COLUMNS の値 (path は呼び出し側が入れる). 深度, 距離, 方位は
+        追跡できた枚だけで求める
     """
-    # 枚数, 追跡, 画像の大きさ, 内部パラメータ, 端末
+    # 枚数, 追跡, 画像の大きさ, 内部パラメータ, 端末, 無い画像
     transforms = read_transforms(capture)
     frames = transforms["frames"]
+    tracked = [frame for frame in frames if is_tracked(frame)]
     row: dict = {
-        "frames": len(frames),
-        "tracked": sum(
-            frame.get("tracking_state", "TRACKING") == "TRACKING"
-            for frame in frames
-        ),
+        "frames": len(frames), "tracked": len(tracked),
         "width": transforms.get("w"), "height": transforms.get("h"),
         "fl_x": transforms.get("fl_x"),
         "device": (transforms.get("capture") or {}).get("device_model"),
         "missing_files": sum(
-            not (capture / str(frame.get("file_path", ""))).is_file()
+            inside(capture, frame.get("file_path")) is None
             for frame in frames
         ),
     }
 
-    # 物の中心から見た方位の隙間 (姿勢が 2 枚以上ある場合)
-    poses = [pose for pose in map(pose_of, frames) if pose is not None]
-    if len(poses) >= 2:
-        convention = transforms.get("coordinate_convention") or {}
-        up = np.asarray(convention.get("world_up") or [0.0, 1.0, 0.0],
-                        dtype=np.float64)
-        center = view_center(poses, forward_sign(transforms))
-        row["view_gap"] = view_gap(
-            np.array([pose[:3, 3] for pose in poses]), center, up
-        )
-
-    # 深度と点群
+    # 深度と距離
     if with_depth:
         row.update(depth_stats(
-            capture, frames, transforms.get("depth") or {}, min_confidence
+            capture, tracked, transforms.get("depth") or {}, min_confidence
         ))
-    cloud = (transforms.get("point_cloud") or {}).get("file_path")
-    if isinstance(cloud, str) and (capture / cloud).is_file():
-        row["points"] = ply_points(capture / cloud)
+
+    # 物の中心から見た方位の隙間 (姿勢が 2 枚以上ある場合)
+    poses = [pose for pose in map(pose_of, tracked) if pose is not None]
+    if len(poses) >= 2:
+        sign = forward_sign(transforms)
+        row["view_gap"] = view_gap_of(
+            poses, up_of(transforms, poses, sign), sign,
+            row.get("distance_median")
+        )
+
+    # 点群
+    cloud = inside(
+        capture, (transforms.get("point_cloud") or {}).get("file_path")
+    )
+    if cloud is not None:
+        row["points"] = ply_points(cloud)
 
     return row
 
@@ -423,32 +571,39 @@ def capture_item(root: Path, frame: pd.DataFrame, index: int) -> dict:
     Returns
     ----------
     item: dict
-        intrinsics (fl_x, fl_y, cx, cy, w, h), frames (image, depth,
-        confidence の場所, pose (4 x 4), tracking), point_cloud (場所か
-        None), convention (座標の決まり), path (撮影のディレクトリ)
+        path (撮影のディレクトリ), intrinsics (fl_x, fl_y, cx, cy, w, h),
+        frames (image, raw_depth, depth, confidence の場所 (撮影の
+        ディレクトリの中で, ある場合だけ. 無ければ None), pose (4 x 4 か
+        None), tracking), point_cloud (場所か None), convention (座標の
+        決まり)
     """
-    # 場所は絶対パスに
+    # 場所は撮影のディレクトリの中に限った絶対パス
     capture = (root / str(frame["path"].iloc[index])).resolve()
     transforms = read_transforms(capture)
     frames = []
     for entry in transforms["frames"]:
+        places = {
+            key: inside(capture, entry.get(name)) for key, name in (
+                ("image", "file_path"), ("raw_depth", "raw_depth_file_path"),
+                ("depth", "depth_file_path"),
+                ("confidence", "confidence_file_path"),
+            )
+        }
         frames.append({
-            "image": str(capture / str(entry.get("file_path", ""))),
-            "depth": str(capture / entry["depth_file_path"])
-            if isinstance(entry.get("depth_file_path"), str) else None,
-            "confidence": str(capture / entry["confidence_file_path"])
-            if isinstance(entry.get("confidence_file_path"), str) else None,
+            **{key: str(value) if value else None
+               for key, value in places.items()},
             "pose": pose_of(entry),
             "tracking": entry.get("tracking_state"),
         })
-    cloud = (transforms.get("point_cloud") or {}).get("file_path")
+    cloud = inside(
+        capture, (transforms.get("point_cloud") or {}).get("file_path")
+    )
     item = {
         "path": str(capture),
         "intrinsics": {key: transforms.get(key)
                        for key in ("fl_x", "fl_y", "cx", "cy", "w", "h")},
         "frames": frames,
-        "point_cloud": str(capture / cloud)
-        if isinstance(cloud, str) else None,
+        "point_cloud": str(cloud) if cloud else None,
         "convention": transforms.get("coordinate_convention") or {},
     }
 
@@ -507,11 +662,18 @@ def load_captures(path: Path, **options: Any) -> Data:
         kind="capture", frame=frame, roles={"path": "path"},
         item_loader=partial(capture_item, root, frame)
     )
-    data.source = {"root": str(root), "min_confidence": min_confidence}
+    notes = []
     if not with_depth:
-        data.source["notes"] = [
+        notes.append(
             "Pillow が無いので深度の画像を読んでいません (深度の列は欠損)"
-        ]
+        )
+    if len(captures) >= MAX_CAPTURES:
+        notes.append(
+            f"撮影が多いので, 名前の順で先頭の {MAX_CAPTURES} 件だけを"
+            "読みました"
+        )
+    data.source = {"root": str(root), "min_confidence": min_confidence,
+                   "notes": notes}
 
     return data
 
@@ -528,14 +690,15 @@ def describe_captures(data: Data) -> dict:
     Returns
     ----------
     result: dict
-        frames (枚数の最少, 中央値, 最多), depth (深度の有効率と信頼で
-        きる割合の中央値), distance (撮影距離の範囲), unreadable,
-        findings
+        kind, count, unreadable, frames (枚数の最少, 中央値, 最多),
+        depth (深度の有効率と信頼できる割合の中央値), distance (撮影距離の
+        範囲), findings
     """
     # 枚数, 深度, 距離の集計
     frame = data.frame
     readable = frame[frame["error"].isna()]
     result: dict = {
+        "kind": data.kind, "count": int(len(frame)),
         "unreadable": int(frame["error"].notna().sum()),
         "frames": None if readable.empty else {
             "min": int(readable["frames"].min()),
@@ -552,6 +715,12 @@ def describe_captures(data: Data) -> dict:
         },
     }
     findings = []
+    for note in data.source.get("notes") or []:
+        findings.append({
+            "severity": "info", "code": "too_many_files"
+            if "先頭" in note else "missing_reader",
+            "message": note, "columns": [],
+        })
     if result["unreadable"]:
         findings.append({
             "severity": "warning", "code": "unreadable_items",
@@ -562,7 +731,7 @@ def describe_captures(data: Data) -> dict:
             "columns": ["error"],
         })
 
-    # 追跡できなかった枚, 欠けたファイル
+    # 追跡できなかった枚, 無い画像
     lost = readable[readable["tracked"] < readable["frames"]]
     if not lost.empty:
         findings.append({
@@ -570,17 +739,17 @@ def describe_captures(data: Data) -> dict:
             "message": (
                 f"{len(lost)} 件の撮影に, 追跡できなかった枚があります (計 "
                 f"{int((lost['frames'] - lost['tracked']).sum())} 枚). 姿勢が"
-                "正しくないので, その枚は使わないでください"
+                "正しくないので, その枚は深度と方位の集計から除きました"
             ),
             "columns": ["tracked"],
         })
     missing = readable[readable["missing_files"].fillna(0) > 0]
     if not missing.empty:
         findings.append({
-            "severity": "warning", "code": "unreadable_items",
+            "severity": "warning", "code": "missing_files",
             "message": (
-                f"{len(missing)} 件の撮影で, transforms.json にある画像の"
-                f"ファイルが無い枚があります (計 "
+                f"{len(missing)} 件の撮影で, transforms.json にある画像が"
+                "無い (か撮影のディレクトリの外を指す) 枚があります (計 "
                 f"{int(missing['missing_files'].sum())} 枚)"
             ),
             "columns": ["missing_files"],
