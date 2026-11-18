@@ -239,10 +239,38 @@ def test_capture_review_cases(tmp_path: Path) -> None:
         60, abs=0.5
     )
 
-    # その場で向きだけ変えた撮影は, 方位の隙間を出さない
+    # 見下ろして撮った半周でも, 上の向きは傾かない
+    half = write_capture(tmp_path / "half", [0, 45, 90, 135, 180], 200,
+                         z_up=True)
+    assert load_data(half).frame.loc[0, "view_gap"] == pytest.approx(
+        180, abs=0.5
+    )
+
+    # その場で向きだけ変えた撮影は, 方位の隙間を出さず, 気付きを出す
     still = write_capture(tmp_path / "still", [0, 30, 60, 90], 200,
                           radius=0.0)
     assert np.isnan(load_data(still).frame.loc[0, "view_gap"])
+    codes = {item["code"] for item in profile(load_data(still))["findings"]}
+    assert "no_orbit" in codes
+
+    # 撮影の中の画像のディレクトリが別の場所へのシンボリックリンクでも読む
+    linked = write_capture(tmp_path / "linked", [0, 120, 240], 200)
+    (linked / "images").rename(tmp_path / "shared_images")
+    (linked / "images").symlink_to(tmp_path / "shared_images")
+    assert load_data(linked).frame.loc[0, "missing_files"] == 0
+
+    # OpenCV とだけ書いた座標の決まり (+Z が前) でも一周を測る
+    flipped = write_capture(tmp_path / "cv", list(range(0, 360, 60)), 200)
+    transforms = json.loads((flipped / "transforms.json").read_text("utf-8"))
+    for frame in transforms["frames"]:
+        pose = np.array(frame["transform_matrix"])
+        pose[:3, 1:3] *= -1
+        frame["transform_matrix"] = pose.tolist()
+    transforms["coordinate_convention"]["camera_axes"] = "OpenCV"
+    (flipped / "transforms.json").write_text(json.dumps(transforms), "utf-8")
+    assert load_data(flipped).frame.loc[0, "view_gap"] == pytest.approx(
+        60, abs=0.5
+    )
 
     # 追跡できなかった枚は方位から除く (一周の半分が追跡できない)
     lost = write_capture(tmp_path / "lost", list(range(0, 360, 60)), 200,

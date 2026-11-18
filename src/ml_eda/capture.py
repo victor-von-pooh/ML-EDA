@@ -1,5 +1,6 @@
 import json
 import math
+import os
 from functools import partial
 from pathlib import Path
 from typing import Any, Optional
@@ -150,14 +151,17 @@ def inside(capture: Path, name: Any) -> Optional[Path]:
         ファイルの場所 (文字でない, 撮影のディレクトリの外 (絶対パスや
         ..), 無い場合は None)
     """
-    # 実体の場所が撮影のディレクトリの下にあるファイルだけ
+    # 書かれた場所の文字の上で中にあるファイルだけ (シンボリックリンクの
+    # 先は, 撮影を置いた人の判断としてたどる)
     path: Optional[Path] = None
-    if not isinstance(name, str) or not name:
+    if not isinstance(name, str) or not name or os.path.isabs(name):
+        return path
+    normal = os.path.normpath(name)
+    if normal == ".." or normal.startswith(".." + os.sep):
         return path
     try:
-        resolved = (capture / name).resolve()
-        if resolved.is_relative_to(capture.resolve()) and resolved.is_file():
-            path = resolved
+        if (capture / normal).is_file():
+            path = (capture / normal).absolute()
     except (OSError, ValueError):
         path = None
 
@@ -226,11 +230,11 @@ def forward_sign(transforms: dict) -> float:
     sign: float
         -1 (OpenGL の -Z が前. 既定) か 1 (OpenCV の +Z が前)
     """
-    # 座標の決まりの説明に +Z forward とあれば OpenCV
+    # 座標の決まりの説明に OpenCV か +Z forward とあれば +Z
     axes = str(
         (transforms.get("coordinate_convention") or {}).get("camera_axes", "")
     ).replace(" ", "").lower()
-    sign = 1.0 if "+zforward" in axes else -1.0
+    sign = 1.0 if "opencv" in axes or "+zforward" in axes else -1.0
 
     return sign
 
@@ -253,17 +257,24 @@ def up_of(
     Returns
     ----------
     up: np.ndarray
-        長さ 1 の向き (world_up が無いか形が違えば, 各カメラの上の軸の
-        平均)
+        長さ 1 の向き (world_up が無いか形が違えば, 各カメラの右の軸に
+        最も垂直な向き. 符号はカメラの上の軸の平均に合わせる)
     """
-    # 書かれた world_up, 無ければカメラの上の軸の平均
+    # 書かれた world_up. 無ければ, 傾けずに撮ればカメラの右の軸は水平
+    # なので, 右の軸を並べた行列の最小の特異ベクトル (見下ろして撮っても
+    # 傾かない)
     written = (transforms.get("coordinate_convention") or {}).get("world_up")
     try:
         up = np.asarray(written, dtype=np.float64)
         if up.shape != (3,) or not np.isfinite(up).all():
             raise ValueError("world_up の形が違います")
     except (TypeError, ValueError):
-        up = np.mean([pose[:3, 1] for pose in poses], axis=0) * (-sign)
+        rights = np.array([pose[:3, 0] for pose in poses])
+        up = np.linalg.svd(rights)[2][-1]
+        if float(up @ np.mean([pose[:3, 1] for pose in poses], axis=0)) * (
+            -sign
+        ) < 0:
+            up = -up
     norm = float(np.linalg.norm(up))
     up = up / norm if norm > 1e-9 else np.array([0.0, 1.0, 0.0])
 
@@ -662,18 +673,10 @@ def load_captures(path: Path, **options: Any) -> Data:
         kind="capture", frame=frame, roles={"path": "path"},
         item_loader=partial(capture_item, root, frame)
     )
-    notes = []
-    if not with_depth:
-        notes.append(
-            "Pillow が無いので深度の画像を読んでいません (深度の列は欠損)"
-        )
-    if len(captures) >= MAX_CAPTURES:
-        notes.append(
-            f"撮影が多いので, 名前の順で先頭の {MAX_CAPTURES} 件だけを"
-            "読みました"
-        )
-    data.source = {"root": str(root), "min_confidence": min_confidence,
-                   "notes": notes}
+    data.source = {
+        "root": str(root), "min_confidence": min_confidence,
+        "depth_read": with_depth, "capped": len(captures) >= MAX_CAPTURES,
+    }
 
     return data
 
@@ -715,11 +718,23 @@ def describe_captures(data: Data) -> dict:
         },
     }
     findings = []
-    for note in data.source.get("notes") or []:
+    if data.source.get("capped"):
         findings.append({
-            "severity": "info", "code": "too_many_files"
-            if "先頭" in note else "missing_reader",
-            "message": note, "columns": [],
+            "severity": "warning", "code": "too_many_files",
+            "message": (
+                f"撮影が多いので, 名前の順で先頭の {MAX_CAPTURES} 件だけを"
+                "読みました"
+            ),
+            "columns": [],
+        })
+    if data.source.get("depth_read") is False:
+        findings.append({
+            "severity": "info", "code": "missing_reader",
+            "message": (
+                "Pillow が無いので深度の画像を読んでいません (深度の列は"
+                "欠損)"
+            ),
+            "columns": [],
         })
     if result["unreadable"]:
         findings.append({
@@ -778,6 +793,17 @@ def describe_captures(data: Data) -> dict:
                 f"{WIDE_GAP:.0f} 度以上の隙間があります (最大 "
                 f"{float(wide['view_gap'].max()):.0f} 度). その向きから"
                 "見た形は, 撮った画像からは分かりません"
+            ),
+            "columns": ["view_gap"],
+        })
+    still = readable[readable["view_gap"].isna() & (readable["tracked"] >= 2)]
+    if not still.empty:
+        findings.append({
+            "severity": "info", "code": "no_orbit",
+            "message": (
+                f"{len(still)} 件の撮影は, 物の周りを回った撮影と見なせない"
+                "ので, 方位の隙間を求めていません (視線がほぼ平行, 物の中心"
+                "が多くのカメラの後ろ, その場で向きだけを変えた, のどれか)"
             ),
             "columns": ["view_gap"],
         })
