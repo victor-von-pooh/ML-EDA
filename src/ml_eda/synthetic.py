@@ -7,7 +7,7 @@ from typing import Optional, Union
 
 import numpy as np
 
-from ml_eda.items import DEFAULT_AXES, write_ply
+from ml_eda.items import DEFAULT_AXES, DEFAULT_DEPTH, write_ply
 
 # 領域の値の名前 (write_image_masks)
 MASK_CLASSES = {0: "background", 1: "circle", 2: "square"}
@@ -23,6 +23,19 @@ DEFAULT_SHAPES = (
     {"name": "box_b", "type": "box", "center": [0.8, 0.1, 0.3],
      "size": [0.15, 0.15, 0.3], "color": [230, 200, 60]},
 )
+
+# 乱数で作る形の中心の, 原点からの水平の距離の範囲 (メートル)
+RANDOM_DISTANCE = (0.5, 1.5)
+
+# 乱数で作る形の中心の高さの範囲 (メートル)
+RANDOM_HEIGHT = (0.05, 0.3)
+
+# 乱数で作る形の色の範囲 (RGB の各値)
+RANDOM_COLOR = (60, 240)
+
+# 乱数で作る形の大きさの範囲 (球の半径と箱の各辺. メートル)
+RANDOM_RADIUS = (0.08, 0.18)
+RANDOM_SIZE = (0.1, 0.3)
 
 # 撮影の周回 (物の中心からの水平の距離と高さ. メートル)
 ORBIT_RADIUS = 0.6
@@ -318,7 +331,8 @@ def render_view(
     ----------
     result: tuple[np.ndarray, np.ndarray, np.ndarray]
         (高さ, 幅, 3) の uint8 の画像, (高さ, 幅) のミリの uint16 の深度
-        (当たらない画素は 0), (高さ, 幅) の uint8 の信頼度 (当たれば 255)
+        (カメラの前の軸に沿った距離 (z). 光線に沿った距離ではない.
+        当たらない画素は 0), (高さ, 幅) の uint8 の信頼度 (当たれば 255)
     """
     # 画素の中心を通る光線 (カメラの前 -Z に 1 進むと深度が 1)
     width, height = int(intrinsics["w"]), int(intrinsics["h"])
@@ -347,10 +361,55 @@ def render_view(
     return result
 
 
+def random_shapes(count: int, rng: np.random.Generator) -> list[dict]:
+    """
+    球か箱を乱数でばらつかせて並べる関数
+
+    Parameters
+    ----------
+    count: int
+        形の数
+    rng: np.random.Generator
+        乱数
+
+    Returns
+    ----------
+    shapes: list[dict]
+        形の並び (名前は shape_000 から. 中心は原点から水平に離し, 高さも
+        乱数)
+    """
+    # 種類, 中心 (方位と距離), 大きさ, 色
+    shapes = []
+    for index in range(count):
+        angle = rng.uniform(0, 2 * math.pi)
+        distance = rng.uniform(*RANDOM_DISTANCE)
+        shape: dict = {
+            "name": f"shape_{index:03d}",
+            "type": str(rng.choice(["sphere", "box"])),
+            "center": [
+                distance * math.cos(angle),
+                float(rng.uniform(*RANDOM_HEIGHT)),
+                distance * math.sin(angle),
+            ],
+            "color": [
+                int(value) for value in rng.integers(*RANDOM_COLOR, 3)
+            ],
+        }
+        if shape["type"] == "sphere":
+            shape["radius"] = float(rng.uniform(*RANDOM_RADIUS))
+        else:
+            shape["size"] = [
+                float(value) for value in rng.uniform(*RANDOM_SIZE, 3)
+            ]
+        shapes.append(shape)
+
+    return shapes
+
+
 def write_shape_captures(
     root: Union[str, Path], shapes: Optional[list[dict]] = None,
     views: int = 8, size: tuple[int, int] = (24, 32), points: int = 2000,
-    seed: int = 0
+    seed: int = 0, count: Optional[int] = None
 ) -> dict:
     """
     単純な形の正確な点群と, 決まった姿勢から撮った多視点の撮影を書く関数
@@ -361,7 +420,7 @@ def write_shape_captures(
         書くディレクトリ (captures/<名前>/ と clouds/<名前>.ply を作る)
     shapes: Optional[list[dict]] = None
         形の並び (name, type (sphere, box), center, radius か size,
-        color). 省略すると球 2 つと箱 2 つ
+        color). 省略すると球 2 つと箱 2 つ (count を渡すと乱数の形)
     views: int = 8
         1 つの撮影の枚数 (物の周りに等間隔)
     size: tuple[int, int] = (24, 32)
@@ -369,17 +428,35 @@ def write_shape_captures(
     points: int = 2000
         点群の点の数
     seed: int = 0
-        乱数の種
+        乱数の種 (点群の点と, count の形)
+    count: Optional[int] = None
+        乱数で作る形の数 (球か箱. 種類, 位置, 大きさ, 色を seed から)
 
     Returns
     ----------
     result: dict
         captures, clouds (ディレクトリ), shapes (形の並び)
+
+    Raises
+    ----------
+    ValueError
+        shapes と count を両方渡した場合と, count が 1 以上の整数でない
+        場合
     """
-    # 内部パラメータ (横の画角はおよそ 60 度)
+    # 形の並び (渡したもの, 乱数, 既定のどれか)
     root = Path(root).expanduser()
-    shapes = [dict(shape) for shape in (shapes or DEFAULT_SHAPES)]
     rng = np.random.default_rng(seed)
+    if count is not None:
+        if shapes is not None:
+            raise ValueError("shapes と count は同時に渡せません")
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ValueError(f"count は整数にしてください (今は {count})")
+        if count < 1:
+            raise ValueError(f"count は 1 以上にしてください (今は {count})")
+        shapes = random_shapes(count, rng)
+    shapes = [dict(shape) for shape in (shapes or DEFAULT_SHAPES)]
+
+    # 内部パラメータ (横の画角はおよそ 60 度)
     height, width = size
     focal = width * 0.9
     intrinsics = {
@@ -420,7 +497,7 @@ def write_shape_captures(
             "depth": {"depth_format": "png16_millimeter", "invalid_value": 0},
             "coordinate_convention": {
                 "world_up": [0.0, 1.0, 0.0],
-                "camera_axes": DEFAULT_AXES,
+                "camera_axes": DEFAULT_AXES, **DEFAULT_DEPTH,
             },
             "capture": {"device_model": "synthetic"},
             "frames": frames,

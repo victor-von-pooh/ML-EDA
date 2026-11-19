@@ -84,7 +84,7 @@ ML-EDA の設計の方針をまとめる.
 
 AR の端末などで物体の周りを撮った 1 回の撮影を 1 件とする. 1 件は「画像の並び, 各枚のカメラの姿勢, 深度と信頼度の画像, (あれば) 点群」のまとまりで, 1 つのファイルではない. 多視点の画像から 3D の形を作る学習の入力と, その撮影の質のばらつき (どの撮影なら使えるか) を確かめるために読む.
 
-- 形: `transforms.json` (カメラの内部パラメータ `fl_x`, `fl_y`, `cx`, `cy`, `w`, `h` と, `frames` の各枚の `file_path` と `transform_matrix` (カメラから世界への 4 x 4)) を持つディレクトリ. 各枚の `raw_depth_file_path` (生の深度. 無ければ穴を埋めた `depth_file_path`. 16 bit の PNG. 単位は `depth.depth_format` (大文字と小文字は区別しない. millimeter, centimeter, meter. 分からなければミリ). `depth.invalid_value` (既定 0) は欠け) と `confidence_file_path` (8 bit の PNG, 0 から 255. 生の深度と組), `tracking_state`, 撮影全体の `coordinate_convention` (`world_up`, `camera_axes`), `capture.device_model`, `point_cloud.file_path` があれば使う. 無ければその列は欠損
+- 形: `transforms.json` (カメラの内部パラメータ `fl_x`, `fl_y`, `cx`, `cy`, `w`, `h` と, `frames` の各枚の `file_path` と `transform_matrix` (カメラから世界への 4 x 4)) を持つディレクトリ. 各枚の `raw_depth_file_path` (生の深度. 無ければ穴を埋めた `depth_file_path`. 16 bit の PNG. 単位は `depth.depth_format` (大文字と小文字は区別しない. millimeter, centimeter, meter. 分からなければミリ). `depth.invalid_value` (既定 0) は欠け) と `confidence_file_path` (8 bit の PNG, 0 から 255. 生の深度と組), `tracking_state`, 撮影全体の `coordinate_convention` (`world_up`, `camera_axes`, `depth` (深度の測り方. `z` か `ray`), `pixel_center` (画素の中心. 既定 0.5)), `capture.device_model`, `point_cloud.file_path` があれば使う. 無ければその列は欠損
 - `transforms.json` に書かれた場所は, 撮影のディレクトリの中のファイルだけを使う (絶対パスや `..` で外を指す場所は無いものとする. 読み込みが手元の任意のファイルを読まないように). 中かは書かれた場所の文字の上で確かめ, 撮影の中のシンボリックリンクの先はたどる (データを共有するために置いたものとして, 撮影を置いた人の判断に任せる)
 - 列: `path` (撮影のディレクトリ), `frames` (枚数), `tracked` (追跡できた枚数. `tracking_state` が無い枚は追跡できたとする), `width`, `height`, `fl_x`, `device`, `depth_source` (`raw` 生の深度, `smoothed` 穴を埋めた深度 (欠けがほぼ無いので有効率は高く出る), `mixed`), `depth_valid` (深度の欠けでない画素の割合. 枚ごとの平均), `depth_confident` (信頼度が `min_confidence` (既定 128) 以上の画素の割合. 形の違う信頼度の画像は数えない), `distance_min`, `distance_median`, `distance_max` (枚ごとの深度の中央値 (メートル) の最小, 中央値, 最大. 背景も含む), `view_gap` (物体の中心から見たカメラの方位の, 最も大きい隙間 (度)), `points` (点群の点の数), `missing_files` (無いか外を指す画像の数), `error` (読めない理由)
 - 深度, 距離, 方位は, 追跡できた枚だけで求める (追跡できなかった枚の姿勢は正しくない)
@@ -269,7 +269,7 @@ split:
 | `split` | 分割のしかた (`method`, `valid`, `test`, `seed`. グループで分けた場合は `column: group`) |
 | `splits` | 分割ごとの件数 (`{train: {items: 8}, valid: {items: 2}}`. 件の無い分割は書かない) |
 | `normalization` | 入力と正解にかけた座標の正規化 (かけた場合だけ. 下の「撮影と点群の対」) |
-| `source` | 元の場所 (入力と正解のディレクトリ) |
+| `source` | 元の場所 (入力と正解のディレクトリの名前だけ. 下の「元の場所」) |
 | `notes` | 書き出しの注意 (組にならなかったファイル, 分割をまたぐグループなど) |
 
 `task` は書かない. `task` は列の正解 (分類, 回帰, 予測, 正解なし) だけのもので, 版 2 の種類は `role` と `target.kind` で表す.
@@ -286,7 +286,7 @@ split:
 | `shape` | 1 件の形 (件ごとにそろわないか分からない次元は null). 1 つの配列の項目 (`image`, `mask`, `point_cloud`) は `load_items` の返す配列の形 (画像はチャンネルの次元を含む). 複数の配列を持つ項目 (`capture`) は共通の次元だけ ((枚数, 高さ, 幅). 画像のチャンネルや深度は読み込みの節の形) |
 | `dtype` | 読んだ配列の型 |
 | `units` | 単位 (`pixel`, `meter` など. 無ければ null) |
-| `convention` | 座標の決まり (画像は左上が原点で (行, 列). 撮影は姿勢がカメラから世界, カメラの軸, 世界の上の向き) |
+| `convention` | 座標の決まり (画像は左上が原点で (行, 列). 撮影は姿勢がカメラから世界, カメラの軸, 世界の上の向き, 深度の測り方, 画素の中心. 下の「撮影と点群の対」) |
 | `values`, `classes` | 正解の値と, 値の名前 (`mask`, `boxes` など. `classes` は `value` と `name` の並び) |
 
 表 (`items`) の列: `id` (元の名前. 画像のファイルの stem, 撮影のディレクトリの名前), `split`, `group` (グループを渡した場合), 項目ごとの列 (`file` と `directory` はデータセットのディレクトリからの相対の場所, `column` は値), 他 (正規化の `shift_x` など).
@@ -302,6 +302,10 @@ split:
 **前処理**: 版 2 は今は中身の手順をかけず, ファイルを写す (撮影と点群は座標の正規化だけ). 大きさをそろえるなどは学習のコードで行う.
 
 書き出しは版 1 と同じく, 隣の一時ディレクトリに書いてから入れ替える. 既にある場所を置き換えられるのは, 前に書き出したデータセット (版に依らず `dataset.yaml` を持つもの) だけ.
+
+**元の場所** (`source`): 書き出したデータセットは人に渡すことがあるので, 手元のディレクトリの構成を残さない. 入力と正解のディレクトリは渡した場所の名前 (`.` と `..` を畳んだ最後の部分. シンボリックリンクはたどらない. `~` だけと根は空) だけを書き (`images`, `masks` や `captures`, `clouds`), `paths: name_only` と `note` (名前だけを残したこと) を添える. 絶対パスもデータセットからの相対の場所も書かない (相対の場所も `../../` から手元の構成が分かるため). 2026-11-19 に, 渡した文字をそのまま書いていたのを改めた. 読む側は `source` を読まないので版は 2 のまま.
+
+**既知の問題 (版 1)**: 版 1 の `source.path` は読み込んだ場所を常に絶対パスで書く. 版 1 は公開した約束で, 読む側 (ML-Inference など) がこの欄を使うかを確かめていないので, 今は変えない. 版 1 のデータセットを人に渡すときは, 手元のパスが入っていることに気を付ける.
 
 ### 画像と領域の対 (`export_image_masks`)
 
@@ -320,15 +324,33 @@ split:
 - **正規化**: 1 件ごとに, 撮影の姿勢と正解の点群に同じ平行移動をかけ, 撮った物の中心 (書き出しで残す枚 (画像のある枚) のうち, 追跡できた枚の視線に最も近い点. 方位の隙間と同じ求め方. 決まらなければカメラの位置の平均. 追跡できた枚が無ければ残す枚の全ての姿勢で) を原点にする. 書き出した撮影から中心を求め直すと原点になる. 回転と拡大縮小はかけない (実寸 (メートル) と上の向きを残す. 寸法を測るため). 中心は入力 (姿勢) だけから決め, 正解の点群からは決めない (推論のときに同じ正規化をかけられ, 正解の位置が入力に漏れないように). 足した量を表の `shift_x`, `shift_y`, `shift_z` に残し (正規化した座標 = 元の座標 + shift), `normalization` に方法, 単位, かけた項目, 列を書く. 推論のときは, 同じ正規化を `capture_shift(撮影)` (足す量を求める) と `normalize_capture(撮影, 写す先)` (写して姿勢と撮影の点群に足す) でかけ, 出力を元の座標に戻すには shift を引く
 - 撮影は写し直す: 各枚の画像, 生の深度, 穴を埋めた深度, 信頼度を同じ相対の場所に写し, `transforms.json` の姿勢を正規化して書く (深度はカメラから見た値なので変わらない). 他の欄はそのまま写すので, 世界の座標を持つ他の欄 (物の範囲など) には平行移動がかからない. 撮影の外を指すか無いファイルの欄は除く. 画像の無い枚は除く. 撮影が持つ点群 (`point_cloud.file_path`) も同じ平行移動をかけて PLY で書く (無いか撮影の外を指すか読めなければ除いて `notes` に)
 - 正解の点群は `cloud_units` (`meter`, `centimeter`, `millimeter`) からメートルにそろえ, 2 進の PLY (x, y, z は float32. 色と法線があれば残す) で書く. 撮影の姿勢の単位はメートルとする
-- 項目: `capture` (`kind: capture`, 入力, `placement: directory`, `shape` は (枚数, 高さ, 幅), `convention` は撮影の座標の決まり), `cloud` (`kind: point_cloud`, 正解, `shape` は (点の数, 3), 単位はメートル, 座標は撮影の正規化した世界)
+- 項目: `capture` (`kind: capture`, 入力, `placement: directory`, `shape` は (枚数, 高さ, 幅), `convention` は撮影の座標の決まり (下)), `cloud` (`kind: point_cloud`, 正解, `shape` は (点の数, 3), 単位はメートル, 座標は撮影の正規化した世界)
 - `role: predict`, `target.kind: point_cloud`
+
+**撮影の座標の決まり** (`entries.capture.convention`). 深度から点に戻すのに要るものを全て書く.
+
+| 欄 | 中身 |
+| --- | --- |
+| `pose` | `camera_to_world` (`transform_matrix` はカメラから世界への 4 x 4) |
+| `camera_axes` | カメラの軸 (撮影の `coordinate_convention.camera_axes`. 無ければ `OpenGL (+X right, +Y up, -Z forward)`) |
+| `world_up` | 世界の上の向き (撮影の `coordinate_convention.world_up`. 無ければ null) |
+| `origin` | `normalization` (正規化した世界) |
+| `depth` | 深度の測り方. `z` はカメラの前の向きの軸に沿った距離 (光線に沿った距離ではない). `ray` は光線に沿った距離 |
+| `pixel_center` | 画素の中心の位置. `0.5` は, 行 r, 列 c の画素の中心を (c + 0.5, r + 0.5) とする (`cx`, `cy` と同じ画素の座標. 左上の画素の左上の角が (0, 0)) |
+
+`depth` と `pixel_center` は撮影の `coordinate_convention` に書かれていればそれを写し, 無ければ (null も) `z` と `0.5` とし, 書かれていない撮影の数と例を `notes` に書く. `depth` が `z` と `ray` のどちらでもないか, `pixel_center` が数でない撮影は誤り (`read_capture` も. 黙って読み違えないため). 撮影ごとの違いは既定を足してから比べる. 合成の見本 (`synthetic.render_view`) は画素の中心 (+0.5) を通る光線を, カメラの前の軸に 1 進む向き (OpenGL なら z 成分が -1) で当て, 当たった倍数を深度にするので, 深度は `z` で画素の中心は `0.5`. 見本の `transforms.json` にもそう書く. 多視点の撮影の読み込みと `read_capture` は深度の値を変えずに返す (単位をメートルにそろえ, 欠けを 0 にするだけ). OpenGL の軸で深度 d の画素 (r, c) は, カメラの座標で ((c + 0.5 - cx) / fl_x * d, -(r + 0.5 - cy) / fl_y * d, -d) になり, 姿勢をかけると世界の座標になる.
+
+`depth` と `pixel_center` を足しても版は 2 のまま (`convention` の欄を足すだけで, 今の欄の意味は変わらず, 今の読む側は知らない欄を読まない).
+
+**推論のときの読み方**: 新しい撮影は `normalize_capture(撮影, 写す先)` で学習と同じ正規化をかけ, `read_capture(写す先)` で `load_items` の撮影と同じ形の辞書に読む. 正解と同じ形の点群は `read_cloud(ファイル)` で読む (`points` ((点の数, 3) の float64. 単位は元のファイルのまま), `colors`, `normals`). どちらも `ml_eda` から使える.
 
 ### 読み込み (`load_items`)
 
 `load_items(path)` は `ItemDataset` を返す. `info` (説明), `items` (表), `entries` (項目), `split(name, read=True)` (分割の件の並び. `len` と番号で 1 件を返すので, PyTorch の `Dataset` にそのまま包める).
 
 - 1 件は辞書 (`id`, `group`, `split` と, 項目の名前から中身). 項目の名前に `id`, `split`, `group` は使えない (書き出しと `load_items` で誤り)
-- `read=True`: `image` は (高さ, 幅, チャンネル) の uint8, `mask` は (高さ, 幅) の整数 (説明の `dtype`), `point_cloud` は (点の数, 3) の float32, `capture` は `intrinsics`, `poses` ((枚数, 4, 4). 無い姿勢は NaN), `images` ((枚数, 高さ, 幅, チャンネル) の uint8), `depth` ((枚数, 高さ, 幅) の float32, メートル, 欠けは 0. 全ての枚に深度がある場合だけ, 無ければ None), `confidence` (同じく uint8 か None), `tracking`, `convention` の辞書. 画像の大きさがそろわない撮影は誤り
+- `read=True`: `image` は (高さ, 幅, チャンネル) の uint8, `mask` は (高さ, 幅) の整数 (説明の `dtype`), `point_cloud` は (点の数, 3) の float32, `capture` は `intrinsics`, `poses` ((枚数, 4, 4). 無い姿勢は NaN), `images` ((枚数, 高さ, 幅, チャンネル) の uint8), `depth` ((枚数, 高さ, 幅) の float32, メートル, 欠けは 0. 全ての枚に深度がある場合だけ, 無ければ None), `confidence` (同じく uint8 か None), `tracking`, `convention` (撮影の `coordinate_convention` に, 無ければ `depth: z` と `pixel_center: 0.5` を足したもの) の辞書. 画像の大きさがそろわない撮影は誤り
+- 返す配列は全て書き込める (`writeable` が True. 種類によらず同じ). Pillow の画像から作った配列は書き込めないので写して返す (そのまま `torch.from_numpy` に渡すと PyTorch が警告を出すため)
 - `read=False`: ファイルとディレクトリの場所 (絶対パスの文字)
 - 知らない `kind` の項目は場所を返す. 知らない `placement` は誤り (読み方が分からないので黙って読み違えない)
 - 表の場所はデータセットのディレクトリの中だけ (絶対パスや `..` は誤り. 書かれた場所の文字の上で確かめ, 撮影の読み込みと同じくシンボリックリンクの先はたどる)
@@ -343,7 +365,7 @@ split:
 道具の確かめ用 (テストと ML_tester で使う). ml_eda の他は numpy と標準ライブラリだけで書く (PNG も自前で書くので Pillow も描く道具も要らない).
 
 - `write_image_masks(root, count, size, seed)`: 雑音の上に円か四角を 1 つ置いた画像と, その領域 (0 が背景, 1 が円, 2 が四角) を `images/` と `masks/` に書く
-- `write_shape_captures(root, shapes, views, size, points, seed)`: 球と箱の正確な点群 (面の上の一様な点) を `clouds/<名前>.ply` に書き, 物の周りの決まった姿勢から光線を当てて (解析的な交わり) 画像, 深度 (ミリの 16 bit の PNG), 信頼度を求め, 多視点の撮影の形で `captures/<名前>/` に書く
+- `write_shape_captures(root, shapes, views, size, points, seed, count)`: 球と箱の正確な点群 (面の上の一様な点) を `clouds/<名前>.ply` に書き, 物の周りの決まった姿勢から光線を当てて (解析的な交わり) 画像, 深度 (ミリの 16 bit の PNG), 信頼度を求め, 多視点の撮影の形で `captures/<名前>/` に書く. `shapes` を省くと既定の球 2 つと箱 2 つ. `count` を渡すと, `seed` から球か箱を `count` 個ばらつかせて作る (名前は `shape_000` から. 種類, 中心 (原点から水平に 0.5 から 1.5 m, 高さ 0.05 から 0.3 m), 大きさ (球の半径 0.08 から 0.18 m, 箱の各辺 0.1 から 0.3 m), 色が乱数. 1 つの撮影には 1 つの形だけが写るので, 中心の位置は正規化の平行移動にだけ効く. `shapes` と同時には渡せない. `count` は 1 以上の整数). `transforms.json` の `coordinate_convention` に `depth: z` と `pixel_center: 0.5` を書く
 
 ### 他の型を書けるかの確かめ (紙の上. 作っていない)
 
