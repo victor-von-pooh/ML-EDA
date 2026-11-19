@@ -107,6 +107,23 @@ dataset.transform(new_frame)                    # 新しいデータに同じ前
 
 ML-Found の学習スクリプトでは, `TensorDataset(*dataset.tensors("train"))` を `DataLoader` に渡す. 入力の次元は `len(dataset.features)`, 分類のクラスの数は `len(dataset.info["classes"])`.
 
+### 入力と正解がファイルの組 (版 2)
+
+画像と領域, 多視点の撮影と点群のように, 正解が列でなくファイルのデータは `dataset.yaml` の版 2 で書き出し, `load_items` で読む (列の正解のデータは今までどおり版 1). 詳しくは [docs/DESIGN.md](docs/DESIGN.md) の「書き出しの版 2」.
+
+```python
+from ml_eda import export_capture_clouds, export_image_masks, load_items
+
+export_image_masks("raw/images", "raw/masks", "datasets/shapes",
+                   classes={0: "background", 1: "object"},
+                   origin={"type": "annotation", "name": "塗り分け"})
+dataset = load_items("datasets/shapes")
+item = dataset.split("train")[0]     # {"id", "image", "mask", ...} の配列
+paths = dataset.split("train", read=False)[0]   # 配列の代わりに場所
+```
+
+撮影と点群の対 (`export_capture_clouds`) は, 姿勢と点群に同じ平行移動 (姿勢から求めた物の中心を原点に) をかけ, 実寸 (メートル) を残す. 確かめ用の見本は `ml_eda.synthetic` (`write_image_masks`, `write_shape_captures`) で作れる.
+
 ## 開発
 
 ```bash
