@@ -1273,7 +1273,8 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     Raises
     ----------
     ValueError
-        新しい版, 知らない手順, 形の誤りの場合
+        新しい版, 知らない手順, 形の誤りの場合と, 目的の列の無いレシピで
+        split.unlabeled が keep の場合
     """
     # ファイルなら読み込み
     if isinstance(recipe, (str, Path)):
@@ -1315,6 +1316,14 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     if unlabeled not in UNLABELED_MODES:
         raise ValueError(
             f"split.unlabeled は drop か keep にしてください: {unlabeled}"
+        )
+
+    # keep は目的の列を書いたレシピだけ (読み込んだ時点で分かるように.
+    # 書かないと前と後の様子と書き出しの全てで誤りになるため)
+    if unlabeled == "keep" and not loaded.get("target"):
+        raise ValueError(
+            "split.unlabeled: keep には目的の列が要ります (レシピに target "
+            "を書く. 目的の列の欠けた行を残すため)"
         )
 
     return loaded
