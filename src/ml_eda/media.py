@@ -3,7 +3,7 @@ import re
 import struct
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -200,7 +200,8 @@ def read_image(path: Path) -> np.ndarray:
     Returns
     ----------
     array: np.ndarray
-        (高さ, 幅) か (高さ, 幅, チャンネル) の uint8 の配列
+        (高さ, 幅) か (高さ, 幅, チャンネル) の uint8 の配列 (書き込める
+        写し. Pillow の画像の配列は書き込めないため)
     """
     # EXIF の向きを直し, パレットは RGB, 16 ビットと浮動小数は値の範囲を
     # 0 から 255 に縮めた 1 チャンネル, 2 値は 0 と 255 の uint8 にそろえる
@@ -219,7 +220,7 @@ def read_image(path: Path) -> np.ndarray:
             return np.asarray(image, dtype=np.uint8) * 255
         if image.mode in ("P", "PA", "CMYK", "LA", "YCbCr", "LAB", "HSV"):
             image = image.convert("RGBA" if "A" in image.mode else "RGB")
-        array = np.asarray(image)
+        array = np.array(image)
 
     return array
 
@@ -630,21 +631,25 @@ def parse_xyz(path: Path) -> dict:
     return cloud
 
 
-def read_cloud(path: Path) -> dict:
+def read_cloud(path: Union[str, Path]) -> dict:
     """
     拡張子に合わせて点群を読む関数
 
+    PLY, PCD, .xyz などと .npy を読む. 単位は変えない
+
     Parameters
     ----------
-    path: Path
+    path: Union[str, Path]
         ファイル
 
     Returns
     ----------
     cloud: dict
-        points, colors, normals
+        points ((点の数, 3) の float64), colors ((点の数, 3) の uint8 か
+        None), normals (None もある)
     """
-    # 形式ごとの読み込み
+    # 形式ごとの読み込み (文字の場所も)
+    path = Path(path).expanduser()
     suffix = path.suffix.lower()
     readers: dict[str, Callable[[Path], dict]] = {
         ".ply": parse_ply, ".pcd": parse_pcd,

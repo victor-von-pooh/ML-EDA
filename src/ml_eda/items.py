@@ -59,6 +59,19 @@ FRAME_FILES = (
 # 撮影の座標の決まりが無い場合のカメラの軸
 DEFAULT_AXES = "OpenGL (+X right, +Y up, -Z forward)"
 
+# 撮影の座標の決まりが無い場合の深度の測り方 (z はカメラの前の軸に沿った
+# 距離) と画素の中心 (行 r, 列 c の中心を (c + 0.5, r + 0.5))
+DEFAULT_DEPTH = {"depth": "z", "pixel_center": 0.5}
+
+# 深度の測り方 (z はカメラの前の軸に沿った距離, ray は光線に沿った距離)
+DEPTH_KINDS = ("z", "ray")
+
+# 版 2 の source に添える, 元の場所の書き方
+SOURCE_NOTE = (
+    "元の場所はディレクトリの名前だけを残す (手元のディレクトリの構成を"
+    "渡さないため)"
+)
+
 
 def check_origin(origin: Optional[dict]) -> dict:
     """
@@ -350,7 +363,7 @@ def read_mask(path: Path) -> np.ndarray:
                 f"I;16, I) にしてください (今は {mode}. 色とクラスの対応は"
                 "決めていません)"
             )
-        array = np.asarray(image)
+        array = np.array(image)
     if mode == "1":
         array = array.astype(np.uint8)
 
@@ -774,8 +787,9 @@ def export_image_masks(
             "split": split_info,
             "splits": None,
             "source": {
-                "images": str(image_dir), "masks": str(mask_dir),
-                "mask_suffix": mask_suffix,
+                "images": source_name(image_dir),
+                "masks": source_name(mask_dir), "mask_suffix": mask_suffix,
+                "paths": "name_only", "note": SOURCE_NOTE,
             },
             "notes": notes,
         }
@@ -1194,12 +1208,25 @@ def export_capture_clouds(
             cloud_shapes.append((len(cloud["points"]), 3))
             conventions.append(summary["convention"])
 
-        # 座標の決まり (撮影ごとに違えば先頭のものを書いて注意)
-        convention = conventions[0]
-        if any(other != convention for other in conventions):
+        # 座標の決まり (深度の既定を足してから比べ, 撮影ごとに違えば先頭
+        # のものを書いて注意. 深度の決まりが無ければ既定として注意)
+        filled = [with_depth_convention(other) for other in conventions]
+        convention, full = conventions[0], filled[0]
+        if any(other != full for other in filled):
             notes.append(
                 "撮影ごとに座標の決まり (coordinate_convention) が違います. "
                 "説明には先頭の撮影のものを書きました"
+            )
+        lacking = [
+            stem for (stem, _, _), other in zip(pairs, conventions)
+            if any(other.get(key) is None for key in DEFAULT_DEPTH)
+        ]
+        if lacking:
+            notes.append(
+                f"{len(lacking)} 件の撮影 ({', '.join(lacking[:EXAMPLES])}) "
+                "の座標の決まりに深度の測り方 (depth) か画素の中心 "
+                "(pixel_center) が無いので, depth: z (カメラの前の軸に沿った"
+                "距離), pixel_center: 0.5 としました"
             )
         info = {
             "format_version": ITEMS_FORMAT_VERSION,
@@ -1225,6 +1252,8 @@ def export_capture_clouds(
                         ),
                         "world_up": convention.get("world_up"),
                         "origin": "normalization",
+                        "depth": full["depth"],
+                        "pixel_center": full["pixel_center"],
                     },
                 },
                 "cloud": {
@@ -1250,9 +1279,9 @@ def export_capture_clouds(
                 "formula": "normalized = original + shift",
             },
             "source": {
-                "captures": str(Path(captures).expanduser()),
-                "clouds": str(Path(clouds).expanduser()),
-                "cloud_units": cloud_units,
+                "captures": source_name(captures),
+                "clouds": source_name(clouds), "cloud_units": cloud_units,
+                "paths": "name_only", "note": SOURCE_NOTE,
             },
             "notes": notes,
         }
@@ -1389,14 +1418,85 @@ def stack_or_none(arrays: list, count: int, label: str) -> Optional[Any]:
     return stacked
 
 
-def read_capture(path: Path) -> dict:
+def source_name(place: Union[str, Path]) -> str:
     """
-    撮影のディレクトリの各枚を配列として読む関数
+    説明の source に書く, 元のディレクトリの名前を返す関数
+
+    手元のディレクトリの構成を残さないため, 最後の部分だけにする
 
     Parameters
     ----------
-    path: Path
-        撮影のディレクトリ
+    place: Union[str, Path]
+        元のディレクトリ
+
+    Returns
+    ----------
+    name: str
+        ディレクトリの名前 (. や .. は畳んだ先の名前. ~ だけと根は空)
+    """
+    # . と .. だけを畳んで最後の部分 (シンボリックリンクはたどらず, 渡した
+    # 名前のまま. ~ だけや根は手元の名前になるので空)
+    text = str(place)
+    if text.strip().rstrip("/\\") in ("~", ""):
+        name = ""
+        return name
+    name = Path(os.path.abspath(os.path.expanduser(text))).name
+
+    return name
+
+
+def with_depth_convention(convention: dict) -> dict:
+    """
+    撮影の座標の決まりに, 深度の測り方と画素の中心の既定を足す関数
+
+    Parameters
+    ----------
+    convention: dict
+        transforms.json の coordinate_convention
+
+    Returns
+    ----------
+    full: dict
+        depth (z か ray) と pixel_center を持つ写し (書かれていれば
+        そのまま. null は書かれていないものとする)
+
+    Raises
+    ----------
+    ValueError
+        depth が z と ray のどちらでもない場合と, pixel_center が数で
+        ない場合 (読み違えないため)
+    """
+    # 書かれていない欄 (null も) だけ既定
+    full = dict(convention)
+    for key, value in DEFAULT_DEPTH.items():
+        if full.get(key) is None:
+            full[key] = value
+    center = full["pixel_center"]
+    if full["depth"] not in DEPTH_KINDS:
+        raise ValueError(
+            f"撮影の coordinate_convention.depth は {', '.join(DEPTH_KINDS)}"
+            f" のどちらかにしてください (今は {full['depth']})"
+        )
+    if isinstance(center, bool) or not isinstance(center, (int, float)):
+        raise ValueError(
+            "撮影の coordinate_convention.pixel_center は数にしてください "
+            f"(今は {center})"
+        )
+
+    return full
+
+
+def read_capture(path: Union[str, Path]) -> dict:
+    """
+    撮影のディレクトリの各枚を配列として読む関数
+
+    load_items の capture の項目と同じ形で返す. 推論のときは
+    normalize_capture で写した新しい撮影を読む
+
+    Parameters
+    ----------
+    path: Union[str, Path]
+        撮影のディレクトリ (transforms.json を持つ)
 
     Returns
     ----------
@@ -1404,15 +1504,19 @@ def read_capture(path: Path) -> dict:
         intrinsics, poses ((枚数, 4, 4). 無い姿勢は NaN), images ((枚数,
         高さ, 幅, チャンネル) の uint8), depth ((枚数, 高さ, 幅) の
         float32, メートル, 欠けは 0. 無い枚があれば None), confidence
-        (同じく uint8 か None), tracking, convention
+        (同じく uint8 か None), tracking, convention (深度の測り方
+        depth と画素の中心 pixel_center を含む). 配列は全て書き込める
 
     Raises
     ----------
     ValueError
         画像の無い枚がある場合と, 大きさがそろわない場合
     """
-    # 深度は生の深度を優先 (信頼度と組)
+    # 撮影の説明
+    path = Path(path).expanduser()
     transforms = read_transforms(path)
+
+    # 深度は生の深度を優先 (信頼度と組)
     depth_info = transforms.get("depth") or {}
     scale = depth_scale(depth_info)
     invalid = depth_info.get("invalid_value")
@@ -1433,7 +1537,7 @@ def read_capture(path: Path) -> dict:
             from PIL import Image
 
             with Image.open(confidence) as opened:
-                confidences.append(np.asarray(opened, dtype=np.uint8))
+                confidences.append(np.array(opened, dtype=np.uint8))
         pose = pose_of(entry)
         poses.append(np.full((4, 4), np.nan) if pose is None else pose)
         tracking.append(entry.get("tracking_state", "TRACKING"))
@@ -1446,7 +1550,9 @@ def read_capture(path: Path) -> dict:
         "depth": stack_or_none(depths, count, "深度"),
         "confidence": stack_or_none(confidences, count, "信頼度"),
         "tracking": tracking,
-        "convention": transforms.get("coordinate_convention") or {},
+        "convention": with_depth_convention(
+            transforms.get("coordinate_convention") or {}
+        ),
     }
 
     return capture
