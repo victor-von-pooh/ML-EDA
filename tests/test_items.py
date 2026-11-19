@@ -8,9 +8,11 @@ import pytest
 import yaml
 
 from ml_eda import (
-    export_capture_clouds, export_dataset, export_image_masks, load_data,
-    load_dataset, load_items
+    capture_shift, export_capture_clouds, export_dataset,
+    export_image_masks, load_data, load_dataset, load_items,
+    normalize_capture
 )
+from ml_eda.items import check_entry_names
 from ml_eda.media import read_cloud
 from ml_eda.synthetic import (
     write_image_masks, write_png, write_shape_captures
@@ -81,6 +83,9 @@ def test_image_masks(tmp_path: Path) -> None:
     assert info["entries"]["image"]["shape"] == [24, 32, 3]
     assert info["entries"]["mask"]["values"] == [0, 1, 2]
     assert info["entries"]["mask"]["classes"][2]["name"] == "square"
+    assert info["entries"]["image"]["pattern"] == (
+        "items/{index:06d}/image{suffix}"
+    )
     assert {k: v["items"] for k, v in info["splits"].items()} == {
         "train": 4, "valid": 2, "test": 2,
     }
@@ -159,6 +164,15 @@ def test_version_stops(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="lookup"):
         load_items(tmp_path / "v2")
 
+    # 1 件の辞書の決まった鍵と同じ名前の項目は読まない (書き出しも)
+    rewrite_info(tmp_path / "v2", entries={
+        "split": {"kind": "image", "placement": "file"},
+    })
+    with pytest.raises(ValueError, match="split"):
+        load_items(tmp_path / "v2")
+    with pytest.raises(ValueError, match="group"):
+        check_entry_names({"image": {}, "group": {}})
+
     # 版 1 の書き出しは版 2 のデータセットを置き換えられる
     export_dataset(
         load_data(tmp_path / "t.csv"),
@@ -202,6 +216,18 @@ def test_image_mask_errors(tmp_path: Path) -> None:
         export_image_masks(made["images"], made["masks"], tmp_path / "x")
     assert not (tmp_path / "x").exists()
     assert not (tmp_path / ".x.writing").exists()
+
+    # EXIF の向きの付いた画像 (読むと向きが変わり, 領域とずれる)
+    exif = Image.Exif()
+    exif[0x0112] = 3
+    Image.open(made["images"] / "sample_001.png").convert("RGB").save(
+        made["images"] / "sample_001.jpg", exif=exif
+    )
+    (made["images"] / "sample_001.png").unlink()
+    write_png(made["masks"] / "sample_001.png",
+              np.zeros((24, 32), dtype=np.uint8))
+    with pytest.raises(ValueError, match="EXIF の向き \\(3\\)"):
+        export_image_masks(made["images"], made["masks"], tmp_path / "x")
 
     # 分割の誤り, 正解の出どころの誤り
     made = write_image_masks(tmp_path / "c", count=4)
@@ -420,12 +446,21 @@ def test_capture_device_cloud(tmp_path: Path) -> None:
         (capture / "transforms.json").read_text(encoding="utf-8")
     )
     transforms["point_cloud"] = {"file_path": "device.ply"}
+    far = np.array(transforms["frames"][0]["transform_matrix"])
+    far[:3, 3] += [5.0, 0.0, 5.0]
     transforms["frames"].append({
         **transforms["frames"][0], "file_path": "images/none.png",
+        "transform_matrix": far.tolist(),
     })
     (capture / "transforms.json").write_text(
         json.dumps(transforms), encoding="utf-8"
     )
+
+    # 2 つ目の撮影の点群は無いファイルを指す
+    other = made["captures"] / "sphere_b" / "transforms.json"
+    described = json.loads(other.read_text(encoding="utf-8"))
+    described["point_cloud"] = {"file_path": "../outside.ply"}
+    other.write_text(json.dumps(described), encoding="utf-8")
     (made["captures"] / "broken").mkdir()
     (made["captures"] / "broken" / "transforms.json").write_text(
         "{", encoding="utf-8"
@@ -439,6 +474,7 @@ def test_capture_device_cloud(tmp_path: Path) -> None:
     assert info["target"]["origin"]["type"] == "unknown"
     assert any("broken" in note for note in info["notes"])
     assert any("1 枚" in note for note in info["notes"])
+    assert any("outside.ply" in note for note in info["notes"])
 
     # 端末の点群と正解の点群は同じ座標になる
     dataset = load_items(tmp_path / "ds")
@@ -452,6 +488,18 @@ def test_capture_device_cloud(tmp_path: Path) -> None:
     )
     device = read_cloud(copied / "point_cloud.ply")["points"]
     np.testing.assert_allclose(device, item["cloud"], atol=1e-5)
+
+    # 中心は画像のある枚だけから. 書き出した撮影から求め直すと 0,
+    # 元の撮影から求めると表の shift (推論で同じ正規化をかけられる)
+    row = dataset.items[dataset.items["id"] == "sphere_a"].iloc[0]
+    shift = row[["shift_x", "shift_y", "shift_z"]].to_numpy(float)
+    np.testing.assert_allclose(capture_shift(capture), shift, atol=1e-9)
+    np.testing.assert_allclose(capture_shift(copied), 0.0, atol=1e-9)
+    summary = normalize_capture(capture, tmp_path / "again")
+    np.testing.assert_allclose(summary["shift"], shift, atol=1e-9)
+    assert summary["frames"] == 6
+    np.testing.assert_allclose(capture_shift(tmp_path / "again"), 0.0,
+                               atol=1e-9)
     assert item["capture"]["poses"].shape == (6, 4, 4)
 
 
@@ -478,3 +526,31 @@ def test_shape_helpers() -> None:
     assert [image_channels(mode) for mode in (
         "L", "I;16", "P", "RGB", "LA", "RGBA", "CMYK", None
     )] == [1, 1, 3, 3, 4, 4, 3, None]
+
+
+def test_mask_suffix(tmp_path: Path) -> None:
+    """
+    領域のファイルの名前の終わり (_mask) を除いて組にすることを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # a.png と a_mask.png の組
+    made = write_image_masks(tmp_path / "raw", count=4)
+    for mask in list(made["masks"].glob("*.png")):
+        mask.rename(mask.with_name(f"{mask.stem}_mask.png"))
+    with pytest.raises(ValueError, match="組がありません"):
+        export_image_masks(made["images"], made["masks"], tmp_path / "x")
+    info = export_image_masks(
+        made["images"], made["masks"], tmp_path / "ds", mask_suffix="_mask",
+        split={"method": "none"}
+    )
+    assert info["splits"] == {"train": {"items": 4}}
+    assert sorted(load_items(tmp_path / "ds").items["id"]) == made["names"]

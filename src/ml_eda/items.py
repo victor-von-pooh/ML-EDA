@@ -11,7 +11,7 @@ import pandas as pd
 import yaml
 
 from ml_eda.capture import (
-    depth_scale, inside, pose_of, read_transforms, view_center
+    depth_scale, inside, is_tracked, pose_of, read_transforms, view_center
 )
 from ml_eda.loaders import load_data
 from ml_eda.media import (
@@ -25,6 +25,9 @@ from ml_eda.pipeline import (
 
 # 正解の出どころの種類
 ORIGIN_TYPES = ("process", "annotation", "measurement", "synthetic", "unknown")
+
+# 1 件の辞書で項目の名前に使えない鍵 (読み込みが入れる)
+RESERVED = ("id", "split", "group")
 
 # 項目の置き方 (読み込みが知っているもの)
 PLACEMENTS = ("file", "directory", "column")
@@ -118,8 +121,9 @@ def check_classes(classes: Any) -> Optional[list[dict]]:
         辞書でも並びでもない場合と, 値が整数でない場合
     """
     # 並びは番号を値にする
+    named: Optional[list[dict]] = None
     if classes is None:
-        return None
+        return named
     if isinstance(classes, (list, tuple)):
         classes = dict(enumerate(classes))
     if not isinstance(classes, dict):
@@ -235,7 +239,9 @@ def split_items(
     return result
 
 
-def index_by_stem(files: list[Path], label: str) -> dict[str, Path]:
+def index_by_stem(
+    files: list[Path], label: str, suffix: str = ""
+) -> dict[str, Path]:
     """
     ファイルを名前の stem で引けるようにする関数
 
@@ -245,6 +251,8 @@ def index_by_stem(files: list[Path], label: str) -> dict[str, Path]:
         ファイル
     label: str
         誤りの文に使う, ファイルの呼び名
+    suffix: str = ""
+        stem の終わりから除く文字 (_mask など. 無い stem はそのまま)
 
     Returns
     ----------
@@ -260,12 +268,15 @@ def index_by_stem(files: list[Path], label: str) -> dict[str, Path]:
     # 同じ stem は組が決まらないので誤り
     index: dict[str, Path] = {}
     for path in files:
-        if path.stem in index:
+        stem = path.stem
+        if suffix and stem.endswith(suffix) and len(stem) > len(suffix):
+            stem = stem[:-len(suffix)]
+        if stem in index:
             raise ValueError(
-                f"{label}に同じ名前 ({path.stem}) のファイルが 2 つあります: "
-                f"{index[path.stem].name}, {path.name}"
+                f"{label}に同じ名前 ({stem}) のファイルが 2 つあります: "
+                f"{index[stem].name}, {path.name}"
             )
-        index[path.stem] = path
+        index[stem] = path
 
     return index
 
@@ -362,8 +373,9 @@ def image_channels(mode: Optional[str]) -> Optional[int]:
         のあるものは 4, 他の色は 3. 分からなければ None)
     """
     # read_image の変換 (パレットと他の色の形式は RGB か RGBA)
+    channels: Optional[int] = None
     if mode is None:
-        return None
+        return channels
     if mode in ("1", "L", "F") or mode.startswith("I"):
         channels = 1
     elif mode in ("RGBA", "LA", "PA", "RGBa", "La"):
@@ -372,6 +384,33 @@ def image_channels(mode: Optional[str]) -> Optional[int]:
         channels = 3
 
     return channels
+
+
+def orientation_of(path: Path) -> int:
+    """
+    画像の EXIF の向きを返す関数
+
+    Parameters
+    ----------
+    path: Path
+        画像
+
+    Returns
+    ----------
+    turn: int
+        EXIF の向き (1 から 8. 無いか読めなければ 1)
+    """
+    # 向きの欄 (0x0112) だけ
+    from PIL import Image
+
+    turn = 1
+    try:
+        with Image.open(path) as image:
+            turn = int(image.getexif().get(0x0112, 1) or 1)
+    except Exception:
+        turn = 1
+
+    return turn
 
 
 def check_pair(stem: str, image: Path, mask: Path) -> dict:
@@ -396,12 +435,21 @@ def check_pair(stem: str, image: Path, mask: Path) -> dict:
     Raises
     ----------
     ValueError
-        画像が読めない場合と, 画像と領域の大きさが違う場合
+        画像が読めない場合, EXIF の向きの付いた画像の場合, 画像と領域の
+        大きさが違う場合
     """
     # 画像はヘッダーだけ, 領域は値まで読む
     header = image_header(image)
     if header["width"] is None:
         raise ValueError(f"{image.name} は画像として読めません")
+    turn = orientation_of(image)
+    if turn != 1:
+        raise ValueError(
+            f"{stem} の画像に EXIF の向き ({turn}) があります. 画像は読む"
+            "ときに向きを直しますが, 領域は直さないので画素がずれます. "
+            "向きを直して保存した画像 (EXIF の向きが 1 か無いもの) と, "
+            "それに合わせた領域を渡してください"
+        )
     size = (int(header["height"]), int(header["width"]))
     array = read_mask(mask)
     if array.shape != size:
@@ -508,6 +556,34 @@ def write_ply(path: Path, cloud: dict) -> None:
     )
 
 
+def check_entry_names(entries: dict) -> None:
+    """
+    項目の名前が, 1 件の辞書の決まった鍵 (id, split, group) と重ならない
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    entries: dict
+        項目の名前から説明
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        決まった鍵と同じ名前の項目がある場合
+    """
+    # 重なると 1 件の辞書で項目の中身が鍵を上書きするため
+    taken = [name for name in entries if name in RESERVED]
+    if taken:
+        raise ValueError(
+            f"項目の名前に {', '.join(taken)} は使えません ("
+            f"{', '.join(RESERVED)} は 1 件の辞書の決まった鍵)"
+        )
+
+
 def write_items(
     target: Path, final: Path, rows: list[dict], info: dict
 ) -> dict:
@@ -530,6 +606,9 @@ def write_items(
     info: dict
         書き出した dataset.yaml の中身
     """
+    # 項目の名前は 1 件の辞書の決まった鍵と重ならないもの
+    check_entry_names(info["entries"])
+
     # 表 (parquet が無ければ csv) と, 件のある分割の件数
     frame = pd.DataFrame(rows)
     info["items"] = write_frame(frame, target / "items")
@@ -548,7 +627,7 @@ def export_image_masks(
     path: Union[str, Path], split: Optional[dict] = None,
     groups: Optional[dict] = None, classes: Any = None,
     origin: Optional[dict] = None, name: Optional[str] = None,
-    overwrite: bool = False
+    overwrite: bool = False, mask_suffix: str = ""
 ) -> dict:
     """
     画像と領域の対を, 版 2 のデータセットに書き出す関数
@@ -574,6 +653,9 @@ def export_image_masks(
         データセットの名前 (省略するとディレクトリの名前)
     overwrite: bool = False
         既にあるデータセットを置き換えるか
+    mask_suffix: str = ""
+        領域のファイルの stem の終わりから除いて組にする文字 (a.png と
+        a_mask.png を組にするなら _mask)
 
     Returns
     ----------
@@ -584,7 +666,7 @@ def export_image_masks(
     ----------
     ValueError
         組が無い場合, 同じ stem が 2 つある場合, 大きさの違う組やカラーの
-        領域がある場合, 分割の誤りの場合
+        領域, EXIF の向きの付いた画像がある場合, 分割の誤りの場合
     """
     # 組 (stem で) と, 正解の出どころ, 値の名前, 分割
     image_dir = Path(images).expanduser()
@@ -594,7 +676,9 @@ def export_image_masks(
             raise ValueError(f"{place} はディレクトリではありません")
     pairs, notes = pair_files(
         index_by_stem(list_files(image_dir, IMAGE_EXTENSIONS), "画像"),
-        index_by_stem(list_files(mask_dir, IMAGE_EXTENSIONS), "領域"),
+        index_by_stem(
+            list_files(mask_dir, IMAGE_EXTENSIONS), "領域", mask_suffix
+        ),
         ("画像", "領域")
     )
     if not pairs:
@@ -656,7 +740,7 @@ def export_image_masks(
             "entries": {
                 "image": {
                     "kind": "image", "role": "input", "placement": "file",
-                    "pattern": f"{ITEMS_DIR}/{{index}}/image{{suffix}}",
+                    "pattern": f"{ITEMS_DIR}/{{index:06d}}/image{{suffix}}",
                     "formats": sorted({
                         image.suffix.lower().lstrip(".")
                         for _, image, _ in pairs
@@ -669,7 +753,7 @@ def export_image_masks(
                 },
                 "mask": {
                     "kind": "mask", "role": "target", "placement": "file",
-                    "pattern": f"{ITEMS_DIR}/{{index}}/mask{{suffix}}",
+                    "pattern": f"{ITEMS_DIR}/{{index:06d}}/mask{{suffix}}",
                     "formats": sorted({
                         mask.suffix.lower().lstrip(".")
                         for _, _, mask in pairs
@@ -689,7 +773,10 @@ def export_image_masks(
             "items": None,
             "split": split_info,
             "splits": None,
-            "source": {"images": str(image_dir), "masks": str(mask_dir)},
+            "source": {
+                "images": str(image_dir), "masks": str(mask_dir),
+                "mask_suffix": mask_suffix,
+            },
             "notes": notes,
         }
         info = write_items(target, final, rows, info)
@@ -700,64 +787,148 @@ def export_image_masks(
     return info
 
 
-def capture_center(poses: list[np.ndarray]) -> np.ndarray:
+def kept_frames(source: Path, transforms: dict) -> tuple[list[dict], int]:
     """
-    撮影の姿勢だけから, 撮った物の中心を求める関数
-
-    Parameters
-    ----------
-    poses: list[np.ndarray]
-        カメラから世界への 4 x 4 の姿勢 (1 つ以上)
-
-    Returns
-    ----------
-    center: np.ndarray
-        各枚の視線に最も近い点 (視線がほぼ平行で決まらなければ, カメラの
-        位置の平均)
-    """
-    # 方位の隙間と同じ求め方. 決まらなければ位置の平均
-    center = view_center(poses) if len(poses) >= 2 else None
-    if center is None:
-        center = np.mean([pose[:3, 3] for pose in poses], axis=0)
-
-    return center
-
-
-def copy_capture(
-    source: Path, target: Path, shift: np.ndarray
-) -> tuple[dict, list[str]]:
-    """
-    撮影を写し, 姿勢と撮影が持つ点群に平行移動をかける関数
+    撮影の枚のうち, 画像のある枚を選ぶ関数
 
     Parameters
     ----------
     source: Path
-        元の撮影のディレクトリ
-    target: Path
-        写す先のディレクトリ (無いもの)
-    shift: np.ndarray
-        世界の座標に足す量 (メートル)
+        撮影のディレクトリ
+    transforms: dict
+        transforms.json の中身
 
     Returns
     ----------
-    result: tuple[dict, list[str]]
-        frames (枚数), height, width, convention (座標の決まり) と注意
+    result: tuple[list[dict], int]
+        画像のある枚 (transforms.json の frames の写し) と, 除いた枚数
 
     Raises
     ----------
     ValueError
         画像のある枚が無い場合
     """
-    # 画像のある枚だけ, 各ファイルを同じ相対の場所に写す. 撮影の外を
-    # 指す場所と無いファイルの欄は除く
+    # 画像が撮影の中にある枚だけ
+    frames = [dict(entry) for entry in transforms["frames"]
+              if inside(source, entry.get("file_path")) is not None]
+    if not frames:
+        raise ValueError(f"{source.name} の撮影に画像のある枚がありません")
+    result = (frames, len(transforms["frames"]) - len(frames))
+
+    return result
+
+
+def frames_shift(frames: list[dict], label: str) -> np.ndarray:
+    """
+    枚の姿勢から, 撮った物の中心を原点にする平行移動を求める関数
+
+    Parameters
+    ----------
+    frames: list[dict]
+        画像のある枚 (transforms.json の frames)
+    label: str
+        誤りの文に使う撮影の名前
+
+    Returns
+    ----------
+    shift: np.ndarray
+        世界の座標に足す量 (中心の符号を変えたもの. メートル)
+
+    Raises
+    ----------
+    ValueError
+        姿勢が 1 つも無い場合
+    """
+    # 追跡できた枚の姿勢を優先し, 無ければ全ての姿勢
+    tracked = [pose_of(entry) for entry in frames if is_tracked(entry)]
+    poses = [pose for pose in tracked if pose is not None] or [
+        pose for pose in map(pose_of, frames) if pose is not None
+    ]
+    if not poses:
+        raise ValueError(f"{label} の撮影に姿勢がありません")
+
+    # 方位の隙間と同じ中心. 決まらなければカメラの位置の平均
+    center = view_center(poses) if len(poses) >= 2 else None
+    if center is None:
+        center = np.mean([pose[:3, 3] for pose in poses], axis=0)
+    shift = -center
+
+    return shift
+
+
+def capture_shift(capture: Union[str, Path]) -> np.ndarray:
+    """
+    撮影の正規化の平行移動 (書き出しと同じ決まり) を求める関数
+
+    推論のときに, 新しい撮影に学習のときと同じ正規化をかけ, 出力を元の
+    座標に戻す (出力 - shift) ため
+
+    Parameters
+    ----------
+    capture: Union[str, Path]
+        撮影のディレクトリ (transforms.json を持つ)
+
+    Returns
+    ----------
+    shift: np.ndarray
+        世界の座標に足す量 (正規化した座標 = 元の座標 + shift. メートル)
+
+    Raises
+    ----------
+    ValueError
+        画像のある枚が無い場合と, その枚に姿勢が無い場合
+    """
+    # 画像のある枚の姿勢だけから (書き出しで残す枚と同じ)
+    source = Path(capture).expanduser()
+    frames, _ = kept_frames(source, read_transforms(source))
+    shift = frames_shift(frames, source.name)
+
+    return shift
+
+
+def normalize_capture(
+    capture: Union[str, Path], target: Union[str, Path]
+) -> dict:
+    """
+    撮影を写し, 姿勢と撮影が持つ点群に正規化の平行移動をかける関数
+
+    書き出し (export_capture_clouds) と同じ正規化. 推論のときに新しい
+    撮影にも同じものをかけられるように公開する
+
+    Parameters
+    ----------
+    capture: Union[str, Path]
+        元の撮影のディレクトリ
+    target: Union[str, Path]
+        写す先のディレクトリ (無いもの)
+
+    Returns
+    ----------
+    summary: dict
+        shift (世界の座標に足した量), frames (枚数), height, width,
+        convention (座標の決まり), notes (除いた枚と点群の注意)
+
+    Raises
+    ----------
+    ValueError
+        画像のある枚が無い場合と, その枚に姿勢が無い場合
+    """
+    # 画像のある枚だけを残し, その姿勢から平行移動を決める
+    source = Path(capture).expanduser()
+    target = Path(target).expanduser()
     transforms = read_transforms(source)
+    frames, dropped = kept_frames(source, transforms)
+    shift = frames_shift(frames, source.name)
+    notes = []
+    if dropped:
+        notes.append(
+            f"{source.name} の撮影の, 画像の無い {dropped} 枚を除きました"
+        )
+
+    # 各ファイルを同じ相対の場所に写す. 撮影の外を指す場所と無いファイル
+    # の欄は除く
     target.mkdir(parents=True)
-    frames, dropped = [], 0
-    for entry in transforms["frames"]:
-        if inside(source, entry.get("file_path")) is None:
-            dropped += 1
-            continue
-        entry = dict(entry)
+    for entry in frames:
         for key in FRAME_FILES:
             place = inside(source, entry.get(key))
             if place is None:
@@ -771,46 +942,76 @@ def copy_capture(
         if pose is not None:
             pose[:3, 3] += shift
             entry["transform_matrix"] = pose.tolist()
-        frames.append(entry)
-    if not frames:
-        raise ValueError(f"{source.name} の撮影に画像のある枚がありません")
-    notes = []
-    if dropped:
-        notes.append(
-            f"{source.name} の撮影の, 画像の無い {dropped} 枚を除きました"
-        )
 
-    # 撮影が持つ点群にも同じ平行移動 (読めなければ除く)
+    # 撮影が持つ点群にも同じ平行移動 (無いか読めなければ除いて注意)
     copied = {key: value for key, value in transforms.items()
               if key not in ("frames", "point_cloud")}
     copied["frames"] = frames
-    described = transforms.get("point_cloud")
-    cloud = inside(source, (described or {}).get("file_path")) if (
-        isinstance(described, dict)
-    ) else None
-    if cloud is not None:
-        try:
-            points = read_cloud(cloud)
-            points["points"] = points["points"] + shift
-            write_ply(target / "point_cloud.ply", points)
-            copied["point_cloud"] = {
-                **described, "file_path": "point_cloud.ply",
-            }
-        except (OSError, ValueError, KeyError, IndexError) as error:
-            notes.append(
-                f"{source.name} の撮影の点群を読めず, 除きました ({error})"
-            )
+    notes += copy_capture_cloud(
+        source, target, transforms.get("point_cloud"), shift, copied
+    )
     (target / "transforms.json").write_text(
         json.dumps(copied, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     summary = {
-        "frames": len(frames), "height": transforms.get("h"),
-        "width": transforms.get("w"),
+        "shift": shift, "frames": len(frames),
+        "height": transforms.get("h"), "width": transforms.get("w"),
         "convention": transforms.get("coordinate_convention") or {},
+        "notes": notes,
     }
-    result = (summary, notes)
 
-    return result
+    return summary
+
+
+def copy_capture_cloud(
+    source: Path, target: Path, described: Any, shift: np.ndarray,
+    copied: dict
+) -> list[str]:
+    """
+    撮影が持つ点群に平行移動をかけて写す関数
+
+    Parameters
+    ----------
+    source: Path
+        元の撮影のディレクトリ
+    target: Path
+        写す先のディレクトリ
+    described: Any
+        transforms.json の point_cloud
+    shift: np.ndarray
+        世界の座標に足す量
+    copied: dict
+        写す transforms.json (写せたら point_cloud を入れる)
+
+    Returns
+    ----------
+    notes: list[str]
+        除いた点群の注意
+    """
+    # 書かれていなければ何もしない
+    notes: list[str] = []
+    if not isinstance(described, dict) or not described.get("file_path"):
+        return notes
+    cloud = inside(source, described.get("file_path"))
+    if cloud is None:
+        notes.append(
+            f"{source.name} の撮影の点群 ({described.get('file_path')}) が"
+            "無いか撮影の外を指すので, 除きました"
+        )
+        return notes
+
+    # 読めた点群だけ PLY で写す
+    try:
+        points = read_cloud(cloud)
+        points["points"] = points["points"] + shift
+        write_ply(target / "point_cloud.ply", points)
+        copied["point_cloud"] = {**described, "file_path": "point_cloud.ply"}
+    except (OSError, ValueError, KeyError, IndexError) as error:
+        notes.append(
+            f"{source.name} の撮影の点群を読めず, 除きました ({error})"
+        )
+
+    return notes
 
 
 def find_clouds(path: Path) -> dict[str, Path]:
@@ -969,19 +1170,12 @@ def export_capture_clouds(
     try:
         rows, frame_shapes, cloud_shapes, conventions = [], [], [], []
         for index, (stem, position, cloud_path) in enumerate(pairs):
-            item = data.load_item(position)
-            poses = [f["pose"] for f in item["frames"]
-                     if f["pose"] is not None and f["tracking"] == "TRACKING"]
-            poses = poses or [f["pose"] for f in item["frames"]
-                              if f["pose"] is not None]
-            if not poses:
-                raise ValueError(f"{stem} の撮影に姿勢がありません")
-            shift = -capture_center(poses)
             place = item_dir(index)
-            summary, copy_notes = copy_capture(
-                Path(item["path"]), target / place / "capture", shift
+            summary = normalize_capture(
+                data.load_item(position)["path"], target / place / "capture"
             )
-            notes += copy_notes
+            shift = summary["shift"]
+            notes += summary["notes"]
             cloud = read_cloud(cloud_path)
             cloud["points"] = cloud["points"] * scale + shift
             write_ply(target / place / "cloud.ply", cloud)
@@ -1020,7 +1214,7 @@ def export_capture_clouds(
                 "capture": {
                     "kind": "capture", "role": "input",
                     "placement": "directory",
-                    "pattern": f"{ITEMS_DIR}/{{index}}/capture",
+                    "pattern": f"{ITEMS_DIR}/{{index:06d}}/capture",
                     "formats": ["transforms.json"],
                     "shape": common_shape(frame_shapes),
                     "dtype": None, "units": "meter",
@@ -1036,7 +1230,7 @@ def export_capture_clouds(
                 "cloud": {
                     "kind": "point_cloud", "role": "target",
                     "placement": "file",
-                    "pattern": f"{ITEMS_DIR}/{{index}}/cloud.ply",
+                    "pattern": f"{ITEMS_DIR}/{{index:06d}}/cloud.ply",
                     "formats": ["ply"],
                     "shape": common_shape(cloud_shapes),
                     "dtype": "float32", "units": "meter",
@@ -1185,8 +1379,9 @@ def stack_or_none(arrays: list, count: int, label: str) -> Optional[Any]:
         枚ごとの形が違う場合
     """
     # 全ての枚にあり, 形がそろう場合だけ重ねる
+    stacked: Optional[Any] = None
     if len(arrays) != count or not arrays:
-        return None
+        return stacked
     if len({array.shape for array in arrays}) > 1:
         raise ValueError(f"撮影の{label}の大きさがそろいません")
     stacked = np.stack(arrays)
@@ -1277,13 +1472,15 @@ def read_entry(root: Path, spec: dict, value: Any, read: bool) -> Any:
     content: Any
         中身 (配列か辞書), 場所 (絶対パスの文字), 表の値のどれか
     """
-    # 表の列の値はそのまま
+    # 表の列の値はそのまま, 読まない場合は場所
+    content: Any = value
     if spec["placement"] == "column":
-        return value
+        return content
     path = within(root, value, spec["placement"] == "directory")
     kind = spec.get("kind")
+    content = str(path)
     if not read:
-        return str(path)
+        return content
 
     # 種類ごとの読み方 (知らない種類は場所)
     if kind == "image":
@@ -1488,6 +1685,7 @@ def load_items(path: Union[str, Path]) -> ItemDataset:
     entries = info.get("entries")
     if not isinstance(entries, dict) or not entries:
         raise ValueError("dataset.yaml に entries がありません")
+    check_entry_names(entries)
     for name, spec in entries.items():
         placement = spec.get("placement") if isinstance(spec, dict) else None
         if placement not in PLACEMENTS:

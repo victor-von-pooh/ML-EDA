@@ -281,9 +281,9 @@ split:
 | `kind` | 項目の種類. `image`, `mask`, `point_cloud`, `capture` (今の書き出し), `boxes`, `vector`, `row` (表の 1 行), `text`, `value`, `class`, `id` (下の確かめで使う) |
 | `role` | `input` か `target` |
 | `placement` | 置き方. `file` (1 件に 1 つのファイル. 表の同じ名前の列に場所), `directory` (1 件に 1 つのディレクトリ. 撮影), `column` (表の同じ名前の列に値) |
-| `pattern` | 置き方の形 (`items/{index}/image{suffix}` など. 人と画面が読むため. 場所は表の列が正) |
+| `pattern` | 置き方の形 (`items/{index:06d}/image{suffix}` など. Python の書式で, `index` は表の行の位置を 6 桁の 0 埋め, `suffix` は元のファイルの小文字の拡張子. 人と画面が読むため. 場所は表の列が正) |
 | `formats` | ファイルの形式 (`png`, `ply`, `transforms.json` など) |
-| `shape` | 1 件の形 (件ごとにそろわない次元は null) |
+| `shape` | 1 件の形 (件ごとにそろわないか分からない次元は null). 1 つの配列の項目 (`image`, `mask`, `point_cloud`) は `load_items` の返す配列の形 (画像はチャンネルの次元を含む). 複数の配列を持つ項目 (`capture`) は共通の次元だけ ((枚数, 高さ, 幅). 画像のチャンネルや深度は読み込みの節の形) |
 | `dtype` | 読んだ配列の型 |
 | `units` | 単位 (`pixel`, `meter` など. 無ければ null) |
 | `convention` | 座標の決まり (画像は左上が原点で (行, 列). 撮影は姿勢がカメラから世界, カメラの軸, 世界の上の向き) |
@@ -305,10 +305,10 @@ split:
 
 ### 画像と領域の対 (`export_image_masks`)
 
-`export_image_masks(images, masks, path, split=None, groups=None, classes=None, origin=None, name=None, overwrite=False)`. Pillow が要る.
+`export_image_masks(images, masks, path, split=None, groups=None, classes=None, origin=None, name=None, overwrite=False, mask_suffix="")`. Pillow が要る.
 
-- 画像のディレクトリと領域のディレクトリ (それぞれ 2 階層まで) のファイルを, 名前の stem で組にする. 1 つのディレクトリに同じ stem が 2 つあれば誤り (どれを組にするか決まらない). 片方にしか無いものは除き, 数と例を `notes` に書く
-- 領域は 1 チャンネルの整数の画像 (`L`, `P` (パレットの番号), `1`, `I;16`, `I`). カラーの領域 (`RGB` など) は誤り (色とクラスの対応を決めていないため). 画像と領域の大きさの違う組は誤り. JPEG の領域は値が崩れるので注意に書く. 画像の EXIF の向きは読み込みで直すが, 領域は直さない (向きの付いた画像の組は, 書き出す前にそろえる)
+- 画像のディレクトリと領域のディレクトリ (それぞれ 2 階層まで) のファイルを, 名前の stem で組にする. `mask_suffix` (`_mask` など) を渡すと, 領域の stem の終わりからその文字を除いて組にする (`a.png` と `a_mask.png`). 1 つのディレクトリに同じ stem が 2 つあれば誤り (どれを組にするか決まらない). 片方にしか無いものは除き, 数と例を `notes` に書く
+- 領域は 1 チャンネルの整数の画像 (`L`, `P` (パレットの番号), `1`, `I;16`, `I`). カラーの領域 (`RGB` など) は誤り (色とクラスの対応を決めていないため). 画像と領域の大きさの違う組は誤り. JPEG の領域は値が崩れるので注意に書く. EXIF の向き (1 以外) の付いた画像は誤り (画像は読むときに向きを直すが, 領域は直さないので画素がずれる. 領域をどちらの向きで塗ったかは書き出しでは分からないので, 黙って回さず, 向きを直して保存した画像とそれに合わせた領域を渡してもらう)
 - 項目: `image` (`kind: image`, 入力, `shape` は (高さ, 幅, チャンネル). チャンネル数は `read_image` で読んだ配列のもの (灰色は 1, 透明のある色は 4, 他の色は 3)), `mask` (`kind: mask`, 正解, `shape` は (高さ, 幅), `values` は全ての領域に出る値 (256 種類まで), `classes` は値の名前 (渡した場合. 値から名前の辞書 (整数の文字の鍵も) か名前の並び))
 - `role: predict`, `target.kind: mask`
 
@@ -317,8 +317,8 @@ split:
 `export_capture_clouds(captures, clouds, path, split=None, groups=None, origin=None, cloud_units="meter", name=None, overwrite=False)`.
 
 - 多視点の撮影 (上の「多視点の撮影」の読み込みで読めるもの) と, 点群のディレクトリの直下の `<撮影のディレクトリの名前>.<拡張子>` (点群の読み込みと同じ形式) を組にする. 読めない撮影と, 片方にしか無いものは除き, `notes` に書く. 姿勢が 1 つも無い撮影, 画像のある枚が 1 つも無い撮影, 読めない正解の点群があると, 書き出し全体を誤りにする (正解の組を黙って減らさないため)
-- **正規化**: 1 件ごとに, 撮影の姿勢と正解の点群に同じ平行移動をかけ, 撮った物の中心 (追跡できた枚の視線に最も近い点. 方位の隙間と同じ求め方. 決まらなければカメラの位置の平均. 追跡できた枚が無ければ全ての姿勢で) を原点にする. 回転と拡大縮小はかけない (実寸 (メートル) と上の向きを残す. 寸法を測るため). 中心は入力 (姿勢) だけから決め, 正解の点群からは決めない (推論のときに同じ正規化をかけられ, 正解の位置が入力に漏れないように). 足した量を表の `shift_x`, `shift_y`, `shift_z` に残し (正規化した座標 = 元の座標 + shift), `normalization` に方法, 単位, かけた項目, 列を書く
-- 撮影は写し直す: 各枚の画像, 生の深度, 穴を埋めた深度, 信頼度を同じ相対の場所に写し, `transforms.json` の姿勢を正規化して書く (深度はカメラから見た値なので変わらない). 他の欄はそのまま写すので, 世界の座標を持つ他の欄 (物の範囲など) には平行移動がかからない. 撮影の外を指すか無いファイルの欄は除く. 画像の無い枚は除く. 撮影が持つ点群 (`point_cloud.file_path`) も同じ平行移動をかけて PLY で書く (読めなければ除いて `notes` に)
+- **正規化**: 1 件ごとに, 撮影の姿勢と正解の点群に同じ平行移動をかけ, 撮った物の中心 (書き出しで残す枚 (画像のある枚) のうち, 追跡できた枚の視線に最も近い点. 方位の隙間と同じ求め方. 決まらなければカメラの位置の平均. 追跡できた枚が無ければ残す枚の全ての姿勢で) を原点にする. 書き出した撮影から中心を求め直すと原点になる. 回転と拡大縮小はかけない (実寸 (メートル) と上の向きを残す. 寸法を測るため). 中心は入力 (姿勢) だけから決め, 正解の点群からは決めない (推論のときに同じ正規化をかけられ, 正解の位置が入力に漏れないように). 足した量を表の `shift_x`, `shift_y`, `shift_z` に残し (正規化した座標 = 元の座標 + shift), `normalization` に方法, 単位, かけた項目, 列を書く. 推論のときは, 同じ正規化を `capture_shift(撮影)` (足す量を求める) と `normalize_capture(撮影, 写す先)` (写して姿勢と撮影の点群に足す) でかけ, 出力を元の座標に戻すには shift を引く
+- 撮影は写し直す: 各枚の画像, 生の深度, 穴を埋めた深度, 信頼度を同じ相対の場所に写し, `transforms.json` の姿勢を正規化して書く (深度はカメラから見た値なので変わらない). 他の欄はそのまま写すので, 世界の座標を持つ他の欄 (物の範囲など) には平行移動がかからない. 撮影の外を指すか無いファイルの欄は除く. 画像の無い枚は除く. 撮影が持つ点群 (`point_cloud.file_path`) も同じ平行移動をかけて PLY で書く (無いか撮影の外を指すか読めなければ除いて `notes` に)
 - 正解の点群は `cloud_units` (`meter`, `centimeter`, `millimeter`) からメートルにそろえ, 2 進の PLY (x, y, z は float32. 色と法線があれば残す) で書く. 撮影の姿勢の単位はメートルとする
 - 項目: `capture` (`kind: capture`, 入力, `placement: directory`, `shape` は (枚数, 高さ, 幅), `convention` は撮影の座標の決まり), `cloud` (`kind: point_cloud`, 正解, `shape` は (点の数, 3), 単位はメートル, 座標は撮影の正規化した世界)
 - `role: predict`, `target.kind: point_cloud`
@@ -327,11 +327,16 @@ split:
 
 `load_items(path)` は `ItemDataset` を返す. `info` (説明), `items` (表), `entries` (項目), `split(name, read=True)` (分割の件の並び. `len` と番号で 1 件を返すので, PyTorch の `Dataset` にそのまま包める).
 
-- 1 件は辞書 (`id`, `group`, `split` と, 項目の名前から中身)
+- 1 件は辞書 (`id`, `group`, `split` と, 項目の名前から中身). 項目の名前に `id`, `split`, `group` は使えない (書き出しと `load_items` で誤り)
 - `read=True`: `image` は (高さ, 幅, チャンネル) の uint8, `mask` は (高さ, 幅) の整数 (説明の `dtype`), `point_cloud` は (点の数, 3) の float32, `capture` は `intrinsics`, `poses` ((枚数, 4, 4). 無い姿勢は NaN), `images` ((枚数, 高さ, 幅, チャンネル) の uint8), `depth` ((枚数, 高さ, 幅) の float32, メートル, 欠けは 0. 全ての枚に深度がある場合だけ, 無ければ None), `confidence` (同じく uint8 か None), `tracking`, `convention` の辞書. 画像の大きさがそろわない撮影は誤り
 - `read=False`: ファイルとディレクトリの場所 (絶対パスの文字)
 - 知らない `kind` の項目は場所を返す. 知らない `placement` は誤り (読み方が分からないので黙って読み違えない)
 - 表の場所はデータセットのディレクトリの中だけ (絶対パスや `..` は誤り. 書かれた場所の文字の上で確かめ, 撮影の読み込みと同じくシンボリックリンクの先はたどる)
+
+### まだ作っていないもの (足すときの形)
+
+- **正解の欠けた件**: 版 1 の `split.unlabeled: keep` に当たるもの. 正解の項目の表の値を空 (null) にした件を `unlabeled` の分割に置く形で足す (正解の付いた件の分割は変えない. 読み込みは `unlabeled` の件の正解を None で返す). 今は, 正解のファイルの無い件は書き出しで除いて `notes` に書く
+- **他の対応の決まり**: 名前の終わり (`mask_suffix`) の他の対応 (別の名前の規則, 対応の表) は, 実例が出てから足す
 
 ### 合成の見本 (`ml_eda.synthetic`)
 
@@ -344,7 +349,7 @@ split:
 
 版 2 が 2 つの例だけに合う形になっていないかを, 次の 2 つで確かめた.
 
-- **検出 (物の箱)**: 項目 `image` (`file`, 入力) と `boxes` (`kind: boxes`, 正解, `placement: file`, `items/{index}/boxes.json` に `[{box: [x1, y1, x2, y2], class: 0}]` の並び, `formats: [json]`, `units: pixel`, `convention: {origin: top_left, axes: [x, y], box: xyxy, edges: pixel_corner}` (x が列で, 画像の `axes: [row, column]` と順が逆なので明示する), `classes`, `shape: [null, 4]` (箱の数は件ごとに違い, 物の無い画像は空の並び)). `role: predict`, `target.kind: boxes`. 今の欄だけで書ける. 今の読み込みは知らない `kind` の場所を返すので, 箱の読み方は書き出しと一緒に足す
+- **検出 (物の箱)**: 項目 `image` (`file`, 入力) と `boxes` (`kind: boxes`, 正解, `placement: file`, `items/{index:06d}/boxes.json` に `[{box: [x1, y1, x2, y2], class: 0}]` の並び, `formats: [json]`, `units: pixel`, `convention: {origin: top_left, axes: [x, y], box: xyxy, edges: pixel_corner}` (x が列で, 画像の `axes: [row, column]` と順が逆なので明示する), `classes`, `shape: [null, 4]` (箱の数は件ごとに違い, 物の無い画像は空の並び)). `role: predict`, `target.kind: boxes`. 今の欄だけで書ける. 今の読み込みは知らない `kind` の場所を返すので, 箱の読み方は書き出しと一緒に足す
 - **並べる (利用者 × 品)**: 1 件 = 見せた 1 回. 項目 `user` と `item` (`kind: id`, `placement: column`), `clicked` (`kind: value`, 正解, `column`. クリックの 0 か 1 を関連度と見なす), 要求をまとめる列 `query` (`kind: id`, `column`. 要求ごとに並べて測るため). `role: rank`, `target.kind: relevance`. 同じ要求の件が複数の分割に分かれると要求ごとの順位を測れないので, `query` か利用者をグループにし, 並べるで `random` の分割は誤りにする. 利用者と品の特徴は件の表に並べず別の表を引くので, 置き方 `lookup` (`table: users.parquet`, `key: user`) を足す. 分割は時刻で全体を切る (利用者ごとに最後を残すと他の人の未来が入る) か利用者で `group`. 時刻の列と `lookup` を足すときは版を上げるかを決める (`placement` を足しても, 今の読む側は知らない置き方で止まるので黙って読み違えない)
 
 ## 安全
