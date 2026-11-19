@@ -20,8 +20,12 @@ from ml_eda.recipe import (
     to_plain
 )
 
-# データセットの説明の形式の版
+# データセットの説明の形式の版 (load_dataset が読む, 1 件 = 1 行の約束.
+# ML-Inference が写しの確かめに使うので, 版 2 を足しても 1 のまま)
 DATASET_FORMAT_VERSION = 1
+
+# 入力と正解がファイルの組の約束の版 (items.load_items が読む)
+ITEMS_FORMAT_VERSION = 2
 
 # 分割を表す列と, 分割に使う日時とグループの写し (処理の間だけ使う)
 SPLIT_COLUMN = "__split__"
@@ -1101,6 +1105,80 @@ def write_frame(frame: pd.DataFrame, path: Path) -> str:
     return name
 
 
+def start_writing(
+    path: Union[str, Path], overwrite: bool
+) -> tuple[Path, Path]:
+    """
+    データセットを書き出す一時ディレクトリを作る関数
+
+    版 1 と版 2 の書き出しで共通. 隣の一時ディレクトリに書いてから
+    finish_writing で入れ替える
+
+    Parameters
+    ----------
+    path: Union[str, Path]
+        書き出すディレクトリ
+    overwrite: bool
+        既にあるディレクトリを置き換えるか
+
+    Returns
+    ----------
+    places: tuple[Path, Path]
+        書き出す場所と, 一時ディレクトリ
+
+    Raises
+    ----------
+    FileExistsError
+        ディレクトリが既にあり, overwrite が False の場合と, データセット
+        ではない (dataset.yaml の無い) ディレクトリを置き換えようとした場合
+    """
+    # 置き換えられるのは, 前に書き出したデータセットだけ
+    final = Path(path).expanduser()
+    if final.exists():
+        if not overwrite:
+            raise FileExistsError(f"{final} は既にあります")
+        if not (final / "dataset.yaml").is_file():
+            raise FileExistsError(
+                f"{final} はデータセットではないので置き換えません"
+            )
+
+    # 前の失敗で残った一時ディレクトリは消して作り直す
+    target = final.with_name(f".{final.name}.writing")
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    places = (final, target)
+
+    return places
+
+
+def finish_writing(target: Path, final: Path, info: dict) -> None:
+    """
+    説明を書き, 一時ディレクトリを書き出す場所に入れ替える関数
+
+    Parameters
+    ----------
+    target: Path
+        一時ディレクトリ
+    final: Path
+        書き出す場所
+    info: dict
+        dataset.yaml の中身
+
+    Returns
+    ----------
+    None
+    """
+    # 説明は最後に書き, 前のデータセットと入れ替える
+    (target / "dataset.yaml").write_text(
+        yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
+        encoding="utf-8"
+    )
+    if final.exists():
+        shutil.rmtree(final)
+    target.rename(final)
+
+
 def export_dataset(
     data: Data, recipe: Union[str, Path, dict], path: Union[str, Path],
     name: Optional[str] = None, overwrite: bool = False
@@ -1132,23 +1210,9 @@ def export_dataset(
         ディレクトリが既にあり, overwrite が False の場合と, データセット
         ではない (dataset.yaml の無い) ディレクトリを置き換えようとした場合
     """
-    # 置き換えられるのは, 前に書き出したデータセットだけ
-    target = Path(path).expanduser()
-    if target.exists():
-        if not overwrite:
-            raise FileExistsError(f"{target} は既にあります")
-        if not (target / "dataset.yaml").is_file():
-            raise FileExistsError(
-                f"{target} はデータセットではないので置き換えません"
-            )
-
     # 隣の一時ディレクトリで前処理 (中身の配列も 1 件ずつここに書く) を
     # 済ませてから入れ替える. 失敗したら一時ディレクトリを消す
-    final = target
-    target = final.with_name(f".{final.name}.writing")
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True)
+    final, target = start_writing(path, overwrite)
     try:
         prepared = prepare(data, recipe, item_dir=target)
     except Exception:
@@ -1190,13 +1254,7 @@ def export_dataset(
         "recipe": "recipe.yaml",
         "notes": prepared.notes,
     }
-    (target / "dataset.yaml").write_text(
-        yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
-        encoding="utf-8"
-    )
-    if final.exists():
-        shutil.rmtree(final)
-    target.rename(final)
+    finish_writing(target, final, info)
 
     return info
 
@@ -1659,12 +1717,19 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
     Raises
     ----------
     ValueError
-        新しい版の場合
+        版 2 (入力と正解がファイルの組. load_items で読む) と, 新しい版
+        の場合
     """
     # 説明と版の確認
     root = Path(path).expanduser()
     info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
-    version = info.get("format_version")
+    version = info.get("format_version") if isinstance(info, dict) else None
+    if version == ITEMS_FORMAT_VERSION:
+        raise ValueError(
+            f"format_version {version} のデータセットは入力と正解がファイル"
+            "の組のもので, load_dataset (版 1 の表) では読めません. "
+            "load_items で読んでください"
+        )
     if not isinstance(version, int) or version > DATASET_FORMAT_VERSION:
         raise ValueError(
             f"format_version {version} のデータセットは, このライブラリ (版 "
