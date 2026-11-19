@@ -7,7 +7,8 @@ import pytest
 import yaml
 
 from ml_eda import (
-    Data, export_dataset, load_data, load_dataset, prepare, preview, profile
+    Data, export_dataset, load_data, load_dataset, load_recipe, prepare,
+    preview, profile
 )
 
 
@@ -541,14 +542,15 @@ def test_unlabeled_split(tmp_path: Path) -> None:
     )
 
 
-def test_unlabeled_split_cases() -> None:
+def test_unlabeled_split_cases(tmp_path: Path) -> None:
     """
     split.unlabeled の誤り, 欠けた行の無い場合, 目的の列の過去の値の列を
     確かめる関数
 
     Parameters
     ----------
-    None
+    tmp_path: Path
+        一時ディレクトリ
 
     Returns
     ----------
@@ -562,6 +564,17 @@ def test_unlabeled_split_cases() -> None:
     with pytest.raises(ValueError, match="目的の列が要ります"):
         prepare(table(frame), {"split": {"method": "none",
                                          "unlabeled": "keep"}})
+
+    # 読み込みの時点で止まる (保存したレシピのファイルも)
+    no_target = {"split": {"method": "none", "unlabeled": "keep"}}
+    with pytest.raises(ValueError, match="target"):
+        load_recipe(no_target)
+    (tmp_path / "recipe.yaml").write_text(
+        yaml.safe_dump(no_target), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="target"):
+        load_recipe(tmp_path / "recipe.yaml")
+    assert load_recipe({**no_target, "target": "y"})["target"] == "y"
 
     # 欠けた行が無い場合の, unlabeled の分割の無い書き出し
     recipe = {
