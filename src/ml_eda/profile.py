@@ -310,8 +310,16 @@ def numeric_stats(values: pd.Series) -> dict:
         ((finite < q1 - 1.5 * iqr) | (finite > q3 + 1.5 * iqr)).sum()
     ) if iqr > 0 else 0
 
-    # ヒストグラム
-    counts, edges = np.histogram(finite, bins=BINS)
+    # ヒストグラム. 値の幅が浮動小数の誤差ほどしかなく, BINS 個の幅を
+    # 作れない列 (45 と 45 + 1e-14 など) は, numpy が全て同じ値の列に
+    # するのと同じく, 範囲を ±0.5 に広げて数える
+    low, high = float(finite.min()), float(finite.max())
+    grid = np.linspace(low, high, BINS + 1)
+    narrow = len(finite) > 0 and high > low and bool(
+        np.any(np.diff(grid) <= 0)
+    )
+    span = (low - 0.5, high + 0.5) if narrow else None
+    counts, edges = np.histogram(finite, bins=BINS, range=span)
     stats = {
         "mean": float(finite.mean()),
         "std": float(finite.std()) if len(finite) > 1 else 0.0,
