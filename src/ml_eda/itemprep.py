@@ -33,6 +33,18 @@ class ItemStep:
 # 中身の手順の登録簿
 ITEM_STEPS: dict[str, ItemStep] = {}
 
+# 版 2 の書き出しの項目の種類ごとに, かけられる中身の手順 (かけた後もその
+# 項目のファイルの形に収まるもの)
+ENTRY_STEPS = {
+    "image": ("resize", "grayscale", "rgb"),
+    "capture": ("resize", "grayscale", "rgb"),
+    "mask": ("resize_mask",),
+    "point_cloud": ("sample_points",),
+}
+
+# 整数にそろえる引数 (seed は 0 以上, 他は 1 以上)
+COUNT_PARAMS = ("width", "height", "points", "seed")
+
 
 def register_item_step(step: ItemStep) -> None:
     """
@@ -104,6 +116,63 @@ def resize(image: np.ndarray, params: dict, state: dict) -> np.ndarray:
     resized = np.asarray(
         Image.fromarray(array).resize((width, height), Image.BILINEAR)
     )
+
+    return resized
+
+
+def nearest(array: np.ndarray, width: int, height: int) -> np.ndarray:
+    """
+    配列の大きさを, 最も近い画素を選んで変える関数 (値を混ぜない)
+
+    Parameters
+    ----------
+    array: np.ndarray
+        (高さ, 幅) か (高さ, 幅, チャンネル) の配列
+    width: int
+        変えた後の幅
+    height: int
+        変えた後の高さ
+
+    Returns
+    ----------
+    resized: np.ndarray
+        (height, width, ...) の配列 (型と値は元のまま)
+    """
+    # 変えた後の画素の中心に最も近い元の画素 (Pillow の縮小と同じ中心)
+    array = np.asarray(array)
+    rows = np.minimum(
+        ((np.arange(height) + 0.5) * array.shape[0] / height).astype(int),
+        array.shape[0] - 1
+    )
+    columns = np.minimum(
+        ((np.arange(width) + 0.5) * array.shape[1] / width).astype(int),
+        array.shape[1] - 1
+    )
+    resized = array[rows][:, columns].copy()
+
+    return resized
+
+
+def resize_mask(mask: np.ndarray, params: dict, state: dict) -> np.ndarray:
+    """
+    領域の大きさを, 最も近い画素で変える関数 (領域の値を混ぜない)
+
+    Parameters
+    ----------
+    mask: np.ndarray
+        (高さ, 幅) の整数の配列
+    params: dict
+        width, height
+    state: dict
+        使わない
+
+    Returns
+    ----------
+    resized: np.ndarray
+        大きさを変えた配列 (型と値は元のまま)
+    """
+    # 画像の resize と同じ大きさに, 値を混ぜずに
+    resized = nearest(mask, int(params["width"]), int(params["height"]))
 
     return resized
 
@@ -856,6 +925,103 @@ def apply_steps(item: Any, steps: list) -> Any:
     return result
 
 
+def check_entry_steps(steps: Any, kind: str) -> list[dict]:
+    """
+    版 2 の書き出しの項目にかける中身の手順を確かめ, 書く形にそろえる
+    関数
+
+    Parameters
+    ----------
+    steps: Any
+        手順の並び (op と引数の辞書か, op の名前)
+    kind: str
+        項目の種類 (image, mask, capture, point_cloud)
+
+    Returns
+    ----------
+    checked: list[dict]
+        op と引数だけの辞書の並び (大きさと点の数は整数)
+
+    Raises
+    ----------
+    ValueError
+        並びでない, その項目に使えない手順, 知らない引数, 省けない引数が
+        無い, 大きさと点の数が 1 以上の整数でない場合
+    """
+    # 項目の種類ごとに使える手順 (ファイルに残せるもの)
+    if kind not in ENTRY_STEPS:
+        raise ValueError(f"項目の種類 {kind} には中身の手順をかけられません")
+    usable = ENTRY_STEPS[kind]
+    if not isinstance(steps, list):
+        raise ValueError("中身の手順は手順の並び (リスト) にしてください")
+    checked = []
+    for spec in steps:
+        spec = {"op": spec} if isinstance(spec, str) else spec
+        op = spec.get("op") if isinstance(spec, dict) else None
+        if op not in usable or op not in ITEM_STEPS:
+            raise ValueError(
+                f"{kind} の項目に使えない中身の手順です: {op} (使えるもの: "
+                f"{', '.join(usable)})"
+            )
+        step = ITEM_STEPS[op]
+
+        # 登録簿の引数だけ (知らない引数は黙って無視しない)
+        unknown = sorted(set(spec) - {"op", *step.params})
+        if unknown:
+            raise ValueError(
+                f"{op} に知らない引数があります: {', '.join(unknown)} (使える"
+                f"もの: {', '.join(step.params) or '無し'})"
+            )
+        missing = [name for name in step.required if spec.get(name) is None]
+        if missing:
+            raise ValueError(
+                f"{op} の引数 {', '.join(missing)} を決めてください"
+            )
+        clean = {"op": op}
+        for name in step.params:
+            if spec.get(name) is None:
+                continue
+            value = spec[name]
+            if name in COUNT_PARAMS:
+                lowest = 0 if name == "seed" else 1
+                if isinstance(value, bool) or not isinstance(
+                    value, (int, np.integer)
+                ) or value < lowest:
+                    raise ValueError(
+                        f"{op} の {name} は {lowest} 以上の整数にしてください"
+                        f" (今は {value})"
+                    )
+                value = int(value)
+            clean[name] = value
+        checked.append(clean)
+
+    return checked
+
+
+def mask_steps(image_steps: list[dict]) -> list[dict]:
+    """
+    画像の中身の手順から, 組の領域にかける手順を決める関数
+
+    Parameters
+    ----------
+    image_steps: list[dict]
+        画像の手順 (check_entry_steps でそろえたもの)
+
+    Returns
+    ----------
+    steps: list[dict]
+        画像の resize ごとの, 同じ大きさの resize_mask の並び
+    """
+    # 色の手順は領域にかけず, 大きさだけを画像とそろえた手順
+    steps = [
+        {"op": "resize_mask", "width": spec["width"],
+         "height": spec["height"]}
+        for spec in image_steps if spec["op"] == "resize"
+    ]
+
+    return steps
+
+
 def register_builtin_item_steps() -> None:
     """
     組み込みの中身の手順を登録する関数
@@ -899,6 +1065,14 @@ def register_builtin_item_steps() -> None:
          "unit": "word (語), char (文字), subword (部分語)"},
         "学習用の文で語彙を作り, 語の番号の並び (決まった長さ) にする",
         fit_all=True
+    ))
+
+    # 領域 (版 2 の書き出しが画像の resize から決める)
+    register_item_step(ItemStep(
+        "resize_mask", "mask", None, resize_mask,
+        {"width": "幅", "height": "高さ"},
+        "領域の大きさを最も近い画素でそろえる (値を混ぜない)",
+        required=("width", "height")
     ))
 
     # 点群

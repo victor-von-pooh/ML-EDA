@@ -27,6 +27,13 @@ DATASET_FORMAT_VERSION = 1
 # 入力と正解がファイルの組の約束の版 (items.load_items が読む)
 ITEMS_FORMAT_VERSION = 2
 
+# 版 2 に項目ごとの中身の手順 (entries.<名前>.steps) を足した版 (中身の
+# 手順を渡した書き出しだけが書く)
+ITEMS_STEPS_FORMAT_VERSION = 3
+
+# load_items が読む版の組
+ITEMS_FORMAT_VERSIONS = (ITEMS_FORMAT_VERSION, ITEMS_STEPS_FORMAT_VERSION)
+
 # 分割を表す列と, 分割に使う日時とグループの写し (処理の間だけ使う)
 SPLIT_COLUMN = "__split__"
 TIME_COLUMN = "__time__"
@@ -1720,14 +1727,14 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
     Raises
     ----------
     ValueError
-        版 2 (入力と正解がファイルの組. load_items で読む) と, 新しい版
+        版 2 と 3 (ファイルの組. load_items で読む) と, 新しい版
         の場合
     """
     # 説明と版の確認
     root = Path(path).expanduser()
     info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
     version = info.get("format_version") if isinstance(info, dict) else None
-    if version == ITEMS_FORMAT_VERSION:
+    if version in ITEMS_FORMAT_VERSIONS:
         raise ValueError(
             f"format_version {version} のデータセットは入力と正解がファイル"
             "の組のもので, load_dataset (版 1 の表) では読めません. "
@@ -1835,7 +1842,7 @@ def model_inputs(path: Union[str, Path]) -> dict:
     Raises
     ----------
     ValueError
-        版 2 (ファイルの組) と知らない版のデータセットの場合
+        版 2 と 3 (ファイルの組) と知らない版のデータセットの場合
     FileNotFoundError
         dataset.yaml が無い場合
     """
@@ -1843,7 +1850,7 @@ def model_inputs(path: Union[str, Path]) -> dict:
     root = Path(path).expanduser()
     info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
     version = info.get("format_version") if isinstance(info, dict) else None
-    if version == ITEMS_FORMAT_VERSION:
+    if version in ITEMS_FORMAT_VERSIONS:
         raise ValueError(
             f"format_version {version} のデータセット (ファイルの組) の"
             "モデルの入力はまだ返せません. 項目の形は dataset.yaml の "

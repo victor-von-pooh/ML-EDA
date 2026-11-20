@@ -20,7 +20,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
 | 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
-| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解) と 2 (ファイルの組とまとまり). 版 1 は `load_dataset`, 版 2 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
+| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
 | データの読み方 (`Data.source` の `loader` と `options`) | 持つ | 版を持たない (読み込みの名前と設定) | ML-Quest (問題の設定の `data` に残す), ML-Fathom. 下の「読み込み」 |
 | 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の値の決まり (`convention.shift`) は, 見本の一覧の版 2 でこれと同じ向き (ML-Found の `load_samples` は逆の向きの版 1 を版 2 の意味に写して返す) |
 
@@ -207,6 +207,7 @@ split:
     - 画像: `resize` (大きさをそろえる), `grayscale` (灰色), `rgb` (灰色とカラーが混ざる場合に 3 チャンネルに), `normalize` (学習用の平均と標準偏差で正規化し, (チャンネル, 高さ, 幅) に)
     - 文: `vocabulary` (学習用の文で語彙を作り, 語か文字の番号の決まった長さの並びにする. 0 は埋め草, 1 は語彙に無い語. `unit` は `char` (文字), `word` (語. 文字と数字の並び, 漢字とかなは 1 文字ずつ), `subword` (学習用の文で BPE の部分語の語彙を作る. 空白と記号で区切ってから, 1 つの部分語は 16 文字まで. `tokenizers` が要る))
     - 点群: `sample_points` (点の数をそろえる), `normalize_cloud` (中心を原点にし, 最も遠い点までを 1 にする)
+    - 領域: `resize_mask` (領域の大きさを最も近い画素でそろえる. 値を混ぜない). 版 2 の書き出しが画像の `resize` から決める手順で, 版 1 のレシピには書けない (領域の種類のデータが無いため)
 
 ## 8. 書き出し (学習との約束)
 
@@ -264,6 +265,7 @@ split:
 - **版 1 で書けるものは版 1 のまま**: 表, 時系列と, 画像, 文, 点群の列の正解 (クラスか値) は, `export_dataset` が版 1 で書く. 版 2 を書くのは, 正解がファイルのものとまとまりのもの (今は `export_image_masks` と `export_capture_clouds`) だけ. 版 1 しか知らない今の読む側を壊さないため
 - **読む側の止まり方**: `load_dataset` (版 1 の読み込み) は版 2 を見ると「ファイルの組のデータセットなので `load_items` で読む」と言って止まる. `load_items` は版 1 を見ると `load_dataset` へ案内して止まる. 知らない版 (3 以上) はどちらも「この版は読めない」と止まる
 - `pipeline.DATASET_FORMAT_VERSION` は版 1 (`load_dataset` が読む版) のまま変えない. ML-Inference がデータセットの写しの版の確かめに使っていて, 2 に上げると版 2 を版 1 として通してしまうため. 版 2 の番号は `pipeline.ITEMS_FORMAT_VERSION` (`items` からも使う)
+- **版 3**: 版 2 に, 項目ごとの中身の手順 (`entries.<名前>.steps`. 下の「中身の手順」) を足した版. 中身の手順を渡した書き出しだけが版 3 で書き, 渡さない書き出しは今までと同じ版 2 で書く (手順の無いデータセットを版 2 しか知らない読む側が読めるように). 版を上げるのは, この欄を知らない読む側が推論で新しい 1 件に手順をかけず, 大きさの違う入力を黙ってモデルに渡すため (データセットの中のファイルは手順をかけた後なので, 学習で読むだけなら違わないが, 推論の取り違えは気付けない). 版 3 の番号は `pipeline.ITEMS_STEPS_FORMAT_VERSION`, `load_items` が読む版の組は `pipeline.ITEMS_FORMAT_VERSIONS` ((2, 3)). `ITEMS_FORMAT_VERSION` は 2 のまま (版 2 の番号として読む側が使っているため). 他の欄の意味は版 2 と同じ
 
 ```
 <データセット>/
@@ -280,7 +282,7 @@ split:
 
 | 項目 | 中身 |
 | --- | --- |
-| `format_version` | 版 (2) |
+| `format_version` | 版 (2. 中身の手順を渡した書き出しは 3) |
 | `name`, `created_at` | 名前と作った時刻 |
 | `role` | 受け持ち. `predict` (予測する), `generate` (作る), `rank` (並べる), `group` (まとめる), `effect` (効果を見積もる). 値は ML-Quest の受け持ちと同じ |
 | `target` | 正解. `kind` (正解の種類. `mask`, `point_cloud`, `boxes` など), `entries` (正解の項目の名前の並び), `origin` (正解の出どころ. 下) |
@@ -308,6 +310,7 @@ split:
 | `units` | 単位 (`pixel`, `meter` など. 無ければ null) |
 | `convention` | 座標の決まり (画像は左上が原点で (行, 列). 撮影は姿勢がカメラから世界, カメラの軸, 世界の上の向き, 深度の測り方, 画素の中心. 下の「撮影と点群の対」) |
 | `values`, `classes` | 正解の値と, 値の名前 (`mask`, `boxes` など. `classes` は `value` と `name` の並び) |
+| `steps` | 書き出しでかけた中身の手順の並び (版 3 だけ. 手順をかけた項目だけが持つ. 下の「中身の手順」) |
 
 表 (`items`) の列: `id` (元の名前. 画像のファイルの stem, 撮影のディレクトリの名前), `split`, `group` (グループを渡した場合), 項目ごとの列 (`file` と `directory` はデータセットのディレクトリからの相対の場所, `column` は値), 他 (正規化の `shift_x` など).
 
@@ -319,7 +322,23 @@ split:
 
 **分割**: 版 1 と同じく 1 件ごと. `random` (既定), `group`, `none` (全て学習用. 説明の `valid` と `test` は 0). `groups` (件の `id` からグループ) を渡すと既定は `group` で, 同じグループの件を同じ分割にまとめる (撮影は現場や物で分ける). 他の分け方でグループが複数の分割にまたがると, `group_overlap` と同じ注意を `notes` に書く. `groups` に無い `id` は誤り. 割合を指定した分割が 0 件になった場合 (グループが割合に収まらないなど) も `notes` に書く. `stratified` と `time` は今は誤り (正解がファイルなので層が無い. 時刻は件の表に時刻の列を持ってから).
 
-**前処理**: 版 2 は今は中身の手順をかけず, ファイルを写す (撮影と点群は座標の正規化だけ). 大きさをそろえるなどは学習のコードで行う.
+**前処理**: 中身の手順を渡さなければ, ファイルをそのまま写す (撮影と点群は座標の正規化だけ). 渡すと, 項目ごとに手順をかけたファイルを書く (下の「中身の手順」).
+
+### 中身の手順 (`item_steps`)
+
+書き出し (`export_image_masks`, `export_capture_clouds`) の `item_steps` に, 項目の名前から手順の並び (版 1 の `item_steps` と同じ登録簿の手順と同じ書き方. `{op: resize, width: 64, height: 64}` など) の辞書を渡すと, 1 件ずつ手順をかけたファイルを書き, かけた手順を項目の `steps` に残す (版 3). 大きさをそろえるなどを学習のコードで毎回書かず, 推論でも同じ手順をかけられるようにするため.
+
+- **ファイルに残せる手順だけ**: 手順はファイルにかけて書くので, かけた後もその項目のファイルの形 (8 bit の画像, 領域, 点群) に収まる手順だけを使える. 項目ごとに使えるものは下の表. 他の手順 (画像の `normalize` は値が小数の (チャンネル, 高さ, 幅) になり, 点群の `normalize_cloud` は実寸と正規化の平行移動を壊し, 推論で元の大きさに戻せない) は誤り. 値を学ぶ手順 (`fit` のあるもの) は今は使えないので, `steps` は当てはめた値 (`state`) を持たない
+- **引数**: 手順の登録簿にある引数だけ. 知らない引数は手順と引数の名前を挙げて誤り (黙って無視して違うファイルを書かないため). 大きさと点の数は 1 以上の整数
+- **書いた手順**: 手順は渡した順にかける. `steps` には `op` と引数だけを書く (`{op: resize, width: 64, height: 64}`)
+- **読み込み**: データセットのファイルは手順をかけた後なので, `load_items` は手順をかけずに読む. 項目の `shape` と `dtype` は手順をかけた後のもの
+- **推論**: 新しい 1 件に同じ手順をかけるには, 画像, 領域, 点群は `transform_entry(データセット, 項目の名前, 中身)`, 撮影は `normalize_capture(撮影, 写す先, steps=項目の steps)` を使う (下の「推論のときの読み方」). 読む側の知らない手順 (新しい ML-EDA で足した手順) は, 手順の名前を挙げて誤りで止まる
+
+| 項目 | 使える手順 | かけ方 |
+| --- | --- | --- |
+| 画像 (`export_image_masks` の `image`) | `resize`, `grayscale`, `rgb` | `read_image` で読んだ配列にかけ, PNG で書く (拡張子は `.png`). 領域の手順は書き出しが決める. 画像の `resize` ごとに, 同じ大きさの `resize_mask` (最も近い画素. 領域の値を混ぜない) を領域の `steps` に書く (画像と領域の画素がずれないように). `item_steps` に `mask` を渡すと誤り |
+| 撮影 (`export_capture_clouds` の `capture`) | `resize`, `grayscale`, `rgb` | 各枚の画像にかけ, PNG で書く (`file_path` を `.png` に直す). `resize` では, 生の深度, 穴を埋めた深度, 信頼度を最も近い画素で, 画像と同じ倍率に (深度の値を混ぜない. 深度の画像の大きさが画像と違う撮影も, 比を保つ), 内部パラメータ (`fl_x`, `fl_y`, `cx`, `cy`, `w`, `h`. 枚ごとにあれば枚ごとも) を同じ倍率に直す. `cx` と `cy` は画素の中心 (`pixel_center`) を保って写す (`pixel_center` が 0.5 なら倍率をかけるだけ). 1 つの撮影の画像の大きさがそろわなければ誤り |
+| 正解の点群 (`export_capture_clouds` の `cloud`) | `sample_points` | 単位をそろえ, 正規化の平行移動をかけた後の点群にかける (色は残し, 法線は落とす) |
 
 書き出しは版 1 と同じく, 隣の一時ディレクトリに書いてから入れ替える. 既にある場所を置き換えられるのは, 前に書き出したデータセット (版に依らず `dataset.yaml` を持つもの) だけ.
 
@@ -329,16 +348,17 @@ split:
 
 ### 画像と領域の対 (`export_image_masks`)
 
-`export_image_masks(images, masks, path, split=None, groups=None, classes=None, origin=None, name=None, overwrite=False, mask_suffix="")`. Pillow が要る.
+`export_image_masks(images, masks, path, split=None, groups=None, classes=None, origin=None, name=None, overwrite=False, mask_suffix="", item_steps=None)`. Pillow が要る.
 
 - 画像のディレクトリと領域のディレクトリ (それぞれ 2 階層まで) のファイルを, 名前の stem で組にする. `mask_suffix` (`_mask` など) を渡すと, 領域の stem の終わりからその文字を除いて組にする (`a.png` と `a_mask.png`). 1 つのディレクトリに同じ stem が 2 つあれば誤り (どれを組にするか決まらない). 片方にしか無いものは除き, 数と例を `notes` に書く
 - 領域は 1 チャンネルの整数の画像 (`L`, `P` (パレットの番号), `1`, `I;16`, `I`). カラーの領域 (`RGB` など) は誤り (色とクラスの対応を決めていないため). 画像と領域の大きさの違う組は誤り. JPEG の領域は値が崩れるので注意に書く. EXIF の向き (1 以外) の付いた画像は誤り (画像は読むときに向きを直すが, 領域は直さないので画素がずれる. 領域をどちらの向きで塗ったかは書き出しでは分からないので, 黙って回さず, 向きを直して保存した画像とそれに合わせた領域を渡してもらう)
+- 中身の手順 (`item_steps` の `image`) をかけると, 画像と領域を PNG で書く (領域は 8 bit か 16 bit の灰色. 値はそのまま). 領域の値が 0 から 65535 に収まらなければ誤り
 - 項目: `image` (`kind: image`, 入力, `shape` は (高さ, 幅, チャンネル). チャンネル数は `read_image` で読んだ配列のもの (灰色は 1, 透明のある色は 4, 他の色は 3)), `mask` (`kind: mask`, 正解, `shape` は (高さ, 幅), `values` は全ての領域に出る値 (256 種類まで), `classes` は値の名前 (渡した場合. 値から名前の辞書 (整数の文字の鍵も) か名前の並び))
 - `role: predict`, `target.kind: mask`
 
 ### 撮影と点群の対 (`export_capture_clouds`)
 
-`export_capture_clouds(captures, clouds, path, split=None, groups=None, origin=None, cloud_units="meter", name=None, overwrite=False)`.
+`export_capture_clouds(captures, clouds, path, split=None, groups=None, origin=None, cloud_units="meter", name=None, overwrite=False, item_steps=None)`. 中身の手順は `item_steps` の `capture` と `cloud` (上の「中身の手順」).
 
 - 多視点の撮影 (上の「多視点の撮影」の読み込みで読めるもの) と, 点群のディレクトリの直下の `<撮影のディレクトリの名前>.<拡張子>` (点群の読み込みと同じ形式) を組にする. 読めない撮影と, 片方にしか無いものは除き, `notes` に書く. 姿勢が 1 つも無い撮影, 画像のある枚が 1 つも無い撮影, 読めない正解の点群があると, 書き出し全体を誤りにする (正解の組を黙って減らさないため)
 - **正規化**: 1 件ごとに, 撮影の姿勢と正解の点群に同じ平行移動をかけ, 撮った物の中心 (書き出しで残す枚 (画像のある枚) のうち, 追跡できた枚の視線に最も近い点. 方位の隙間と同じ求め方. 決まらなければカメラの位置の平均. 追跡できた枚が無ければ残す枚の全ての姿勢で) を原点にする. 書き出した撮影から中心を求め直すと原点になる. 回転と拡大縮小はかけない (実寸 (メートル) と上の向きを残す. 寸法を測るため). 中心は入力 (姿勢) だけから決め, 正解の点群からは決めない (推論のときに同じ正規化をかけられ, 正解の位置が入力に漏れないように). 足した量を表の `shift_x`, `shift_y`, `shift_z` に残し (正規化した座標 = 元の座標 + shift), `normalization` に方法, 単位, かけた項目, 列を書く. 推論のときは, 同じ正規化を `capture_shift(撮影)` (足す量を求める) と `normalize_capture(撮影, 写す先)` (写して姿勢と撮影の点群に足す) でかけ, 出力を元の座標に戻すには shift を引く
@@ -362,11 +382,20 @@ split:
 
 `depth` と `pixel_center` は版 2 の `convention` の欄 (他の欄の意味は変えず, この欄を知らない読む側は読まない. 無い説明は `z` と `0.5` として読む).
 
-**推論のときの読み方**: 新しい撮影は `normalize_capture(撮影, 写す先)` で学習と同じ正規化をかけ, `read_capture(写す先)` で `load_items` の撮影と同じ形の辞書に読む. 正解と同じ形の点群は `read_cloud(ファイル)` で読む (`points` ((点の数, 3) の float64. 単位は元のファイルのまま), `colors`, `normals`). どちらも `ml_eda` から使える.
+**推論のときの読み方**: 新しい撮影は `normalize_capture(撮影, 写す先, steps=None)` で学習と同じ正規化をかけ, `read_capture(写す先)` で `load_items` の撮影と同じ形の辞書に読む. 書き出しで中身の手順をかけたデータセット (版 3) では, `steps` に撮影の項目の `steps` を渡して同じ手順もかける. 正解と同じ形の点群は `read_cloud(ファイル)` で読む (`points` ((点の数, 3) の float64. 単位は元のファイルのまま), `colors`, `normals`). どれも `ml_eda` から使える.
+
+### 新しい 1 件への手順 (`transform_entry`)
+
+`transform_entry(dataset, name, value)` は, データセット (`load_items` の `ItemDataset`, `dataset.yaml` の中身の辞書, データセットのディレクトリのどれか) の項目 `name` に残した手順を, 新しい 1 件にかけ, `load_items` がその項目に返すのと同じ形で返す (推論のときに, 書き出しと同じ手順をかけるため. 版 1 の `transform_item` に当たる).
+
+- `value`: 画像と領域はファイルの場所か配列 (画像は `read_image`, 領域は `read_mask` と同じ読み方), 点群はファイルの場所, (点の数, 3) の配列か `points` を持つ辞書
+- 返すもの: 画像は (高さ, 幅, チャンネル) の uint8, 領域は説明の `dtype` の (高さ, 幅), 点群は (点の数, 3) の float32. 手順の無い項目 (版 2 も) はそのまま同じ形で返す
+- 撮影は誤りにして `normalize_capture` へ案内する (撮影は写してから手順をかけ, 正規化の平行移動も要るため)
+- 点群は手順だけをかける (書き出しの単位の換算と正規化の平行移動はかけない. 正解の点群は推論の入力ではないので, 新しい正解と比べるときに使う)
 
 ### 読み込み (`load_items`)
 
-`load_items(path)` は `ItemDataset` を返す. `info` (説明), `items` (表), `entries` (項目), `split(name, read=True)` (分割の件の並び. `len` と番号で 1 件を返すので, PyTorch の `Dataset` にそのまま包める).
+`load_items(path)` は版 2 と 3 のデータセットを読み, `ItemDataset` を返す. `info` (説明), `items` (表), `entries` (項目), `split(name, read=True)` (分割の件の並び. `len` と番号で 1 件を返すので, PyTorch の `Dataset` にそのまま包める).
 
 - 1 件は辞書 (`id`, `group`, `split` と, 項目の名前から中身). 項目の名前に `id`, `split`, `group` は使えない (書き出しと `load_items` で誤り)
 - `read=True`: `image` は (高さ, 幅, チャンネル) の uint8, `mask` は (高さ, 幅) の整数 (説明の `dtype`), `point_cloud` は (点の数, 3) の float32, `capture` は `intrinsics`, `poses` ((枚数, 4, 4). 無い姿勢は NaN), `images` ((枚数, 高さ, 幅, チャンネル) の uint8), `depth` ((枚数, 高さ, 幅) の float32, メートル, 欠けは 0. 全ての枚に深度がある場合だけ, 無ければ None), `confidence` (同じく uint8 か None), `tracking`, `convention` (撮影の `coordinate_convention` に, 無ければ `depth: z` と `pixel_center: 0.5` を足したもの) の辞書. 画像の大きさがそろわない撮影は誤り
@@ -379,7 +408,7 @@ split:
 
 道具の確かめ用 (テストで使う. ML_tester の例でも使う). ml_eda の他は numpy と標準ライブラリだけで書く (PNG も自前で書くので Pillow も描く道具も要らない).
 
-- `write_image_masks(root, count, size, seed)`: 雑音の上に円か四角を 1 つ置いた画像と, その領域 (0 が背景, 1 が円, 2 が四角) を `images/` と `masks/` に書く
+- `write_image_masks(root, count, size, seed, sizes)`: 雑音の上に円か四角を 1 つ置いた画像と, その領域 (0 が背景, 1 が円, 2 が四角) を `images/` と `masks/` に書く. `sizes` に (高さ, 幅) の並びを渡すと, 件ごとに順に繰り返した大きさで書く (大きさの混ざった見本. 書き出しの `resize` の確かめに使う)
 - `write_shape_captures(root, shapes, views, size, points, seed, count)`: 球と箱の正確な点群 (面の上の一様な点) を `clouds/<名前>.ply` に書き, 物の周りの決まった姿勢から光線を当てて (解析的な交わり) 画像, 深度 (ミリの 16 bit の PNG), 信頼度を求め, 多視点の撮影の形で `captures/<名前>/` に書く. `shapes` を省くと既定の球 2 つと箱 2 つ. `count` を渡すと, `seed` から球か箱を `count` 個ばらつかせて作る (名前は `shape_000` から. 種類, 中心 (原点から水平に 0.5 から 1.5 m, 高さ 0.05 から 0.3 m), 大きさ (球の半径 0.08 から 0.18 m, 箱の各辺 0.1 から 0.3 m), 色が乱数. 1 つの撮影には 1 つの形だけが写るので, 中心の位置は正規化の平行移動にだけ効く. `shapes` と同時には渡せない. `count` は 1 以上の整数). `transforms.json` の `coordinate_convention` に `depth: z` と `pixel_center: 0.5` を書く
 
 ### 他の型を版 2 で書く形

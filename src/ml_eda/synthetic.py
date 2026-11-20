@@ -114,7 +114,8 @@ def write_png(path: Path, array: np.ndarray) -> None:
 
 def write_image_masks(
     root: Union[str, Path], count: int = 12,
-    size: tuple[int, int] = (24, 32), seed: int = 0
+    size: tuple[int, int] = (24, 32), seed: int = 0,
+    sizes: Optional[list] = None
 ) -> dict:
     """
     円か四角を 1 つ置いた画像と, その領域の見本を書く関数
@@ -129,6 +130,9 @@ def write_image_masks(
         画像の (高さ, 幅)
     seed: int = 0
         乱数の種
+    sizes: Optional[list] = None
+        件ごとの (高さ, 幅) の並び (順に繰り返す. 大きさの混ざった見本.
+        渡すと size は使わない)
 
     Returns
     ----------
@@ -141,10 +145,11 @@ def write_image_masks(
     images.mkdir(parents=True, exist_ok=True)
     masks.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
-    height, width = size
-    rows, columns = np.mgrid[0:height, 0:width]
+    cycle = list(sizes) if sizes else [size]
     names = []
     for index in range(count):
+        height, width = (int(n) for n in cycle[index % len(cycle)])
+        rows, columns = np.mgrid[0:height, 0:width]
         radius = rng.uniform(0.15, 0.3) * min(height, width)
         center_row = rng.uniform(radius, height - radius)
         center_column = rng.uniform(radius, width - radius)
