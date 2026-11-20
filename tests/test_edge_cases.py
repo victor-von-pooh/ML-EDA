@@ -410,7 +410,7 @@ def test_group_overlap(tmp_path: Path) -> None:
     frames = prepare(table(missing), recipe).frames
     assert sum(len(part) for part in frames.values()) == 100
 
-    # 時刻の写しの欠損は今までどおり落とす (時刻の列を落とした後も)
+    # 時刻の写しの欠損の行は削除 (時刻の列を落とした後も)
     stamped = Data(kind="timeseries", frame=frame.assign(
         t=[pd.NaT] + list(pd.date_range("2024-01-01", periods=99, freq="D"))
     ), roles={"time": "t"})

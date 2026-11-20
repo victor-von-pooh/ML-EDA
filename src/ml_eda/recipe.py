@@ -546,7 +546,7 @@ def apply_drop_missing(
     """
     # 指定の列 (省略するとグループの写しを除く全ての列) に欠損がある行の
     # 削除 (グループの写しは落とした列の欠損を残すので見ない. 時刻の写しは
-    # 今までどおり見る)
+    # 見る)
     columns = params.get("columns")
     subset = [c for c in frame.columns if c != "__group__"] if columns in (
         None, "auto"
@@ -922,7 +922,7 @@ def mean_name(name: str, window: Any, gap: int) -> str:
     column: str
         <列>_mean<幅> (gap が 1 でなければ <列>_mean<幅>_gap<gap>)
     """
-    # 既定の gap の名前は前の版と同じ
+    # gap が 1 なら gap の付かない名前
     column = f"{name}_mean{window}" + (f"_gap{gap}" if gap != 1 else "")
 
     return column
