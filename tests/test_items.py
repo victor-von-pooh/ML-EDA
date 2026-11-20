@@ -152,8 +152,13 @@ def test_version_stops(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="load_dataset"):
         load_items(tmp_path / "v1")
 
-    # 知らない版と知らない置き方は読まない
+    # 版 3 (中身の手順を足した版) も load_items へ案内
     rewrite_info(tmp_path / "v2", format_version=3)
+    with pytest.raises(ValueError, match="load_items"):
+        load_dataset(tmp_path / "v2")
+
+    # 知らない版と知らない置き方は読まない
+    rewrite_info(tmp_path / "v2", format_version=4)
     with pytest.raises(ValueError, match="読めません"):
         load_items(tmp_path / "v2")
     with pytest.raises(ValueError, match="読めません"):

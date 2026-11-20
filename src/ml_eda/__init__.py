@@ -5,7 +5,8 @@ from ml_eda.data import KINDS, Data
 from ml_eda.itemprep import ITEM_STEPS, describe_item_steps
 from ml_eda.items import (
     ItemDataset, ItemSplit, capture_shift, export_capture_clouds,
-    export_image_masks, load_items, normalize_capture, read_capture
+    export_image_masks, load_items, normalize_capture, read_capture,
+    transform_entry
 )
 from ml_eda.loaders import (
     LOADERS, Loader, describe_loaders, detect, load_data, register_loader
@@ -36,5 +37,5 @@ __all__ = [
     "prepare", "preview",
     "preview_items", "read_capture", "read_cloud",
     "profile",
-    "register_loader", "register_step", "__version__",
+    "register_loader", "register_step", "transform_entry", "__version__",
 ]

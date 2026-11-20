@@ -13,14 +13,18 @@ import yaml
 from ml_eda.capture import (
     depth_scale, inside, is_tracked, pose_of, read_transforms, view_center
 )
+from ml_eda.itemprep import (
+    apply_steps, check_entry_steps, mask_steps, nearest
+)
 from ml_eda.loaders import load_data
 from ml_eda.media import (
     IMAGE_EXTENSIONS, POINT_EXTENSIONS, image_header, list_files,
     read_cloud, read_image
 )
 from ml_eda.pipeline import (
-    DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSION, SPLITS, assign_splits,
-    count_overlap, finish_writing, start_writing, write_frame
+    DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS,
+    ITEMS_STEPS_FORMAT_VERSION, SPLITS, assign_splits, count_overlap,
+    finish_writing, start_writing, write_frame
 )
 
 # 正解の出どころの種類
@@ -65,6 +69,18 @@ DEFAULT_DEPTH = {"depth": "z", "pixel_center": 0.5}
 
 # 深度の測り方 (z はカメラの前の軸に沿った距離, ray は光線に沿った距離)
 DEPTH_KINDS = ("z", "ray")
+
+# 撮影の 1 枚が指す, 深度と信頼度のファイルの欄 (resize で最も近い画素で
+# 大きさを変えるもの)
+DEPTH_FILES = (
+    "raw_depth_file_path", "depth_file_path", "confidence_file_path",
+)
+
+# 撮影の内部パラメータの欄
+INTRINSICS = ("fl_x", "fl_y", "cx", "cy", "w", "h")
+
+# 16 bit の領域の値の上限
+MASK_MAX = 65535
 
 # 版 2 の source に添える, 元の場所の書き方
 SOURCE_NOTE = (
@@ -635,12 +651,115 @@ def write_items(
     return info
 
 
+def entry_steps(item_steps: Any, kinds: dict) -> dict[str, list]:
+    """
+    書き出しに渡した中身の手順を, 項目ごとに確かめる関数
+
+    Parameters
+    ----------
+    item_steps: Any
+        項目の名前から手順の並びの辞書 (None なら手順無し)
+    kinds: dict
+        手順を渡せる項目の名前から項目の種類
+
+    Returns
+    ----------
+    steps: dict[str, list]
+        手順のある項目の名前から, そろえた手順の並び
+
+    Raises
+    ----------
+    ValueError
+        辞書でない場合, 手順を渡せない項目がある場合, 手順の誤り
+    """
+    # 渡せる項目だけ (空の並びは手順無し)
+    steps: dict[str, list] = {}
+    if item_steps is None:
+        return steps
+    if not isinstance(item_steps, dict):
+        raise ValueError(
+            "item_steps は項目の名前から手順の並びの辞書にしてください"
+        )
+    for name, listed in item_steps.items():
+        if name not in kinds:
+            raise ValueError(
+                f"項目 {name} には中身の手順を渡せません (渡せるもの: "
+                f"{', '.join(kinds)})"
+            )
+        checked = check_entry_steps(listed, kinds[name])
+        if checked:
+            steps[name] = checked
+
+    return steps
+
+
+def write_image(path: Path, array: np.ndarray) -> None:
+    """
+    手順をかけた画像を PNG で書く関数
+
+    Parameters
+    ----------
+    path: Path
+        書く場所
+    array: np.ndarray
+        (高さ, 幅) か (高さ, 幅, チャンネル) の uint8 の配列
+
+    Returns
+    ----------
+    None
+    """
+    # 1 チャンネルの軸を落とした灰色
+    from PIL import Image
+
+    array = np.asarray(array, dtype=np.uint8)
+    if array.ndim == 3 and array.shape[2] == 1:
+        array = array[:, :, 0]
+    Image.fromarray(array).save(path, format="PNG")
+
+
+def write_mask(path: Path, mask: np.ndarray) -> np.ndarray:
+    """
+    手順をかけた領域を, 値をそのまま保って PNG で書く関数
+
+    Parameters
+    ----------
+    path: Path
+        書く場所
+    mask: np.ndarray
+        (高さ, 幅) の整数の配列
+
+    Returns
+    ----------
+    written: np.ndarray
+        書いた配列 (uint8 は uint8, 他は uint16. 読み直すとこの型)
+
+    Raises
+    ----------
+    ValueError
+        値が 0 から 65535 に収まらない場合
+    """
+    # 8 bit はそのまま, 他は 16 bit の灰色 (値を変えない)
+    from PIL import Image
+
+    mask = np.asarray(mask)
+    if mask.size and (mask.min() < 0 or mask.max() > MASK_MAX):
+        raise ValueError(
+            f"{path.parent.name} の領域の値が 0 から {MASK_MAX} に収まらず, "
+            "手順をかけた領域を PNG で書けません"
+        )
+    written = mask.astype(np.uint8 if mask.dtype == np.uint8 else np.uint16)
+    Image.fromarray(written).save(path, format="PNG")
+
+    return written
+
+
 def export_image_masks(
     images: Union[str, Path], masks: Union[str, Path],
     path: Union[str, Path], split: Optional[dict] = None,
     groups: Optional[dict] = None, classes: Any = None,
     origin: Optional[dict] = None, name: Optional[str] = None,
-    overwrite: bool = False, mask_suffix: str = ""
+    overwrite: bool = False, mask_suffix: str = "",
+    item_steps: Optional[dict] = None
 ) -> dict:
     """
     画像と領域の対を, 版 2 のデータセットに書き出す関数
@@ -669,6 +788,10 @@ def export_image_masks(
     mask_suffix: str = ""
         領域のファイルの stem の終わりから除いて組にする文字 (a.png と
         a_mask.png を組にするなら _mask)
+    item_steps: Optional[dict] = None
+        項目 image にかける中身の手順 ({"image": [{"op": "resize", ...}]}.
+        resize, grayscale, rgb). 領域には画像の resize と同じ大きさの
+        resize_mask をかける. 渡すと版 3 で書く
 
     Returns
     ----------
@@ -679,8 +802,20 @@ def export_image_masks(
     ----------
     ValueError
         組が無い場合, 同じ stem が 2 つある場合, 大きさの違う組やカラーの
-        領域, EXIF の向きの付いた画像がある場合, 分割の誤りの場合
+        領域, EXIF の向きの付いた画像がある場合, 分割と中身の手順の誤りの
+        場合
     """
+    # 中身の手順 (領域の手順は画像の手順から決める)
+    if isinstance(item_steps, dict) and "mask" in item_steps:
+        raise ValueError(
+            "領域の手順は渡せません (画像の resize と同じ大きさの "
+            "resize_mask を書き出しがかけます)"
+        )
+    steps = entry_steps(item_steps, {"image": "image"})
+    if steps:
+        steps["mask"] = mask_steps(steps["image"])
+        steps = {key: value for key, value in steps.items() if value}
+
     # 組 (stem で) と, 正解の出どころ, 値の名前, 分割
     image_dir = Path(images).expanduser()
     mask_dir = Path(masks).expanduser()
@@ -728,22 +863,44 @@ def export_image_masks(
             "勧めます"
         )
 
-    # 1 件ずつ写す (失敗したら一時ディレクトリを消す)
+    # 1 件ずつの写しか, 手順をかけた書き込み (失敗したら一時ディレクトリを削除)
     final, target = start_writing(path, overwrite)
     try:
-        rows = []
+        rows, written = [], []
         for index, (stem, image, mask) in enumerate(pairs):
             place = item_dir(index)
             (target / place).mkdir(parents=True)
             row = {"id": stem, "split": labels[index]}
             if groups:
                 row["group"] = str(groups[stem])
-            for key, source in (("image", image), ("mask", mask)):
-                row[key] = f"{place}/{key}{source.suffix.lower()}"
-                shutil.copyfile(source, target / row[key])
+            if steps:
+                row.update(write_pair(target, place, image, mask, steps))
+                written.append(read_pair(target, row))
+            else:
+                for key, source in (("image", image), ("mask", mask)):
+                    row[key] = f"{place}/{key}{source.suffix.lower()}"
+                    shutil.copyfile(source, target / row[key])
             rows.append(row)
+
+        # 手順をかけた場合は, 書いたファイルの形と値
+        if steps:
+            checks = written
+            values = np.unique(
+                np.concatenate([check["values"] for check in checks])
+            )
+            listed = [int(value) for value in values] if (
+                len(values) <= MAX_VALUES
+            ) else None
+        image_formats = ["png"] if steps else sorted({
+            image.suffix.lower().lstrip(".") for _, image, _ in pairs
+        })
+        mask_formats = ["png"] if steps else sorted({
+            mask.suffix.lower().lstrip(".") for _, _, mask in pairs
+        })
         info = {
-            "format_version": ITEMS_FORMAT_VERSION,
+            "format_version": (
+                ITEMS_STEPS_FORMAT_VERSION if steps else ITEMS_FORMAT_VERSION
+            ),
             "name": name or final.name,
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "role": "predict",
@@ -754,10 +911,7 @@ def export_image_masks(
                 "image": {
                     "kind": "image", "role": "input", "placement": "file",
                     "pattern": f"{ITEMS_DIR}/{{index:06d}}/image{{suffix}}",
-                    "formats": sorted({
-                        image.suffix.lower().lstrip(".")
-                        for _, image, _ in pairs
-                    }),
+                    "formats": image_formats,
                     "shape": common_shape([c["image"] for c in checks]),
                     "dtype": "uint8", "units": "pixel",
                     "convention": {
@@ -767,10 +921,7 @@ def export_image_masks(
                 "mask": {
                     "kind": "mask", "role": "target", "placement": "file",
                     "pattern": f"{ITEMS_DIR}/{{index:06d}}/mask{{suffix}}",
-                    "formats": sorted({
-                        mask.suffix.lower().lstrip(".")
-                        for _, _, mask in pairs
-                    }),
+                    "formats": mask_formats,
                     "shape": common_shape([c["mask"] for c in checks]),
                     "dtype": np.result_type(
                         *[c["dtype"] for c in checks]
@@ -793,12 +944,80 @@ def export_image_masks(
             },
             "notes": notes,
         }
+        for key, listed_steps in steps.items():
+            info["entries"][key]["steps"] = listed_steps
         info = write_items(target, final, rows, info)
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
         raise
 
     return info
+
+
+def write_pair(
+    target: Path, place: str, image: Path, mask: Path, steps: dict
+) -> dict:
+    """
+    画像と領域の組に中身の手順をかけて PNG で書く関数
+
+    Parameters
+    ----------
+    target: Path
+        一時ディレクトリ
+    place: str
+        1 件のディレクトリの相対の場所
+    image: Path
+        元の画像
+    mask: Path
+        元の領域
+    steps: dict
+        項目の名前 (image, mask) から手順の並び
+
+    Returns
+    ----------
+    columns: dict
+        表の image と mask の列 (相対の場所)
+    """
+    # 画像は read_image, 領域は read_mask と同じ読み方で読み, 手順の適用
+    columns = {"image": f"{place}/image.png", "mask": f"{place}/mask.png"}
+    write_image(
+        target / columns["image"],
+        apply_steps(read_image(image), steps.get("image", []))
+    )
+    write_mask(
+        target / columns["mask"],
+        apply_steps(read_mask(mask), steps.get("mask", []))
+    )
+
+    return columns
+
+
+def read_pair(target: Path, row: dict) -> dict:
+    """
+    書いた画像と領域の組の形と値を, 読み直して求める関数
+
+    Parameters
+    ----------
+    target: Path
+        一時ディレクトリ
+    row: dict
+        表の行 (image と mask の相対の場所)
+
+    Returns
+    ----------
+    check: dict
+        image ((高さ, 幅, チャンネル)), mask ((高さ, 幅)), values (領域の
+        値), dtype (領域の型). check_pair と同じ形
+    """
+    # load_items と同じ読み方での読み直し
+    image = with_channels(read_image(target / row["image"]))
+    mask = read_mask(target / row["mask"])
+    check = {
+        "image": image.shape, "mask": mask.shape,
+        "values": np.unique(mask), "dtype": mask.dtype,
+    }
+
+    return check
 
 
 def kept_frames(source: Path, transforms: dict) -> tuple[list[dict], int]:
@@ -901,7 +1120,8 @@ def capture_shift(capture: Union[str, Path]) -> np.ndarray:
 
 
 def normalize_capture(
-    capture: Union[str, Path], target: Union[str, Path]
+    capture: Union[str, Path], target: Union[str, Path],
+    steps: Optional[list] = None
 ) -> dict:
     """
     撮影を写し, 姿勢と撮影が持つ点群に正規化の平行移動をかける関数
@@ -915,6 +1135,10 @@ def normalize_capture(
         元の撮影のディレクトリ
     target: Union[str, Path]
         写す先のディレクトリ (無いもの)
+    steps: Optional[list] = None
+        各枚の画像にかける中身の手順 (版 3 のデータセットの撮影の項目の
+        steps. resize, grayscale, rgb). resize では深度と信頼度と内部
+        パラメータも同じ倍率に直す
 
     Returns
     ----------
@@ -925,9 +1149,11 @@ def normalize_capture(
     Raises
     ----------
     ValueError
-        画像のある枚が無い場合と, その枚に姿勢が無い場合
+        画像のある枚が無い場合, その枚に姿勢が無い場合, 中身の手順の誤り
+        と, 手順をかける撮影の画像の大きさがそろわない場合
     """
     # 画像のある枚だけを残し, その姿勢から平行移動を決める
+    checked = check_entry_steps(steps or [], "capture")
     source = Path(capture).expanduser()
     target = Path(target).expanduser()
     transforms = read_transforms(source)
@@ -964,17 +1190,214 @@ def normalize_capture(
     notes += copy_capture_cloud(
         source, target, transforms.get("point_cloud"), shift, copied
     )
+
+    # 中身の手順 (各枚の画像と, 大きさに合わせて深度と内部パラメータ)
+    if checked:
+        resize_frames(target, copied, checked)
     (target / "transforms.json").write_text(
         json.dumps(copied, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     summary = {
         "shift": shift, "frames": len(frames),
-        "height": transforms.get("h"), "width": transforms.get("w"),
+        "height": copied.get("h"), "width": copied.get("w"),
         "convention": transforms.get("coordinate_convention") or {},
         "notes": notes,
     }
 
     return summary
+
+
+def resize_frames(target: Path, transforms: dict, steps: list) -> None:
+    """
+    写した撮影の各枚の画像に中身の手順をかけ, 大きさが変われば深度,
+    信頼度, 内部パラメータを同じ倍率に直す関数
+
+    Parameters
+    ----------
+    target: Path
+        写した撮影のディレクトリ (ファイルを書き換える)
+    transforms: dict
+        写した transforms.json の中身 (場所と内部パラメータを書き換える)
+    steps: list
+        画像の手順 (check_entry_steps でそろえたもの)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        画像の大きさがそろわない場合と, PNG に直した名前が他の画像,
+        深度, 信頼度と重なる場合
+    """
+    # 各枚の画像に手順をかけた PNG (同じファイルは 1 度だけ). 重なりは
+    # 画像と深度と信頼度の全ての場所で見る (深度を上書きしないため)
+    sizes: Optional[tuple] = None
+    done: dict[str, str] = {}
+    resized: set[str] = set()
+    taken = taken_files(transforms)
+    for entry in transforms["frames"]:
+        relative = entry["file_path"]
+        if relative in done:
+            # 同じ画像を指す枚も, 深度と内部パラメータは枚ごとに直す
+            entry["file_path"] = done[relative]
+            if sizes is not None and sizes[0] != sizes[1]:
+                scale_depths(target, entry, sizes, resized)
+                scale_intrinsics(entry, transforms, sizes)
+            continue
+        original = read_image(target / relative)
+        changed = apply_steps(original, steps)
+        pair = (original.shape[:2], np.asarray(changed).shape[:2])
+        if sizes is not None and pair != sizes:
+            raise ValueError(
+                f"{target.name} の撮影の画像の大きさがそろわないので, 中身の"
+                "手順をかけられません"
+            )
+        sizes = pair
+        png = Path(relative).with_suffix(".png").as_posix()
+        if png != relative and (png in taken or png in done.values()):
+            raise ValueError(
+                f"{target.name} の撮影の {relative} を PNG に直した名前が, "
+                "他の画像か深度か信頼度と重なります"
+            )
+        (target / relative).unlink()
+        write_image(target / png, changed)
+        done[relative] = png
+        entry["file_path"] = png
+
+        # 大きさが変われば, 深度と信頼度も同じ倍率に (最も近い画素)
+        if pair[0] != pair[1]:
+            scale_depths(target, entry, pair, resized)
+            scale_intrinsics(entry, transforms, pair)
+
+    # 撮影全体の内部パラメータ
+    if sizes is not None and sizes[0] != sizes[1]:
+        scale_intrinsics(transforms, transforms, sizes)
+
+
+def taken_files(transforms: dict) -> set[str]:
+    """
+    撮影の全ての枚の画像, 深度, 信頼度の場所を集める関数
+
+    Parameters
+    ----------
+    transforms: dict
+        transforms.json の中身
+
+    Returns
+    ----------
+    taken: set[str]
+        撮影の中の場所 (transforms.json に書いた形)
+    """
+    # 画像と DEPTH_FILES の鍵の場所
+    taken = set()
+    for entry in transforms["frames"]:
+        for key in ("file_path", *DEPTH_FILES):
+            place = entry.get(key)
+            if isinstance(place, str) and place:
+                taken.add(place)
+
+    return taken
+
+
+def scale_depths(
+    target: Path, entry: dict, sizes: tuple, resized: set[str]
+) -> None:
+    """
+    1 枚の深度と信頼度の画像を, 画像と同じ倍率に変える関数 (同じファイル
+    は 1 度だけ)
+
+    Parameters
+    ----------
+    target: Path
+        写した撮影のディレクトリ
+    entry: dict
+        transforms.json の 1 枚
+    sizes: tuple
+        画像の元の (高さ, 幅) と変えた後の (高さ, 幅)
+    resized: set[str]
+        変えた場所 (書き足す)
+
+    Returns
+    ----------
+    None
+    """
+    # 最も近い画素で, 値を混ぜずに
+    for key in DEPTH_FILES:
+        place = entry.get(key)
+        if place and place not in resized:
+            scale_nearest(target / place, sizes)
+            resized.add(place)
+
+
+def scale_nearest(path: Path, sizes: tuple) -> None:
+    """
+    深度か信頼度の画像の大きさを, 画像と同じ倍率で最も近い画素に変える
+    関数 (値を混ぜない)
+
+    Parameters
+    ----------
+    path: Path
+        深度か信頼度の画像 (書き換える)
+    sizes: tuple
+        画像の元の (高さ, 幅) と変えた後の (高さ, 幅)
+
+    Returns
+    ----------
+    None
+    """
+    # 画像との大きさの比の維持 (深度の画像の方が小さい撮影もある)
+    from PIL import Image
+
+    (height, width), (new_height, new_width) = sizes
+    with Image.open(path) as opened:
+        image_format = opened.format
+        values = np.array(opened)
+    size = (
+        max(1, round(values.shape[1] * new_width / width)),
+        max(1, round(values.shape[0] * new_height / height)),
+    )
+    Image.fromarray(nearest(values, *size)).save(path, format=image_format)
+
+
+def scale_intrinsics(holder: dict, transforms: dict, sizes: tuple) -> None:
+    """
+    内部パラメータを, 画像の大きさの倍率に合わせて直す関数
+
+    Parameters
+    ----------
+    holder: dict
+        内部パラメータを持つ辞書 (撮影全体か 1 枚. 書き換える)
+    transforms: dict
+        撮影全体の transforms.json の中身 (画素の中心の決まり)
+    sizes: tuple
+        画像の元の (高さ, 幅) と変えた後の (高さ, 幅)
+
+    Returns
+    ----------
+    None
+    """
+    # 画素の中心の維持: 端からの座標 (u - 中心 + 0.5) に倍率
+    (height, width), (new_height, new_width) = sizes
+    center = float(with_depth_convention(
+        transforms.get("coordinate_convention") or {}
+    )["pixel_center"])
+    ratios = {"x": new_width / width, "y": new_height / height}
+    for key in INTRINSICS:
+        value = holder.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if key == "w":
+            holder[key] = int(new_width)
+        elif key == "h":
+            holder[key] = int(new_height)
+        elif key.startswith("fl_"):
+            holder[key] = float(value) * ratios[key[-1]]
+        else:
+            holder[key] = (
+                (float(value) - center + 0.5) * ratios[key[-1]] + center - 0.5
+            )
 
 
 def copy_capture_cloud(
@@ -1122,7 +1545,7 @@ def export_capture_clouds(
     path: Union[str, Path], split: Optional[dict] = None,
     groups: Optional[dict] = None, origin: Optional[dict] = None,
     cloud_units: str = "meter", name: Optional[str] = None,
-    overwrite: bool = False
+    overwrite: bool = False, item_steps: Optional[dict] = None
 ) -> dict:
     """
     多視点の撮影と正解の点群の対を, 版 2 のデータセットに書き出す関数
@@ -1151,6 +1574,9 @@ def export_capture_clouds(
         データセットの名前 (省略するとディレクトリの名前)
     overwrite: bool = False
         既にあるデータセットを置き換えるか
+    item_steps: Optional[dict] = None
+        項目にかける中身の手順 (capture は各枚の画像に resize, grayscale,
+        rgb. cloud は sample_points). 渡すと版 3 で書く
 
     Returns
     ----------
@@ -1160,9 +1586,13 @@ def export_capture_clouds(
     Raises
     ----------
     ValueError
-        組が無い場合, 姿勢の無い撮影がある場合, 単位と分割の誤りの場合
+        組が無い場合, 姿勢の無い撮影がある場合, 単位, 分割と中身の手順の
+        誤りの場合
     """
-    # 組, 単位, 正解の出どころ, 分割
+    # 中身の手順, 組, 単位, 正解の出どころ, 分割
+    steps = entry_steps(
+        item_steps, {"capture": "capture", "cloud": "point_cloud"}
+    )
     if cloud_units not in CLOUD_UNITS:
         raise ValueError(
             f"cloud_units は {', '.join(CLOUD_UNITS)} のどれかにしてください"
@@ -1186,12 +1616,14 @@ def export_capture_clouds(
         for index, (stem, position, cloud_path) in enumerate(pairs):
             place = item_dir(index)
             summary = normalize_capture(
-                data.load_item(position)["path"], target / place / "capture"
+                data.load_item(position)["path"], target / place / "capture",
+                steps.get("capture")
             )
             shift = summary["shift"]
             notes += summary["notes"]
             cloud = read_cloud(cloud_path)
             cloud["points"] = cloud["points"] * scale + shift
+            cloud = apply_steps(cloud, steps.get("cloud", []))
             write_ply(target / place / "cloud.ply", cloud)
             row = {"id": stem, "split": labels[index]}
             if groups:
@@ -1229,7 +1661,9 @@ def export_capture_clouds(
                 "距離), pixel_center: 0.5 としました"
             )
         info = {
-            "format_version": ITEMS_FORMAT_VERSION,
+            "format_version": (
+                ITEMS_STEPS_FORMAT_VERSION if steps else ITEMS_FORMAT_VERSION
+            ),
             "name": name or final.name,
             "created_at": dt.datetime.now().astimezone().isoformat(),
             "role": "predict",
@@ -1285,6 +1719,8 @@ def export_capture_clouds(
             },
             "notes": notes,
         }
+        for key, listed_steps in steps.items():
+            info["entries"][key]["steps"] = listed_steps
         info = write_items(target, final, rows, info)
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
@@ -1753,7 +2189,7 @@ class ItemDataset:
 
 def load_items(path: Union[str, Path]) -> ItemDataset:
     """
-    版 2 (入力と正解がファイルの組) のデータセットを読み込む関数
+    版 2 と 3 (入力と正解がファイルの組) のデータセットを読み込む関数
 
     Parameters
     ----------
@@ -1781,10 +2217,11 @@ def load_items(path: Union[str, Path]) -> ItemDataset:
             "もので, load_items では読めません. load_dataset で読んで"
             "ください"
         )
-    if version != ITEMS_FORMAT_VERSION:
+    if version not in ITEMS_FORMAT_VERSIONS:
         raise ValueError(
             f"format_version {version} のデータセットは, load_items (版 "
-            f"{ITEMS_FORMAT_VERSION}) では読めません"
+            f"{' と '.join(str(v) for v in ITEMS_FORMAT_VERSIONS)}) では"
+            "読めません"
         )
 
     # 項目の置き方 (知らない置き方は読み違えないよう止まる)
@@ -1818,3 +2255,117 @@ def load_items(path: Union[str, Path]) -> ItemDataset:
     dataset = ItemDataset(path=root, info=info, items=items)
 
     return dataset
+
+
+def items_info(dataset: Union[ItemDataset, dict, str, Path]) -> dict:
+    """
+    版 2 か 3 のデータセットの説明を返す関数
+
+    Parameters
+    ----------
+    dataset: Union[ItemDataset, dict, str, Path]
+        load_items の結果, dataset.yaml の中身の辞書, データセットの
+        ディレクトリのどれか
+
+    Returns
+    ----------
+    info: dict
+        dataset.yaml の中身
+
+    Raises
+    ----------
+    ValueError
+        版 2 と 3 でない場合
+    """
+    # 読んだ結果はその説明, ディレクトリは dataset.yaml の中身
+    if isinstance(dataset, ItemDataset):
+        info = dataset.info
+        return info
+    info = dataset if isinstance(dataset, dict) else yaml.safe_load(
+        (Path(dataset).expanduser() / "dataset.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    version = info.get("format_version") if isinstance(info, dict) else None
+    if version not in ITEMS_FORMAT_VERSIONS:
+        raise ValueError(
+            f"format_version {version} のデータセットの項目には, 手順を"
+            f"かけられません (版 "
+            f"{' と '.join(str(v) for v in ITEMS_FORMAT_VERSIONS)} だけ)"
+        )
+
+    return info
+
+
+def transform_entry(
+    dataset: Union[ItemDataset, dict, str, Path], name: str, value: Any
+) -> Any:
+    """
+    データセットの項目に残した中身の手順を, 新しい 1 件にかける関数
+
+    推論のときに, 書き出しと同じ手順をかけるため. load_items がその項目
+    に返すのと同じ形で返す
+
+    Parameters
+    ----------
+    dataset: Union[ItemDataset, dict, str, Path]
+        load_items の結果, dataset.yaml の中身の辞書, データセットの
+        ディレクトリのどれか
+    name: str
+        項目の名前
+    value: Any
+        新しい 1 件 (画像と領域はファイルの場所か配列, 点群はファイルの
+        場所, (点の数, 3) の配列か points を持つ辞書)
+
+    Returns
+    ----------
+    content: Any
+        画像は (高さ, 幅, チャンネル) の uint8, 領域は説明の dtype の
+        (高さ, 幅), 点群は (点の数, 3) の float32
+
+    Raises
+    ----------
+    ValueError
+        版 2 と 3 でない場合, 項目が無い場合, 撮影と手順をかけられない
+        種類の項目の場合, 知らない手順の場合
+    """
+    # 項目と手順 (読む側の知らない手順は止まる)
+    info = items_info(dataset)
+    spec = (info.get("entries") or {}).get(name)
+    if not isinstance(spec, dict):
+        raise ValueError(f"データセットに項目 {name} がありません")
+    kind = spec.get("kind")
+    if kind == "capture":
+        raise ValueError(
+            "撮影は normalize_capture(撮影, 写す先, steps=項目の steps) で"
+            "写してから read_capture で読んでください"
+        )
+    if kind not in ("image", "mask", "point_cloud"):
+        raise ValueError(f"項目 {name} の種類 {kind} には手順をかけられません")
+    steps = check_entry_steps(spec.get("steps") or [], kind)
+
+    # 種類ごとに load_items と同じ読み方で読み, 手順をかけた中身
+    if kind == "image":
+        image = value if isinstance(value, np.ndarray) else read_image(
+            Path(value).expanduser()
+        )
+        content: Any = with_channels(
+            np.asarray(apply_steps(image, steps), dtype=np.uint8)
+        )
+    elif kind == "mask":
+        mask = value if isinstance(value, np.ndarray) else read_mask(
+            Path(value).expanduser()
+        )
+        content = np.asarray(apply_steps(mask, steps)).astype(
+            spec.get("dtype") or "int64"
+        )
+    else:
+        cloud = value if isinstance(value, dict) else (
+            {"points": np.asarray(value)} if isinstance(value, np.ndarray)
+            else read_cloud(Path(value).expanduser())
+        )
+        content = np.asarray(
+            apply_steps(cloud, steps)["points"], dtype=np.float32
+        )
+
+    return content

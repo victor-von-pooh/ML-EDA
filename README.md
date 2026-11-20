@@ -121,7 +121,7 @@ model_inputs("datasets/titanic")
 
 `outputs` は分類ならクラスの数, 回帰と時系列の予測なら 1. 版 2 のデータセットでは誤りで止まる (項目の形は `dataset.yaml` の `entries` にある).
 
-### 入力と正解がファイルの組 (版 2)
+### 入力と正解がファイルの組 (版 2 と 3)
 
 画像と領域, 多視点の撮影と点群のように, 正解が列でなくファイルのデータは `dataset.yaml` の版 2 で書き出し, `load_items` で読む (列の正解のデータは版 1). 詳しくは [docs/DESIGN.md](docs/DESIGN.md) の「書き出しの版 2」.
 
@@ -144,6 +144,26 @@ from ml_eda import normalize_capture, read_capture
 summary = normalize_capture("new/capture_001", "work/capture_001")
 capture = read_capture("work/capture_001")   # intrinsics, poses, depth など
 # 予測した点群 - summary["shift"] で元の座標に戻す
+```
+
+書き出しの `item_steps` に項目ごとの中身の手順を渡すと, 大きさをそろえるなどをかけたファイルを書き, かけた手順を `dataset.yaml` の `entries.<名前>.steps` に残す (版 3). 画像の `resize` には, 領域に同じ大きさの `resize_mask` (最も近い画素. 値を混ぜない) を書き出しがかける. 撮影の `resize` は深度と内部パラメータも合わせて直す. 推論のときは, 新しい 1 件に `transform_entry` (撮影は `normalize_capture` の `steps`) で同じ手順をかける.
+
+```python
+from ml_eda import transform_entry
+
+export_image_masks("raw/images", "raw/masks", "datasets/sized",
+                   item_steps={"image": [
+                       {"op": "resize", "width": 128, "height": 128}]})
+dataset = load_items("datasets/sized")
+image = transform_entry(dataset, "image", "new/photo.png")   # (128, 128, 3)
+
+export_capture_clouds("raw/captures", "raw/clouds", "datasets/scenes",
+                      item_steps={
+                          "capture": [{"op": "resize", "width": 256,
+                                       "height": 192}],
+                          "cloud": [{"op": "sample_points", "points": 4096}]})
+steps = load_items("datasets/scenes").entries["capture"]["steps"]
+normalize_capture("new/capture_001", "work/capture_001", steps=steps)
 ```
 
 ## 文書
