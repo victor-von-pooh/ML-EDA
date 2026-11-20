@@ -1880,7 +1880,9 @@ def image_input(name: str, entry: dict) -> dict:
     # grayscale, rgb から
     shape = list(entry.get("shape") or [None, None, None])[:3]
     shape += [None] * (3 - len(shape))
-    for step in entry.get("steps") or []:
+    # 手順は名前だけの文字も {op: 名前} と同じ
+    for listed in entry.get("steps") or []:
+        step = {"op": listed} if isinstance(listed, str) else dict(listed)
         if step.get("op") == "resize":
             shape[0] = shape[0] or step.get("height")
             shape[1] = shape[1] or step.get("width")

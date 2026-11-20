@@ -276,6 +276,17 @@ def test_model_inputs_image_masks(tmp_path: Path) -> None:
     assert result["inputs"][0]["shape"] == [None, 1, 32, 40]
     assert result["outputs"] == 3
 
+    # 説明の形の決まらない次元は手順から (名前だけの手順も読む)
+    described = tmp_path / "v3" / "dataset.yaml"
+    info = yaml.safe_load(described.read_text(encoding="utf-8"))
+    info["entries"]["image"]["shape"] = [None, None, None]
+    info["entries"]["image"]["steps"] = [
+        {"op": "resize", "width": 40, "height": 32}, "grayscale"
+    ]
+    described.write_text(yaml.safe_dump(info), encoding="utf-8")
+    result = model_inputs(tmp_path / "v3")
+    assert result["inputs"][0]["shape"] == [None, 1, 32, 40]
+
     # 名前を渡さない領域は値の一覧の全て (名前は値の文字)
     export_image_masks(made["images"], made["masks"], tmp_path / "plain")
     result = model_inputs(tmp_path / "plain")
