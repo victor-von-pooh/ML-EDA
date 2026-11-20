@@ -29,7 +29,7 @@ class Step:
     fit: Optional[Callable[[pd.DataFrame, dict, dict], dict]]
     # 適用 (当てはめた値を使って表を変える)
     apply: Callable[[pd.DataFrame, dict, dict], pd.DataFrame]
-    # 引数の説明
+    # 引数の説明 (書いた鍵だけを手順の引数として受け付ける)
     params: dict = field(default_factory=dict)
     # 説明
     description: str = ""
@@ -1290,8 +1290,9 @@ def check_step_params(index: int, step: dict) -> None:
         raise ValueError(
             f"手順 {index + 1} ({step['op']}) に知らない引数があります: "
             f"{', '.join(unknown)} (この版の ML-EDA が知る引数は "
-            f"{', '.join(sorted(STEPS[step['op']].params))}. 新しい版の "
-            "ML-EDA で書いたレシピなら, ML-EDA を上げてください)"
+            f"{', '.join(sorted(STEPS[step['op']].params)) or '無し'}. "
+            "新しい版の ML-EDA で書いたレシピなら, ML-EDA を上げて"
+            "ください)"
         )
 
 
