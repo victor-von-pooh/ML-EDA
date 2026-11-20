@@ -116,10 +116,10 @@ from ml_eda import model_inputs
 model_inputs("datasets/titanic")
 # {"inputs": [{"name": "x", "shape": [None, 10], "dtype": "float32"}],
 #  "task": "classification", "target": "Survived",
-#  "classes": ["0", "1"], "outputs": 2}
+#  "classes": ["0", "1"], "target_kind": None, "outputs": 2}
 ```
 
-`outputs` は分類ならクラスの数, 回帰と時系列の予測なら 1. 版 2 のデータセットでは誤りで止まる (項目の形は `dataset.yaml` の `entries` にある).
+`outputs` は分類ならクラスの数, 回帰と時系列の予測なら 1. ファイルの組 (版 2 と 3) では, 画像と領域は `[None, チャンネル, 高さ, 幅]` の入力と背景を含む領域のクラスの数, 撮影と点群は `[None, 入力の点の数, 3]` の入力と出す点の数を返す (docs/DESIGN.md の「モデルの入力」).
 
 ### 入力と正解がファイルの組 (版 2 と 3)
 

@@ -20,7 +20,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
 | 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
-| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
+| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
 | データの読み方 (`Data.source` の `loader` と `options`) | 持つ | 版を持たない (読み込みの名前と設定) | ML-Quest (問題の設定の `data` に残す), ML-Fathom. 下の「読み込み」 |
 | 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の値の決まり (`convention.shift`) は, 見本の一覧の版 2 でこれと同じ向き (ML-Found の `load_samples` は逆の向きの版 1 を版 2 の意味に写して返す) |
 
@@ -238,7 +238,7 @@ split:
 | `recipe` | 前処理のレシピ (`recipe.yaml`) |
 | `notes` | 前処理の後の注意 (数値でない列が残っているなど) |
 
-**モデルの入力** (`model_inputs(path)`): 書き出したデータセット (版 1) の説明から, モデルが受け取る入力と出す値の数を JSON にできる辞書で返す. 画面 (ML-Fathom) がデータセットの一覧で「モデルに要るもの」を見せ, モデルの定義 (ML-ModelControl の `inputs` と最後の層の出す数) をデータに合わせるため. 分割のデータは読まない (画像などの中身の配列は, 型を知るためにファイルの頭だけを読む).
+**モデルの入力** (`model_inputs(path)`): 書き出したデータセット (版 1 と, ファイルの組の版 2 と 3) の説明から, モデルが受け取る入力と出す値の数を JSON にできる辞書で返す. 画面 (ML-Fathom) がデータセットの一覧で「モデルに要るもの」を見せ, モデルの定義 (ML-ModelControl の `inputs` と最後の層の出す数) をデータに合わせるため. 分割のデータは読まない (画像などの中身の配列は, 型を知るためにファイルの頭だけを読む).
 
 | 鍵 | 中身 |
 | --- | --- |
@@ -246,9 +246,17 @@ split:
 | `task` | タスク (`classification`, `regression`, `forecasting`). 決めていない (`none`) 場合は `null` |
 | `target` | 目的の列 (無ければ `null`) |
 | `classes` | 分類のクラス (番号の順. クラスが無ければ空の並び). 分類でなければ `null` |
+| `target_kind` | 正解の種類 (版 2 と 3 の `target.kind`. `mask`, `point_cloud`). 版 1 は `null` |
 | `outputs` | モデルが 1 件に出す値の数. 分類はクラスの数, 回帰は 1, 時系列の予測は 1 (版 1 の説明は何期先までを持たず, 1 行に目的の値 1 つのため). タスクが無いか, 分類のクラスが無い場合は `null` |
 
-版 2 (ファイルの組) のデータセットは誤りで止まる (項目の形は `dataset.yaml` の `entries` を見る). 知らない版も止まる.
+ファイルの組 (版 2 と 3) は, 説明の `entries` の最初の入力と最初の正解の項目の種類の組から返す. `task` は `null`, `target` は正解の項目の名前, 入力の名前は入力の項目の名前. 値はどれも, ML-Quest の骨組み (ファイルの組の `train.py`) がモデルに渡す形と学ぶ数に合わせる (モデルの定義をそのまま骨組みで学習できるように).
+
+| 組 | 入力 | `classes` と `outputs` |
+| --- | --- | --- |
+| 画像 (`image`) と領域 (`mask`) | `[null, チャンネル, 高さ, 幅]` の `float32` (骨組みが 0 から 1 にして (チャンネル, 高さ, 幅) に並べ替えるため). 大きさとチャンネルは項目の `shape` (書き出しが中身の手順の後の形を書く). `shape` の次元が `null` なら手順の `resize` (高さと幅) と `grayscale` (1) か `rgb` (3) から. どちらでも決まらない次元 (大きさの混ざる画像を手順なしで書き出したものなど) は `null` | `classes` は領域のクラスの名前 (値の小さい順), `outputs` はその数. 骨組みと同じ数え方で, 名前 (`classes`) があれば名前の付いた値, 無ければ値の一覧 (`values`) の全て (名前は値の文字). 名前の無い値 0 は背景 (`background`) のクラスとして足す (骨組みが背景も 1 つのクラスとして学ぶため) |
+| 撮影 (`capture`) か点群 (`point_cloud`) と点群 (`point_cloud`) | `[null, 入力の点の数, 3]` の `float32`. 撮影は骨組みが深度から点に戻して選ぶので, 骨組みの config の既定 `data.input_points` と同じ 512 (`pipeline.ITEM_INPUT_POINTS`). 点群の入力は項目の `shape` の点の数がそろっていればその数, そろわなければ 512 | `classes` は `null`. `outputs` は出す点の数で, 正解の点群の項目の `shape` の点の数がそろっていればその数 (中身の手順の `sample_points` の後など), そろわなければ骨組みの config の既定 `data.target_points` と同じ 1024 (`pipeline.ITEM_TARGET_POINTS`) |
+
+他の組 (画像と `boxes` など) は「まだ返せない」と誤りで止まる (項目の形は `dataset.yaml` の `entries` を見る). 知らない版も止まる.
 
 `load_dataset(path)` は分割ごとの `DataFrame` を返す. `unlabeled` の分割の `arrays` と `tensors` は目的の値を返さない (`arrays` は y が None, `tensors` は特徴量だけ). 画像, 文, 点群では `arrays` と `tensors` が中身の配列を返し, `transform_item` で新しい 1 件に同じ中身の手順をかける. `arrays` で numpy の配列, `tensors` で PyTorch のテンソルにもできる (PyTorch が入っている場合). `transform` は新しいデータに当てはめた前処理をかける.
 

@@ -55,6 +55,12 @@ SPLITS = ("train", "valid", "test")
 # モデルの入力の名前 (版 1 の入力は tensors の特徴量 1 つ)
 MODEL_INPUT = "x"
 
+# ファイルの組の点群のモデルの入力と出す点の数の既定 (点の数がそろわない
+# 項目の場合. ML-Quest の骨組みの config の data.input_points と
+# data.target_points の既定と同じ. 学習で各件から選ぶ点の数)
+ITEM_INPUT_POINTS = 512
+ITEM_TARGET_POINTS = 1024
+
 # 目的の列の欠けた行を残す分割の名前 (split.unlabeled: keep の場合)
 UNLABELED = "unlabeled"
 
@@ -1824,6 +1830,159 @@ def model_outputs(task: Optional[str], classes: list) -> Optional[int]:
     return outputs
 
 
+def mask_class_names(entry: dict) -> list[str]:
+    """
+    領域の項目の値の名前を, 値の小さい順に返す関数
+
+    Parameters
+    ----------
+    entry: dict
+        説明の領域の項目 (values と classes)
+
+    Returns
+    ----------
+    names: list[str]
+        クラスの名前 (classes が無ければ値の文字. 名前の無い値 0 は
+        background)
+    """
+    # 名前の付いた値 (無ければ値の一覧の全て). ML-Quest の骨組みの数え方
+    values = [int(value) for value in entry.get("values") or []]
+    listed = entry.get("classes") or [
+        {"value": value, "name": str(value)} for value in values
+    ]
+    named = {int(item["value"]): str(item["name"]) for item in listed}
+
+    # 名前の無い値 0 は背景のクラス (骨組みが背景も 1 つのクラスで学ぶため)
+    if 0 in values and 0 not in named:
+        named[0] = "background"
+    names = [named[value] for value in sorted(named)]
+
+    return names
+
+
+def image_input(name: str, entry: dict) -> dict:
+    """
+    画像の項目から, モデルの入力 (バッチ, チャンネル, 高さ, 幅) を作る関数
+
+    Parameters
+    ----------
+    name: str
+        項目の名前
+    entry: dict
+        説明の画像の項目 (shape は手順の後の (高さ, 幅, チャンネル))
+
+    Returns
+    ----------
+    single: dict
+        {name, shape, dtype} (そろわない大きさは None)
+    """
+    # 説明の形 (書き出しが手順の後の大きさを書く). 無ければ手順の resize,
+    # grayscale, rgb から
+    shape = list(entry.get("shape") or [None, None, None])[:3]
+    shape += [None] * (3 - len(shape))
+    for step in entry.get("steps") or []:
+        if step.get("op") == "resize":
+            shape[0] = shape[0] or step.get("height")
+            shape[1] = shape[1] or step.get("width")
+        elif step.get("op") in ("grayscale", "rgb"):
+            shape[2] = shape[2] or (1 if step["op"] == "grayscale" else 3)
+    sizes = [None if size is None else int(size) for size in shape]
+    single = {
+        "name": name,
+        "shape": [None, sizes[2], sizes[0], sizes[1]],
+        "dtype": "float32",
+    }
+
+    return single
+
+
+def cloud_count(entry: dict, default: int) -> int:
+    """
+    点群の項目の点の数を返す関数
+
+    Parameters
+    ----------
+    entry: dict
+        説明の点群の項目 (shape は (点の数, 3))
+    default: int
+        点の数がそろわない場合の数
+
+    Returns
+    ----------
+    count: int
+        そろった点の数 (sample_points の後など). そろわなければ default
+    """
+    # 形の最初の次元 (そろわなければ null)
+    shape = entry.get("shape") or [None]
+    count = int(shape[0]) if shape[0] is not None else default
+
+    return count
+
+
+def items_model_inputs(info: dict) -> dict:
+    """
+    版 2 と 3 (ファイルの組) の説明から, モデルの入力と出す値の数を
+    求める関数
+
+    Parameters
+    ----------
+    info: dict
+        dataset.yaml の中身
+
+    Returns
+    ----------
+    result: dict
+        inputs, task (None), target (正解の項目の名前), classes (領域の
+        クラスの名前), target_kind, outputs の辞書
+
+    Raises
+    ----------
+    ValueError
+        入力と正解の種類の組を知らない場合
+    """
+    # 入力と正解の項目 (説明の順の最初のもの)
+    entries = info.get("entries") or {}
+    inputs = [key for key, value in entries.items()
+              if value.get("role") == "input"]
+    targets = [key for key, value in entries.items()
+               if value.get("role") == "target"]
+    kinds = (
+        entries[inputs[0]].get("kind") if inputs else None,
+        entries[targets[0]].get("kind") if targets else None,
+    )
+
+    # 画像と領域: (バッチ, チャンネル, 高さ, 幅) と, 背景を含むクラスの数
+    if kinds == ("image", "mask"):
+        names = mask_class_names(entries[targets[0]])
+        result = {
+            "inputs": [image_input(inputs[0], entries[inputs[0]])],
+            "task": None, "target": targets[0], "classes": names,
+            "target_kind": "mask", "outputs": len(names) or None,
+        }
+        return result
+
+    # 撮影か点群と点群: (バッチ, 入力の点の数, 3) と, 出す点の数 (撮影は
+    # 学習のコードが深度から点に戻して選ぶので既定の数)
+    if kinds[0] in ("capture", "point_cloud") and kinds[1] == "point_cloud":
+        points = ITEM_INPUT_POINTS if kinds[0] == "capture" else cloud_count(
+            entries[inputs[0]], ITEM_INPUT_POINTS
+        )
+        result = {
+            "inputs": [{"name": inputs[0], "shape": [None, points, 3],
+                        "dtype": "float32"}],
+            "task": None, "target": targets[0], "classes": None,
+            "target_kind": "point_cloud",
+            "outputs": cloud_count(entries[targets[0]], ITEM_TARGET_POINTS),
+        }
+        return result
+
+    raise ValueError(
+        f"入力 {kinds[0]} と正解 {kinds[1]} の組のデータセットのモデルの"
+        "入力はまだ返せません. 項目の形は dataset.yaml の entries を"
+        "見てください"
+    )
+
+
 def model_inputs(path: Union[str, Path]) -> dict:
     """
     書き出したデータセットから, モデルの入力と出す値の数を求める関数
@@ -1837,25 +1996,23 @@ def model_inputs(path: Union[str, Path]) -> dict:
     ----------
     result: dict
         inputs ({name, shape, dtype} の並び), task, target, classes,
-        outputs の JSON にできる辞書
+        target_kind, outputs の JSON にできる辞書
 
     Raises
     ----------
     ValueError
-        版 2 と 3 (ファイルの組) と知らない版のデータセットの場合
+        知らない版のデータセットと, 版 2 と 3 (ファイルの組) で入力と
+        正解の種類の組を知らない場合
     FileNotFoundError
         dataset.yaml が無い場合
     """
-    # 説明と版の確認 (分割のデータは読まない)
+    # 説明と版の確認 (分割のデータは読まない. ファイルの組は説明だけ)
     root = Path(path).expanduser()
     info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
     version = info.get("format_version") if isinstance(info, dict) else None
     if version in ITEMS_FORMAT_VERSIONS:
-        raise ValueError(
-            f"format_version {version} のデータセット (ファイルの組) の"
-            "モデルの入力はまだ返せません. 項目の形は dataset.yaml の "
-            "entries を見てください"
-        )
+        result = items_model_inputs(info)
+        return result
     if not isinstance(version, int) or version > DATASET_FORMAT_VERSION:
         raise ValueError(
             f"format_version {version} のデータセットは, このライブラリ (版 "
@@ -1880,6 +2037,7 @@ def model_inputs(path: Union[str, Path]) -> dict:
         "task": task,
         "target": info.get("target"),
         "classes": classes if task == "classification" else None,
+        "target_kind": None,
         "outputs": model_outputs(task, classes),
     }
 

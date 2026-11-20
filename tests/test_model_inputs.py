@@ -6,7 +6,11 @@ import pandas as pd
 import pytest
 import yaml
 
-from ml_eda import export_dataset, load_data, load_dataset, model_inputs
+from ml_eda import (
+    export_capture_clouds, export_dataset, export_image_masks, load_data,
+    load_dataset, model_inputs
+)
+from ml_eda.synthetic import write_image_masks, write_shape_captures
 
 
 def write_table(path: Path) -> None:
@@ -70,7 +74,7 @@ def test_model_inputs_table(tmp_path: Path) -> None:
             {"name": "x", "shape": [None, len(features)], "dtype": "float32"}
         ],
         "task": "classification", "target": "label",
-        "classes": ["x", "y", "z"], "outputs": 3,
+        "classes": ["x", "y", "z"], "target_kind": None, "outputs": 3,
     }
     x, _ = load_dataset(tmp_path / "cls").arrays("train")
     assert x.dtype == np.float32 and x.shape[1] == len(features)
@@ -200,10 +204,13 @@ def test_model_inputs_versions(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 版 2 (ファイルの組) はまだ返さない
+    # 版 2 (ファイルの組) の知らない組はまだ返さない
     (tmp_path / "v2").mkdir()
     (tmp_path / "v2" / "dataset.yaml").write_text(
-        yaml.safe_dump({"format_version": 2, "entries": {}}),
+        yaml.safe_dump({"format_version": 2, "entries": {
+            "image": {"kind": "image", "role": "input"},
+            "boxes": {"kind": "boxes", "role": "target"},
+        }}),
         encoding="utf-8"
     )
     with pytest.raises(ValueError, match="まだ返せません"):
@@ -220,3 +227,107 @@ def test_model_inputs_versions(tmp_path: Path) -> None:
     # 説明の無い場所
     with pytest.raises(FileNotFoundError):
         model_inputs(tmp_path / "missing")
+
+
+def test_model_inputs_image_masks(tmp_path: Path) -> None:
+    """
+    画像と領域のデータセット (版 2 と 3) の入力の形とクラスの数を
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    pytest.importorskip("PIL.Image")
+
+    # 大きさの混ざる画像. 手順なし (版 2) は高さと幅が決まらない
+    made = write_image_masks(
+        tmp_path / "raw", count=4, sizes=[(32, 32), (48, 40)]
+    )
+    export_image_masks(
+        made["images"], made["masks"], tmp_path / "v2",
+        classes=made["classes"]
+    )
+    result = model_inputs(tmp_path / "v2")
+    assert result["inputs"] == [
+        {"name": "image", "shape": [None, 3, None, None], "dtype": "float32"}
+    ]
+    assert result["task"] is None and result["target"] == "mask"
+    assert result["target_kind"] == "mask"
+
+    # 名前の無い値 0 は背景として数える (ML-Quest の骨組みと同じ)
+    assert result["classes"] == ["background", "circle", "square"]
+    assert result["outputs"] == 3
+    assert json.loads(json.dumps(result)) == result
+
+    # 中身の手順 (版 3) の resize と grayscale の後の形
+    export_image_masks(
+        made["images"], made["masks"], tmp_path / "v3",
+        classes=made["classes"], item_steps={"image": [
+            {"op": "resize", "width": 40, "height": 32}, "grayscale"
+        ]}
+    )
+    result = model_inputs(tmp_path / "v3")
+    assert result["inputs"][0]["shape"] == [None, 1, 32, 40]
+    assert result["outputs"] == 3
+
+    # 名前を渡さない領域は値の一覧の全て (名前は値の文字)
+    export_image_masks(made["images"], made["masks"], tmp_path / "plain")
+    result = model_inputs(tmp_path / "plain")
+    assert result["classes"] == ["0", "1", "2"]
+    assert result["outputs"] == 3
+
+
+def test_model_inputs_capture_clouds(tmp_path: Path) -> None:
+    """
+    撮影と点群のデータセット (版 2 と 3) の入力の点の数と出す点の数を
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    pytest.importorskip("PIL.Image")
+
+    # 手順なし (版 2) の点の数のそろった正解はその数
+    made = write_shape_captures(
+        tmp_path / "raw", views=3, size=(12, 16), points=100
+    )
+    export_capture_clouds(
+        made["captures"], made["clouds"], tmp_path / "v2",
+        split={"method": "none"}
+    )
+    assert model_inputs(tmp_path / "v2")["outputs"] == 100
+
+    # 点の数がそろわない正解 (形の最初の次元が null) は既定の数
+    described = tmp_path / "v2" / "dataset.yaml"
+    info = yaml.safe_load(described.read_text(encoding="utf-8"))
+    info["entries"]["cloud"]["shape"] = [None, 3]
+    described.write_text(yaml.safe_dump(info), encoding="utf-8")
+    result = model_inputs(tmp_path / "v2")
+    assert result["inputs"] == [
+        {"name": "capture", "shape": [None, 512, 3], "dtype": "float32"}
+    ]
+    assert result["target"] == "cloud" and result["classes"] is None
+    assert result["target_kind"] == "point_cloud"
+    assert result["outputs"] == 1024
+
+    # 正解の点の数をそろえた書き出し (版 3) はその数
+    export_capture_clouds(
+        made["captures"], made["clouds"], tmp_path / "v3",
+        split={"method": "none"},
+        item_steps={"cloud": [{"op": "sample_points", "points": 64}]}
+    )
+    result = model_inputs(tmp_path / "v3")
+    assert result["inputs"][0]["shape"] == [None, 512, 3]
+    assert result["outputs"] == 64
