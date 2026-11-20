@@ -45,6 +45,9 @@ NO_TASK_NOTE = (
 # 分割の名前
 SPLITS = ("train", "valid", "test")
 
+# モデルの入力の名前 (版 1 の入力は tensors の特徴量 1 つ)
+MODEL_INPUT = "x"
+
 # 目的の列の欠けた行を残す分割の名前 (split.unlabeled: keep の場合)
 UNLABELED = "unlabeled"
 
@@ -1751,3 +1754,127 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
 
     return dataset
 
+
+
+def item_input(root: Path, splits: dict) -> Optional[dict]:
+    """
+    画像, 文, 点群の中身の配列から, モデルの入力の形と型を求める関数
+
+    Parameters
+    ----------
+    root: Path
+        データセットのディレクトリ
+    splits: dict
+        説明の splits
+
+    Returns
+    ----------
+    result: Optional[dict]
+        {name, shape, dtype} (中身の配列の無いデータセットは None)
+    """
+    # 学習用を先に, 無ければ配列を持つ最初の分割. 型はファイルの頭だけ
+    names = [name for name in splits if name == "train"] + [
+        name for name in splits if name != "train"
+    ]
+    chosen = [name for name in names if splits[name].get("items")]
+    if not chosen:
+        result = None
+        return result
+    item = splits[chosen[0]]
+    array = np.load(root / item["items"], allow_pickle=False, mmap_mode="r")
+    shape = list(item.get("shape") or array.shape)
+    result = {
+        "name": MODEL_INPUT,
+        "shape": [None] + [int(size) for size in shape[1:]],
+        "dtype": str(array.dtype),
+    }
+
+    return result
+
+
+def model_outputs(task: Optional[str], classes: list) -> Optional[int]:
+    """
+    モデルが 1 件に出す値の数を, タスクから求める関数
+
+    Parameters
+    ----------
+    task: Optional[str]
+        タスク (決めていなければ None)
+    classes: list
+        分類のクラス
+
+    Returns
+    ----------
+    outputs: Optional[int]
+        分類はクラスの数, 回帰と時系列の予測は 1. 分からなければ None
+    """
+    # 版 1 の説明は何期先までを持たないので, 時系列の予測も 1 行に 1 つ
+    outputs = None
+    if task == "classification" and classes:
+        outputs = len(classes)
+    elif task in ("regression", "forecasting"):
+        outputs = 1
+
+    return outputs
+
+
+def model_inputs(path: Union[str, Path]) -> dict:
+    """
+    書き出したデータセットから, モデルの入力と出す値の数を求める関数
+
+    Parameters
+    ----------
+    path: Union[str, Path]
+        export_dataset で書き出したディレクトリ
+
+    Returns
+    ----------
+    result: dict
+        inputs ({name, shape, dtype} の並び), task, target, classes,
+        outputs の JSON にできる辞書
+
+    Raises
+    ----------
+    ValueError
+        版 2 (ファイルの組) と知らない版のデータセットの場合
+    FileNotFoundError
+        dataset.yaml が無い場合
+    """
+    # 説明と版の確認 (分割のデータは読まない)
+    root = Path(path).expanduser()
+    info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
+    version = info.get("format_version") if isinstance(info, dict) else None
+    if version == ITEMS_FORMAT_VERSION:
+        raise ValueError(
+            f"format_version {version} のデータセット (ファイルの組) の"
+            "モデルの入力はまだ返せません. 項目の形は dataset.yaml の "
+            "entries を見てください"
+        )
+    if not isinstance(version, int) or version > DATASET_FORMAT_VERSION:
+        raise ValueError(
+            f"format_version {version} のデータセットは, このライブラリ (版 "
+            f"{DATASET_FORMAT_VERSION} まで) では読めません"
+        )
+
+    # 入力 (画像などは中身の配列, 表は学習に使う列を並べた 1 つ)
+    single = item_input(root, info.get("splits") or {})
+    if single is None:
+        single = {
+            "name": MODEL_INPUT,
+            "shape": [None, len(info.get("features") or [])],
+            "dtype": "float32",
+        }
+
+    # タスクと出す値の数 (none は決めていないこと)
+    task = info.get("task")
+    task = None if task in (None, "none") else str(task)
+    classes = list(info.get("classes") or [])
+    result = {
+        "inputs": [single],
+        "task": task,
+        "target": info.get("target"),
+        "classes": classes if task == "classification" else None,
+        "outputs": model_outputs(task, classes),
+    }
+
+    return result
