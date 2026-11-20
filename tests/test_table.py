@@ -970,7 +970,7 @@ def test_lag_window_gap() -> None:
     assert gapped.loc[5, "v_mean2_gap2"] == 10.0
     assert np.isnan(gapped.loc[4, "v_mean2_gap2"])
 
-    # 既定 (gap 1) の列の名前は前と同じ. 1 以上の整数でなければ誤り
+    # 既定 (gap 1) の列の名前は gap の付かない形. 1 以上の整数でなければ誤り
     plain = apply_lag(frame, {"columns": ["v"], "windows": [2]}, {})
     assert plain["v_mean2"].iloc[2] == 1.5
     for bad in (0, 1.5, True, "2"):

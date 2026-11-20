@@ -109,7 +109,7 @@ ML-Found の学習スクリプトでは, `TensorDataset(*dataset.tensors("train"
 
 ### 入力と正解がファイルの組 (版 2)
 
-画像と領域, 多視点の撮影と点群のように, 正解が列でなくファイルのデータは `dataset.yaml` の版 2 で書き出し, `load_items` で読む (列の正解のデータは今までどおり版 1). 詳しくは [docs/DESIGN.md](docs/DESIGN.md) の「書き出しの版 2」.
+画像と領域, 多視点の撮影と点群のように, 正解が列でなくファイルのデータは `dataset.yaml` の版 2 で書き出し, `load_items` で読む (列の正解のデータは版 1). 詳しくは [docs/DESIGN.md](docs/DESIGN.md) の「書き出しの版 2」.
 
 ```python
 from ml_eda import export_capture_clouds, export_image_masks, load_items
