@@ -662,3 +662,29 @@ def test_unlabeled_target_indicator() -> None:
     recipe["steps"] = []
     prepared = prepare(table(frame), recipe)
     assert any("unlabeled の分割にだけ" in note for note in prepared.notes)
+
+
+def test_unknown_step_params() -> None:
+    """
+    手順の知らない引数のあるレシピを, 読んだ時点で止めることを確かめる
+    関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 知っている引数と当てはめた値 (state) は通る
+    recipe = {"steps": [
+        {"op": "lag", "columns": ["sales"], "lags": [1], "gap": 2},
+        {"op": "standardize", "columns": ["x"], "state": {"x": [0.0, 1.0]}},
+    ]}
+    assert len(load_recipe(recipe)["steps"]) == 2
+
+    # 知らない引数は, 手順と引数の名前を挙げて止まる
+    recipe = {"steps": [{"op": "lag", "columns": ["sales"], "lagz": [1]}]}
+    with pytest.raises(ValueError, match="lagz"):
+        load_recipe(recipe)

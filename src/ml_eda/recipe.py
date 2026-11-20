@@ -29,7 +29,7 @@ class Step:
     fit: Optional[Callable[[pd.DataFrame, dict, dict], dict]]
     # 適用 (当てはめた値を使って表を変える)
     apply: Callable[[pd.DataFrame, dict, dict], pd.DataFrame]
-    # 引数の説明
+    # 引数の説明 (書いた鍵だけを手順の引数として受け付ける)
     params: dict = field(default_factory=dict)
     # 説明
     description: str = ""
@@ -39,6 +39,9 @@ class Step:
 
 # 手順の登録簿
 STEPS: dict[str, Step] = {}
+
+# 手順の引数の他に手順が持つ鍵 (手順の名前と, 当てはめた値)
+STEP_KEYS = {"op", "state"}
 
 # 処理の間だけ使う列 (分割, 日時の写し, 元の行の位置, グループの写し)
 HIDDEN = ("__split__", "__time__", "__row__", "__group__")
@@ -1256,6 +1259,43 @@ def to_plain(value: Any) -> Any:
     return plain
 
 
+def check_step_params(index: int, step: dict) -> None:
+    """
+    手順の引数が, その手順の知っている引数だけかを確かめる関数
+
+    知らない引数を黙って無視すると, 新しい版の ML-EDA で書いたレシピを
+    古い版で読んだときに, 別の列を作って後の手順で分かりにくい誤りに
+    なるため, 読んだ時点で止める
+
+    Parameters
+    ----------
+    index: int
+        手順の位置 (0 から)
+    step: dict
+        手順 (op と引数, 当てはめた値の state)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        知らない引数がある場合
+    """
+    # op と当てはめた値 (state) の他は, 登録した引数だけ
+    known = set(STEPS[step["op"]].params) | STEP_KEYS
+    unknown = sorted(str(key) for key in step if key not in known)
+    if unknown:
+        raise ValueError(
+            f"手順 {index + 1} ({step['op']}) に知らない引数があります: "
+            f"{', '.join(unknown)} (この版の ML-EDA が知る引数は "
+            f"{', '.join(sorted(STEPS[step['op']].params)) or '無し'}. "
+            "新しい版の ML-EDA で書いたレシピなら, ML-EDA を上げて"
+            "ください)"
+        )
+
+
 def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     """
     レシピを読み込み, 形を確かめる関数
@@ -1273,8 +1313,8 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     Raises
     ----------
     ValueError
-        新しい版, 知らない手順, 形の誤りの場合と, 目的の列の無いレシピで
-        split.unlabeled が keep の場合
+        新しい版, 知らない手順, 手順の知らない引数, 形の誤りの場合と, 目的
+        の列の無いレシピで split.unlabeled が keep の場合
     """
     # ファイルなら読み込み
     if isinstance(recipe, (str, Path)):
@@ -1309,6 +1349,7 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
                 f"手順 {index + 1} の op が知らないものです: "
                 f"{step.get('op') if isinstance(step, dict) else step}"
             )
+        check_step_params(index, step)
     method = loaded["split"].get("method", "random")
     if method not in SPLIT_METHODS:
         raise ValueError(f"知らない分割のしかたです: {method}")
