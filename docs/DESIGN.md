@@ -242,10 +242,10 @@ split:
 | `inputs` | 入力の並び. 1 つは `{name, shape, dtype}`. 版 1 の入力は `tensors` の特徴量 1 つだけで, 名前は `x`. 形はバッチの次元を `null` にした形 (表と時系列は `[null, 学習に使う列の数]` で `float32`. 画像, 文, 点群は中身の配列の形と型. 例: 画像は `[null, 3, 64, 64]` の `float32`, 文の語の番号は `[null, 128]` の `int64`) |
 | `task` | タスク (`classification`, `regression`, `forecasting`). 決めていない (`none`) 場合は `null` |
 | `target` | 目的の列 (無ければ `null`) |
-| `classes` | 分類のクラス (番号の順). 分類でなければ `null` |
+| `classes` | 分類のクラス (番号の順. クラスが無ければ空の並び). 分類でなければ `null` |
 | `outputs` | モデルが 1 件に出す値の数. 分類はクラスの数, 回帰は 1, 時系列の予測は 1 (版 1 の説明は何期先までを持たず, 1 行に目的の値 1 つのため). タスクが無いか, 分類のクラスが無い場合は `null` |
 
-版 2 (ファイルの組) のデータセットは今は返さず, 「版 2 のモデルの入力はまだ返せない」と言って止まる. 知らない版も止まる.
+版 2 (ファイルの組) のデータセットは誤りで止まる (項目の形は `dataset.yaml` の `entries` を見る). 知らない版も止まる.
 
 `load_dataset(path)` は分割ごとの `DataFrame` を返す. `unlabeled` の分割の `arrays` と `tensors` は目的の値を返さない (`arrays` は y が None, `tensors` は特徴量だけ). 画像, 文, 点群では `arrays` と `tensors` が中身の配列を返し, `transform_item` で新しい 1 件に同じ中身の手順をかける. `arrays` で numpy の配列, `tensors` で PyTorch のテンソルにもできる (PyTorch が入っている場合). `transform` は新しいデータに当てはめた前処理をかける.
 

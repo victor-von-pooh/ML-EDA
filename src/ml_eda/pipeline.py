@@ -1755,7 +1755,6 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
     return dataset
 
 
-
 def item_input(root: Path, splits: dict) -> Optional[dict]:
     """
     画像, 文, 点群の中身の配列から, モデルの入力の形と型を求める関数
