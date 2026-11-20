@@ -22,7 +22,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
 | データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解) と 2 (ファイルの組とまとまり). 版 1 は `load_dataset`, 版 2 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
 | データの読み方 (`Data.source` の `loader` と `options`) | 持つ | 版を持たない (読み込みの名前と設定) | ML-Quest (問題の設定の `data` に残す), ML-Fathom. 下の「読み込み」 |
-| 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の `convention.shift` は向きが逆 (ML-Found の TODO「点群の見本の shift の向きを ML-EDA とそろえる」) |
+| 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の値の決まり (`convention.shift`) は, 見本の一覧の版 2 でこれと同じ向き (ML-Found の `load_samples` は逆の向きの版 1 を版 2 の意味に写して返す) |
 
 ## 3. 用語
 
