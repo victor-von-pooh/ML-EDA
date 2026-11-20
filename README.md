@@ -108,6 +108,19 @@ dataset.transform(new_frame)                    # 新しいデータに同じ前
 
 ML-Found の学習スクリプトでは, `TensorDataset(*dataset.tensors("train"))` を `DataLoader` に渡す. 入力の次元は `len(dataset.features)`, 分類のクラスの数は `len(dataset.info["classes"])`.
 
+モデルに要るもの (入力の形と型, 出す値の数) は, 分割のデータを読まずに `model_inputs` で分かる.
+
+```python
+from ml_eda import model_inputs
+
+model_inputs("datasets/titanic")
+# {"inputs": [{"name": "x", "shape": [None, 10], "dtype": "float32"}],
+#  "task": "classification", "target": "Survived",
+#  "classes": ["0", "1"], "outputs": 2}
+```
+
+`outputs` は分類ならクラスの数, 回帰と時系列の予測なら 1. 版 2 のデータセットでは誤りで止まる (項目の形は `dataset.yaml` の `entries` にある).
+
 ### 入力と正解がファイルの組 (版 2)
 
 画像と領域, 多視点の撮影と点群のように, 正解が列でなくファイルのデータは `dataset.yaml` の版 2 で書き出し, `load_items` で読む (列の正解のデータは版 1). 詳しくは [docs/DESIGN.md](docs/DESIGN.md) の「書き出しの版 2」.

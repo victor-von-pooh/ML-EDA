@@ -12,8 +12,8 @@ from ml_eda.loaders import (
 )
 from ml_eda.media import read_cloud
 from ml_eda.pipeline import (
-    Dataset, Prepared, export_dataset, load_dataset, prepare, preview,
-    preview_items
+    Dataset, Prepared, export_dataset, load_dataset, model_inputs, prepare,
+    preview, preview_items
 )
 from ml_eda.profile import profile
 from ml_eda.recipe import (
@@ -31,7 +31,8 @@ __all__ = [
     "describe_item_steps", "export_capture_clouds", "export_image_masks",
     "describe_loaders",
     "describe_steps", "detect", "export_dataset", "load_data",
-    "load_dataset", "load_items", "load_recipe", "normalize_capture",
+    "load_dataset", "load_items", "load_recipe", "model_inputs",
+    "normalize_capture",
     "prepare", "preview",
     "preview_items", "read_capture", "read_cloud",
     "profile",

@@ -20,7 +20,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
 | 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
-| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解) と 2 (ファイルの組とまとまり). 版 1 は `load_dataset`, 版 2 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
+| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解) と 2 (ファイルの組とまとまり). 版 1 は `load_dataset`, 版 2 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
 | データの読み方 (`Data.source` の `loader` と `options`) | 持つ | 版を持たない (読み込みの名前と設定) | ML-Quest (問題の設定の `data` に残す), ML-Fathom. 下の「読み込み」 |
 | 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の `convention.shift` は向きが逆 (ML-Found の TODO「点群の見本の shift の向きを ML-EDA とそろえる」) |
 
@@ -234,6 +234,18 @@ split:
 | `source` | 元のデータの場所, 読み込み, 大きさと更新時刻 |
 | `recipe` | 前処理のレシピ (`recipe.yaml`) |
 | `notes` | 前処理の後の注意 (数値でない列が残っているなど) |
+
+**モデルの入力** (`model_inputs(path)`): 書き出したデータセット (版 1) の説明から, モデルが受け取る入力と出す値の数を JSON にできる辞書で返す. 画面 (ML-Fathom) がデータセットの一覧で「モデルに要るもの」を見せ, モデルの定義 (ML-ModelControl の `inputs` と最後の層の出す数) をデータに合わせるため. 分割のデータは読まない (画像などの中身の配列は, 型を知るためにファイルの頭だけを読む).
+
+| 鍵 | 中身 |
+| --- | --- |
+| `inputs` | 入力の並び. 1 つは `{name, shape, dtype}`. 版 1 の入力は `tensors` の特徴量 1 つだけで, 名前は `x`. 形はバッチの次元を `null` にした形 (表と時系列は `[null, 学習に使う列の数]` で `float32`. 画像, 文, 点群は中身の配列の形と型. 例: 画像は `[null, 3, 64, 64]` の `float32`, 文の語の番号は `[null, 128]` の `int64`) |
+| `task` | タスク (`classification`, `regression`, `forecasting`). 決めていない (`none`) 場合は `null` |
+| `target` | 目的の列 (無ければ `null`) |
+| `classes` | 分類のクラス (番号の順. クラスが無ければ空の並び). 分類でなければ `null` |
+| `outputs` | モデルが 1 件に出す値の数. 分類はクラスの数, 回帰は 1, 時系列の予測は 1 (版 1 の説明は何期先までを持たず, 1 行に目的の値 1 つのため). タスクが無いか, 分類のクラスが無い場合は `null` |
+
+版 2 (ファイルの組) のデータセットは誤りで止まる (項目の形は `dataset.yaml` の `entries` を見る). 知らない版も止まる.
 
 `load_dataset(path)` は分割ごとの `DataFrame` を返す. `unlabeled` の分割の `arrays` と `tensors` は目的の値を返さない (`arrays` は y が None, `tensors` は特徴量だけ). 画像, 文, 点群では `arrays` と `tensors` が中身の配列を返し, `transform_item` で新しい 1 件に同じ中身の手順をかける. `arrays` で numpy の配列, `tensors` で PyTorch のテンソルにもできる (PyTorch が入っている場合). `transform` は新しいデータに当てはめた前処理をかける.
 
