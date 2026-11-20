@@ -10,7 +10,7 @@ from ml_eda import (
     transform_entry
 )
 from ml_eda.itemprep import check_entry_steps, nearest
-from ml_eda.items import scale_intrinsics, scale_nearest
+from ml_eda.items import resize_frames, scale_intrinsics, scale_nearest
 from ml_eda.media import read_image
 from ml_eda.synthetic import (
     write_image_masks, write_png, write_shape_captures
@@ -484,3 +484,56 @@ def test_scale_helpers(tmp_path: Path) -> None:
         resized = np.array(opened)
     assert resized.shape == (3, 4)
     assert set(np.unique(resized)) <= set(np.unique(depth))
+
+
+def test_resize_frames_collision_and_shared(tmp_path: Path) -> None:
+    """
+    PNG に直した画像の名前が深度と重なる場合に止まり, 同じ画像を指す
+    枚も深度と内部パラメータを直すことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 画像 images/000.jpg と, PNG に直すと重なる深度 images/000.png
+    target = tmp_path / "cap"
+    (target / "images").mkdir(parents=True)
+    Image.fromarray(np.zeros((24, 32, 3), np.uint8)).save(
+        target / "images" / "000.jpg"
+    )
+    depth = np.full((24, 32), 500, np.uint16)
+    Image.fromarray(depth).save(target / "images" / "000.png")
+    transforms = {"frames": [{"file_path": "images/000.jpg",
+                              "depth_file_path": "images/000.png"}]}
+    steps = check_entry_steps(
+        [{"op": "resize", "width": 16, "height": 12}], "image"
+    )
+    with pytest.raises(ValueError, match="深度"):
+        resize_frames(target, transforms, steps)
+    assert np.array(Image.open(target / "images" / "000.png")).shape == (
+        24, 32
+    )
+
+    # 同じ画像を指す 2 枚. 枚ごとの内部パラメータと深度も半分に
+    shared = tmp_path / "shared"
+    (shared / "depth").mkdir(parents=True)
+    Image.fromarray(np.zeros((24, 32, 3), np.uint8)).save(shared / "a.png")
+    for name in ("d0.png", "d1.png"):
+        Image.fromarray(depth).save(shared / "depth" / name)
+    transforms = {"frames": [
+        {"file_path": "a.png", "depth_file_path": f"depth/d{index}.png",
+         "fl_x": 40.0, "fl_y": 40.0, "cx": 15.5, "cy": 11.5,
+         "w": 32, "h": 24}
+        for index in range(2)
+    ]}
+    resize_frames(shared, transforms, steps)
+    for index, entry in enumerate(transforms["frames"]):
+        assert entry["fl_x"] == pytest.approx(20.0)
+        assert entry["w"] == 16
+        shape = np.array(Image.open(shared / "depth" / f"d{index}.png")).shape
+        assert shape == (12, 16)

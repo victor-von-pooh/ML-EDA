@@ -1228,18 +1228,23 @@ def resize_frames(target: Path, transforms: dict, steps: list) -> None:
     Raises
     ----------
     ValueError
-        画像の大きさがそろわない場合と, PNG に直した名前が他の画像と
-        重なる場合
+        画像の大きさがそろわない場合と, PNG に直した名前が他の画像,
+        深度, 信頼度と重なる場合
     """
-    # 各枚の画像に手順をかけた PNG (同じファイルは 1 度だけ)
+    # 各枚の画像に手順をかけた PNG (同じファイルは 1 度だけ). 重なりは
+    # 画像と深度と信頼度の全ての場所で見る (深度を上書きしないため)
     sizes: Optional[tuple] = None
     done: dict[str, str] = {}
     resized: set[str] = set()
-    taken = {entry["file_path"] for entry in transforms["frames"]}
+    taken = taken_files(transforms)
     for entry in transforms["frames"]:
         relative = entry["file_path"]
         if relative in done:
+            # 同じ画像を指す枚も, 深度と内部パラメータは枚ごとに直す
             entry["file_path"] = done[relative]
+            if sizes is not None and sizes[0] != sizes[1]:
+                scale_depths(target, entry, sizes, resized)
+                scale_intrinsics(entry, transforms, sizes)
             continue
         original = read_image(target / relative)
         changed = apply_steps(original, steps)
@@ -1254,7 +1259,7 @@ def resize_frames(target: Path, transforms: dict, steps: list) -> None:
         if png != relative and (png in taken or png in done.values()):
             raise ValueError(
                 f"{target.name} の撮影の {relative} を PNG に直した名前が, "
-                "他の画像と重なります"
+                "他の画像か深度か信頼度と重なります"
             )
         (target / relative).unlink()
         write_image(target / png, changed)
@@ -1263,16 +1268,67 @@ def resize_frames(target: Path, transforms: dict, steps: list) -> None:
 
         # 大きさが変われば, 深度と信頼度も同じ倍率に (最も近い画素)
         if pair[0] != pair[1]:
-            for key in DEPTH_FILES:
-                place = entry.get(key)
-                if place and place not in resized:
-                    scale_nearest(target / place, pair)
-                    resized.add(place)
+            scale_depths(target, entry, pair, resized)
             scale_intrinsics(entry, transforms, pair)
 
     # 撮影全体の内部パラメータ
     if sizes is not None and sizes[0] != sizes[1]:
         scale_intrinsics(transforms, transforms, sizes)
+
+
+def taken_files(transforms: dict) -> set[str]:
+    """
+    撮影の全ての枚の画像, 深度, 信頼度の場所を集める関数
+
+    Parameters
+    ----------
+    transforms: dict
+        transforms.json の中身
+
+    Returns
+    ----------
+    taken: set[str]
+        撮影の中の場所 (transforms.json に書いた形)
+    """
+    # 画像と DEPTH_FILES の鍵の場所
+    taken = set()
+    for entry in transforms["frames"]:
+        for key in ("file_path", *DEPTH_FILES):
+            place = entry.get(key)
+            if isinstance(place, str) and place:
+                taken.add(place)
+
+    return taken
+
+
+def scale_depths(
+    target: Path, entry: dict, sizes: tuple, resized: set[str]
+) -> None:
+    """
+    1 枚の深度と信頼度の画像を, 画像と同じ倍率に変える関数 (同じファイル
+    は 1 度だけ)
+
+    Parameters
+    ----------
+    target: Path
+        写した撮影のディレクトリ
+    entry: dict
+        transforms.json の 1 枚
+    sizes: tuple
+        画像の元の (高さ, 幅) と変えた後の (高さ, 幅)
+    resized: set[str]
+        変えた場所 (書き足す)
+
+    Returns
+    ----------
+    None
+    """
+    # 最も近い画素で, 値を混ぜずに
+    for key in DEPTH_FILES:
+        place = entry.get(key)
+        if place and place not in resized:
+            scale_nearest(target / place, sizes)
+            resized.add(place)
 
 
 def scale_nearest(path: Path, sizes: tuple) -> None:
