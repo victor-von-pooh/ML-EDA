@@ -17,12 +17,12 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 
 このライブラリが持つ約束. 他の段階の約束は読まない.
 
-| 約束 | 版 | 使う側 | 中身 |
+| 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
-| 前処理のレシピ (YAML) | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し) | 下の「前処理のレシピ」 |
-| データセット (`dataset.yaml` と分割ごとのデータ) | `format_version` 1 (列の正解) と 2 (ファイルの組とまとまり). 版 1 は `load_dataset`, 版 2 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Found), ML-Inference, ML-Quest の骨組み | 下の「書き出し (学習との約束)」「書き出しの版 2」 |
-| データの読み方 (`Data.source` の `loader` と `options`) | 版を持たない (読み込みの名前と設定) | ML-Quest (問題の設定の `data` に残す), ML-Fathom | 下の「読み込み」 |
-| 撮影の正規化の平行移動 (`shift`) | データセットの版 2 に含む | 学習のスクリプト, 推論 (`normalize_capture`) | 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」 |
+| 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
+| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解) と 2 (ファイルの組とまとまり). 版 1 は `load_dataset`, 版 2 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
+| データの読み方 (`Data.source` の `loader` と `options`) | 持つ | 版を持たない (読み込みの名前と設定) | ML-Quest (問題の設定の `data` に残す), ML-Fathom. 下の「読み込み」 |
+| 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の `convention.shift` は向きが逆 (ML-Found の TODO「点群の見本の shift の向きを ML-EDA とそろえる」) |
 
 ## 用語
 
@@ -370,10 +370,10 @@ split:
 
 ### 他の型を版 2 で書く形
 
-版 2 が 2 つの例だけに合う形になっていないかの見本として, 次の 2 つの書き方を示す.
+版 2 が 2 つの例だけに合う形になっていないかの見本として, 次の 2 つの書き方を示す. どちらも書き出しと読み込みは無く, 足すときの形の見本.
 
-- **検出 (物の箱)**: 項目 `image` (`file`, 入力) と `boxes` (`kind: boxes`, 正解, `placement: file`, `items/{index:06d}/boxes.json` に `[{box: [x1, y1, x2, y2], class: 0}]` の並び, `formats: [json]`, `units: pixel`, `convention: {origin: top_left, axes: [x, y], box: xyxy, edges: pixel_corner}` (x が列で, 画像の `axes: [row, column]` と順が逆なので明示する), `classes`, `shape: [null, 4]` (箱の数は件ごとに違い, 物の無い画像は空の並び)). `role: predict`, `target.kind: boxes`. 今の欄だけで書ける. 今の読み込みは知らない `kind` の場所を返すので, 箱の読み方は書き出しと一緒に足す
-- **並べる (利用者 × 品)**: 1 件 = 見せた 1 回. 項目 `user` と `item` (`kind: id`, `placement: column`), `clicked` (`kind: value`, 正解, `column`. クリックの 0 か 1 を関連度と見なす), 要求をまとめる列 `query` (`kind: id`, `column`. 要求ごとに並べて測るため). `role: rank`, `target.kind: relevance`. 同じ要求の件が複数の分割に分かれると要求ごとの順位を測れないので, `query` か利用者をグループにし, 並べるで `random` の分割は誤りにする. 利用者と品の特徴は件の表に並べず別の表を引くので, 置き方 `lookup` (`table: users.parquet`, `key: user`) を足す. 分割は時刻で全体を切る (利用者ごとに最後を残すと他の人の未来が入る) か利用者で `group`. 時刻の列と `lookup` を足すときは版を上げるかを決める (`placement` を足しても, 今の読む側は知らない置き方で止まるので黙って読み違えない)
+- **検出 (物の箱)**: 項目 `image` (`file`, 入力) と `boxes` (`kind: boxes`, 正解, `placement: file`, `items/{index:06d}/boxes.json` に `[{box: [x1, y1, x2, y2], class: 0}]` の並び, `formats: [json]`, `units: pixel`, `convention: {origin: top_left, axes: [x, y], box: xyxy, edges: pixel_corner}` (x が列で, 画像の `axes: [row, column]` と順が逆なので明示する), `classes`, `shape: [null, 4]` (箱の数は件ごとに違い, 物の無い画像は空の並び)). `role: predict`, `target.kind: boxes`. 今の欄だけで書ける. 今の読み込みは知らない `kind` の場所を返す
+- **並べる (利用者 × 品)**: 1 件 = 見せた 1 回. 項目 `user` と `item` (`kind: id`, `placement: column`), `clicked` (`kind: value`, 正解, `column`. クリックの 0 か 1 を関連度と見なす), 要求をまとめる列 `query` (`kind: id`, `column`. 要求ごとに並べて測るため). `role: rank`, `target.kind: relevance`. 同じ要求の件が複数の分割に分かれると要求ごとの順位を測れないので, `query` か利用者をグループにし, 並べるで `random` の分割は誤りにする. 利用者と品の特徴は件の表に並べず別の表を引く置き方 `lookup` (`table: users.parquet`, `key: user`) が要る. 分割は時刻で全体を切る (利用者ごとに最後を残すと他の人の未来が入る) か利用者で `group`. 今の読む側は知らない置き方 (`placement`) で止まるので, 黙って読み違えない
 
 ## 安全
 
