@@ -10,7 +10,7 @@ import yaml
 from ml_eda import (
     capture_shift, export_capture_clouds, export_dataset,
     export_image_masks, load_data, load_dataset, load_items,
-    normalize_capture
+    normalize_capture, profile
 )
 from ml_eda.items import check_entry_names
 from ml_eda.media import read_cloud
@@ -554,3 +554,23 @@ def test_mask_suffix(tmp_path: Path) -> None:
     )
     assert info["splits"] == {"train": {"items": 4}}
     assert sorted(load_items(tmp_path / "ds").items["id"]) == made["names"]
+
+
+def test_profile_shape_captures(tmp_path: Path) -> None:
+    """
+    合成の撮影 (方位の隙間が浮動小数の誤差だけ違う) を分析できることを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    made = write_shape_captures(tmp_path / "raw")
+    result = profile(load_data(made["captures"], loader="capture"))
+    histogram = result["columns"]["view_gap"]["histogram"]
+    assert sum(histogram["counts"]) == 4

@@ -299,6 +299,33 @@ def test_preview_and_profile_odd_columns() -> None:
     assert set(result["columns"]) == {"0", "1", "1.1"}
 
 
+def test_profile_near_constant_column() -> None:
+    """
+    値の幅が浮動小数の誤差ほどしかない列のヒストグラムを求められることを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 45 と 45 + 1e-14 だけの列 (np.histogram は 20 個の幅を作れない)
+    values = np.array([45.0, 45.0 + 1e-14, 45.0, 45.0 + 1e-14])
+    result = profile(table(pd.DataFrame({"gap": values, "n": range(4)})))
+    histogram = result["columns"]["gap"]["histogram"]
+    assert sum(histogram["counts"]) == 4
+    assert histogram["edges"][0] == pytest.approx(44.5)
+    assert histogram["edges"][-1] == pytest.approx(45.5)
+
+    # 幅のある列は今までどおり最小から最大まで
+    result = profile(table(pd.DataFrame({"x": np.arange(10.0)})))
+    edges = result["columns"]["x"]["histogram"]["edges"]
+    assert (edges[0], edges[-1]) == (0.0, 9.0)
+
+
 def test_big_regular_timeseries() -> None:
     """
     見本を使う大きな時系列で, 間隔の抜けを誤って数えないことを確かめる
