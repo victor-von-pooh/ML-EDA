@@ -1,6 +1,6 @@
 # ML-EDA
 
-「機械学習を全て GUI 上で行う」うちの「データの分析」の段階のライブラリ. 画面のアプリ [ML-Fathom](https://github.com/victor-von-pooh/ML-Fathom) が使う.
+「機械学習を全て GUI 上で行う」うちの「データの分析」の段階のライブラリ. 機械学習に使うデータを読み込み, 分析し, 前処理して学習用に書き出す. 画面のアプリ [ML-Fathom](https://github.com/victor-von-pooh/ML-Fathom) が使う.
 
 ## できること
 
