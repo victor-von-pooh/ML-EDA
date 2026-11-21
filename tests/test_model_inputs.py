@@ -160,9 +160,15 @@ def test_model_inputs_items(tmp_path: Path) -> None:
     }
     export_dataset(data, recipe, tmp_path / "text")
     result = model_inputs(tmp_path / "text")
+    size = len(load_dataset(tmp_path / "text").recipe["item_steps"][0][
+        "state"]["vocabulary"])
     assert result["inputs"] == [
-        {"name": "x", "shape": [None, 6], "dtype": "int64"}
+        {"name": "x", "shape": [None, 6], "dtype": "int64",
+         "vocabulary": size}
     ]
+    # 語の番号は全て語彙の大きさより小さい (埋め込みの数にそのまま使える)
+    x, _ = load_dataset(tmp_path / "text").arrays("train")
+    assert 0 < int(x.max()) < size
     assert result["classes"] == ["neg", "pos"] and result["outputs"] == 2
 
     # 画像: (チャンネル, 高さ, 幅) の float32
