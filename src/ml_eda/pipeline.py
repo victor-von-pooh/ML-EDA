@@ -1804,6 +1804,40 @@ def item_input(root: Path, splits: dict) -> Optional[dict]:
     return result
 
 
+def text_vocabulary(root: Path, info: dict) -> Optional[int]:
+    """
+    文のデータセットの当てはめた語彙から, 語彙の大きさを求める関数
+
+    Parameters
+    ----------
+    root: Path
+        データセットのディレクトリ
+    info: dict
+        説明 (dataset.yaml)
+
+    Returns
+    ----------
+    size: Optional[int]
+        語彙の大きさ (語の番号の上限 + 1. <pad> と <unk> を含む). 文でない
+        か, 当てはめた vocabulary の手順が無い場合は None
+    """
+    # 当てはめたレシピの中身の手順の最後の vocabulary
+    size: Optional[int] = None
+    if info.get("kind") != "text":
+        return size
+    recipe = yaml.safe_load(
+        (root / info.get("recipe", "recipe.yaml")).read_text(encoding="utf-8")
+    ) or {}
+    for step in recipe.get("item_steps") or []:
+        if not isinstance(step, dict) or step.get("op") != "vocabulary":
+            continue
+        state = step.get("state") or {}
+        if state.get("vocabulary"):
+            size = len(state["vocabulary"])
+
+    return size
+
+
 def model_outputs(task: Optional[str], classes: list) -> Optional[int]:
     """
     モデルが 1 件に出す値の数を, タスクから求める関数
@@ -1997,8 +2031,9 @@ def model_inputs(path: Union[str, Path]) -> dict:
     Returns
     ----------
     result: dict
-        inputs ({name, shape, dtype} の並び), task, target, classes,
-        target_kind, outputs の JSON にできる辞書
+        inputs ({name, shape, dtype} の並び. 文の語の番号の入力は語彙の
+        大きさ vocabulary も), task, target, classes, target_kind, outputs
+        の JSON にできる辞書
 
     Raises
     ----------
@@ -2006,7 +2041,8 @@ def model_inputs(path: Union[str, Path]) -> dict:
         知らない版のデータセットと, 版 2 と 3 (ファイルの組) で入力と
         正解の種類の組を知らない場合
     FileNotFoundError
-        dataset.yaml が無い場合
+        dataset.yaml が無い場合と, 文のデータセットで書き出したレシピが
+        無い場合
     """
     # 説明と版の確認 (分割のデータは読まない. ファイルの組は説明だけ)
     root = Path(path).expanduser()
@@ -2023,6 +2059,11 @@ def model_inputs(path: Union[str, Path]) -> dict:
 
     # 入力 (画像などは中身の配列, 表は学習に使う列を並べた 1 つ)
     single = item_input(root, info.get("splits") or {})
+    if single is not None:
+        # 文の語の番号は, 埋め込みに要る語彙の大きさも (書き出したレシピから)
+        vocabulary = text_vocabulary(root, info)
+        if vocabulary is not None:
+            single["vocabulary"] = vocabulary
     if single is None:
         single = {
             "name": MODEL_INPUT,

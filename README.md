@@ -108,7 +108,7 @@ dataset.transform(new_frame)                    # 新しいデータに同じ前
 
 ML-Found の学習スクリプトでは, `TensorDataset(*dataset.tensors("train"))` を `DataLoader` に渡す. 入力の次元は `len(dataset.features)`, 分類のクラスの数は `len(dataset.info["classes"])`.
 
-モデルに要るもの (入力の形と型, 出す値の数) は, 分割のデータを読まずに `model_inputs` で分かる.
+モデルに要るもの (入力の形と型, 出す値の数. 文なら語彙の大きさ `vocabulary` も) は, 分割のデータを読まずに `model_inputs` で分かる.
 
 ```python
 from ml_eda import model_inputs
