@@ -160,8 +160,8 @@ def test_model_inputs_items(tmp_path: Path) -> None:
     }
     export_dataset(data, recipe, tmp_path / "text")
     result = model_inputs(tmp_path / "text")
-    size = len(load_dataset(tmp_path / "text").recipe["item_steps"][0][
-        "state"]["vocabulary"])
+    steps = load_dataset(tmp_path / "text").recipe["item_steps"]
+    size = len(steps[0]["state"]["vocabulary"])
     assert result["inputs"] == [
         {"name": "x", "shape": [None, 6], "dtype": "int64",
          "vocabulary": size}
@@ -348,3 +348,40 @@ def test_model_inputs_capture_clouds(tmp_path: Path) -> None:
     result = model_inputs(tmp_path / "v3")
     assert result["inputs"][0]["shape"] == [None, 512, 3]
     assert result["outputs"] == 64
+
+
+def test_model_inputs_subword(tmp_path: Path) -> None:
+    """
+    部分語の区切りでも, 語彙の大きさが区切りの語彙の大きさと同じで, 語の
+    番号が全てそれより小さいことを確かめる関数 (tokenizers が無ければ飛ばす)
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 部分語 (BPE) の語彙で書き出す
+    tokenizers = pytest.importorskip("tokenizers")
+    for label, words in (("pos", "good great nice"), ("neg", "bad awful")):
+        (tmp_path / "reviews" / label).mkdir(parents=True)
+        for index in range(6):
+            (tmp_path / "reviews" / label / f"{index}.txt").write_text(
+                f"this is {words} {index} <pad>", encoding="utf-8"
+            )
+    recipe = {
+        "target": "label", "task": "classification",
+        "item_steps": [{"op": "vocabulary", "unit": "subword",
+                        "max_tokens": 40, "length": 8}],
+        "split": {"method": "stratified", "valid": 0.25},
+    }
+    export_dataset(load_data(tmp_path / "reviews"), recipe, tmp_path / "sub")
+    size = model_inputs(tmp_path / "sub")["inputs"][0]["vocabulary"]
+    state = load_dataset(tmp_path / "sub").recipe["item_steps"][0]["state"]
+    tokenizer = tokenizers.Tokenizer.from_str(state["tokenizer"])
+    assert size == tokenizer.get_vocab_size()
+    x, _ = load_dataset(tmp_path / "sub").arrays("train")
+    assert 0 <= int(x.min()) and int(x.max()) < size

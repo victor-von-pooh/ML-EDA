@@ -2041,7 +2041,8 @@ def model_inputs(path: Union[str, Path]) -> dict:
         知らない版のデータセットと, 版 2 と 3 (ファイルの組) で入力と
         正解の種類の組を知らない場合
     FileNotFoundError
-        dataset.yaml が無い場合
+        dataset.yaml が無い場合と, 文のデータセットで書き出したレシピが
+        無い場合
     """
     # 説明と版の確認 (分割のデータは読まない. ファイルの組は説明だけ)
     root = Path(path).expanduser()
@@ -2058,11 +2059,11 @@ def model_inputs(path: Union[str, Path]) -> dict:
 
     # 入力 (画像などは中身の配列, 表は学習に使う列を並べた 1 つ)
     single = item_input(root, info.get("splits") or {})
-    vocabulary = (
-        text_vocabulary(root, info) if single is not None else None
-    )
-    if vocabulary is not None:
-        single["vocabulary"] = vocabulary
+    if single is not None:
+        # 文の語の番号は, 埋め込みに要る語彙の大きさも (書き出したレシピから)
+        vocabulary = text_vocabulary(root, info)
+        if vocabulary is not None:
+            single["vocabulary"] = vocabulary
     if single is None:
         single = {
             "name": MODEL_INPUT,

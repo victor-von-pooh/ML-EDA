@@ -242,7 +242,7 @@ split:
 
 | 鍵 | 中身 |
 | --- | --- |
-| `inputs` | 入力の並び. 1 つは `{name, shape, dtype}`. 版 1 の入力は `tensors` の特徴量 1 つだけで, 名前は `x`. 形はバッチの次元を `null` にした形 (表と時系列は `[null, 学習に使う列の数]` で `float32`. 画像, 文, 点群は中身の配列の形と型. 例: 画像は `[null, 3, 64, 64]` の `float32`, 文の語の番号は `[null, 128]` の `int64`. 文の語の番号の入力は, 当てはめた `vocabulary` の手順の語彙の大きさ (`<pad>` と `<unk>` を含む語彙の数. 語の番号の上限 + 1) を `vocabulary` に持つ. モデルの埋め込み (`nn.Embedding` の `num_embeddings`) にそのまま使えるように, 書き出したレシピを読まずに分かるようにするため) |
+| `inputs` | 入力の並び. 1 つは `{name, shape, dtype}`. 版 1 の入力は `tensors` の特徴量 1 つだけで, 名前は `x`. 形はバッチの次元を `null` にした形 (表と時系列は `[null, 学習に使う列の数]` で `float32`. 画像, 文, 点群は中身の配列の形と型. 例: 画像は `[null, 3, 64, 64]` の `float32`, 文の語の番号は `[null, 128]` の `int64`). 文の語の番号の入力は, 書き出したレシピの最後の `vocabulary` の手順の語彙の大きさ (`<pad>` と `<unk>` を含む語彙の数. 語の番号の上限 + 1) を `vocabulary` に持つ (モデルの埋め込み (`nn.Embedding` の `num_embeddings`) にそのまま使えるように. 文のデータセットだけはレシピも読む) |
 | `task` | タスク (`classification`, `regression`, `forecasting`). 決めていない (`none`) 場合は `null` |
 | `target` | 目的の列 (無ければ `null`) |
 | `classes` | 分類のクラス (番号の順. クラスが無ければ空の並び). 分類でなければ `null` |
