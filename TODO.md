@@ -13,7 +13,11 @@
 
 ## 優先度 低
 
-無し
+### 1 件の音声の先頭の秒だけを読む口
+- 何を: `Data.load_item` で, 音声は先頭の秒だけを読めるようにする (`load_item(index, seconds=None)` など). あわせて, 中身を別に持つ種類の `source` の欄 (`root` など) のうち, 画面が頼ってよいものを docs/DESIGN.md に決める
+- なぜ: ML-Fathom は長い録音の先頭だけを再生するために, `load_item` を通さず `read_audio` を直接呼び, 文書に無い `source` の `root` から場所を組み立てているため
+- 終わりの条件: `load_item` で音声の先頭の秒だけを読め, テストがある. `source` の欄の約束が DESIGN.md にある
+- つながり: ML-Fathom (音声の再生と波形)
 
 ## 条件待ち
 
