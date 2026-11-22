@@ -75,7 +75,7 @@ def find_captures(path: Path) -> list[Path]:
     return captures
 
 
-def sniff_capture(path: Path) -> float:
+def sniff_capture(path: Path, follow_links: Any = False) -> float:
     """
     多視点の撮影として読めるかの確からしさを返す関数
 
@@ -83,6 +83,9 @@ def sniff_capture(path: Path) -> float:
     ----------
     path: Path
         場所
+    follow_links: Any = False
+        読み込みの設定 follow_links (真なら外を指すリンクの先の
+        transforms.json も読む. 画面からの文字も読む)
 
     Returns
     ----------
@@ -92,9 +95,12 @@ def sniff_capture(path: Path) -> float:
     """
     # 先頭の数件のどれかが frames を持てば撮影
     score = 0.0
+    base = None if option_flag(
+        {"follow_links": follow_links}, "follow_links", False
+    ) else path
     for capture in find_captures(path)[:SNIFF_CAPTURES]:
         try:
-            transforms = read_transforms(capture, path)
+            transforms = read_transforms(capture, base)
         except (OSError, ValueError):
             continue
         if transforms["frames"]:
@@ -1011,7 +1017,8 @@ def register_capture() -> None:
         {"min_confidence": "信頼できる深度とする信頼度 (0 から 255. 既定 128)",
          "follow_links": FOLLOW_LINKS_HELP},
         "多視点の撮影 (transforms.json を持つディレクトリか, それを並べた"
-        "ディレクトリ. 深度を読むには Pillow が要る)"
+        "ディレクトリ. 深度を読むには Pillow が要る)",
+        sniff_options=("follow_links",)
     ))
 
 

@@ -23,7 +23,7 @@ UNITS = (
     "cm", "mm", "m", "mL", "ml", "L"
 )
 
-# 設定 follow_links の説明 (画像, 点群, 撮影, 音声の読み込み)
+# 設定 follow_links の説明 (画像, 文, 点群, 撮影, 音声の読み込み)
 FOLLOW_LINKS_HELP = (
     "読み込んだディレクトリの外を指すシンボリックリンクの先を読むか (既定 "
     "false. false では読めない件として理由を残す. 読み込んだディレクトリ"
@@ -51,13 +51,15 @@ class Loader:
     # 扱う拡張子 (小文字, 点付き)
     extensions: tuple
     # 読めるかの確からしさ (0 から 1) を返す関数
-    sniff: Callable[[Path], float]
+    sniff: Callable[..., float]
     # Data を返す関数
     load: Callable[..., Data]
     # 読み込みの設定の説明 (設定の名前から説明)
     options: dict = field(default_factory=dict)
     # 説明
     description: str = ""
+    # 確からしさを返す関数にも渡す読み込みの設定の名前
+    sniff_options: tuple = ()
 
 
 # 読み込みの登録簿
@@ -192,7 +194,7 @@ def outside_message(name: str, hint: str = OPTION_HINT) -> str:
     # follow_links で読めることを添える
     message = (
         f"{name} は読み込んだディレクトリの外を指すリンクなので読みません "
-        f"(読むには{hint}にしてください)"
+        f"(読むには {hint} にしてください)"
     )
 
     return message
@@ -232,7 +234,7 @@ def check_inside(
     return path
 
 
-def detect(path: Union[str, Path]) -> list[dict]:
+def detect(path: Union[str, Path], **options: Any) -> list[dict]:
     """
     場所を読めそうな読み込みを, 確からしい順に返す関数
 
@@ -240,6 +242,9 @@ def detect(path: Union[str, Path]) -> list[dict]:
     ----------
     path: Union[str, Path]
         ファイルかディレクトリ
+    **options: Any
+        読み込みの設定 (各読み込みの sniff_options にある名前だけを渡す.
+        撮影の follow_links など)
 
     Returns
     ----------
@@ -258,7 +263,9 @@ def detect(path: Union[str, Path]) -> list[dict]:
     candidates = []
     for loader in LOADERS.values():
         try:
-            score = float(loader.sniff(target))
+            given = {key: options[key] for key in loader.sniff_options
+                     if key in options}
+            score = float(loader.sniff(target, **given))
         except Exception:
             score = 0.0
         if score > 0:
@@ -298,7 +305,7 @@ def load_data(
     # 読み込みの選択
     target = Path(path).expanduser()
     if loader is None:
-        candidates = detect(target)
+        candidates = detect(target, **options)
         if not candidates:
             raise ValueError(
                 f"{target.name} を読める読み込みがありません (対応する形式: "

@@ -374,6 +374,36 @@ def sniff_text(path: Path) -> float:
     return score
 
 
+def text_item(frame: pd.DataFrame, index: int) -> str:
+    """
+    1 件の文を返す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        文の表
+    index: int
+        件の位置
+
+    Returns
+    ----------
+    text: str
+        文
+
+    Raises
+    ----------
+    ValueError
+        外を指すリンクで読まなかった件の場合
+    """
+    # 読まなかった件は理由付きの誤り
+    error = frame["error"].iloc[index] if "error" in frame.columns else None
+    if isinstance(error, str):
+        raise ValueError(error)
+    text = frame["text"].iloc[index]
+
+    return text
+
+
 def load_text(path: Path, **options: Any) -> Data:
     """
     文を読み込む関数 (1 行 1 文のファイルか, <クラス>/<文>.txt)
@@ -383,26 +413,38 @@ def load_text(path: Path, **options: Any) -> Data:
     path: Path
         ファイルかディレクトリ
     **options: Any
-        encoding (文字コード, 既定 utf-8)
+        encoding (文字コード, 既定 utf-8), follow_links (既定 False. True
+        なら外を指すリンクの先も読む)
 
     Returns
     ----------
     data: Data
-        1 行が 1 つの文のデータ (text, label, length, words)
+        1 行が 1 つの文のデータ (text, label, length, words. 外を指す
+        リンクの件は文が欠損で, error に理由)
     """
     # ディレクトリはファイルごとに 1 つの文, ファイルは 1 行ごとに 1 つの文.
-    # 文字コードは指定が無ければファイルごとに推定
+    # 文字コードは指定が無ければファイルごとに推定. 外を指すリンクは読まずに
+    # 理由を残す
     encoding = options.get("encoding")
+    base = link_base(path.absolute(), options)
     rows = []
     if path.is_dir():
         files = list_files(path, (".txt",))
         labels = labels_of(path, files)
         for index, file in enumerate(files):
+            name = file.relative_to(path).as_posix()
+            if base is not None and points_outside(base, file):
+                row = {"text": None, "file": name,
+                       "error": outside_message(name)}
+                if labels:
+                    row["label"] = labels[index]
+                rows.append(row)
+                continue
             raw = file.read_bytes()[:MAX_TEXT_BYTES]
             text = raw.decode(
                 encoding or guess_encoding(raw), errors="replace"
             )
-            row = {"text": text, "file": file.relative_to(path).as_posix()}
+            row = {"text": text, "file": name}
             if labels:
                 row["label"] = labels[index]
             rows.append(row)
@@ -418,15 +460,17 @@ def load_text(path: Path, **options: Any) -> Data:
         raise ValueError(f"{path.name} に文がありません")
     frame = pd.DataFrame(rows)
 
-    # 文の長さと語の数 (分析と絞り込みのため)
+    # 文の長さと語の数 (分析と絞り込みのため. 読まなかった件は欠損)
     frame["length"] = frame["text"].str.len()
-    frame["words"] = frame["text"].str.split().map(len)
+    frame["words"] = frame["text"].str.split().map(
+        lambda words: len(words) if isinstance(words, list) else None
+    )
     roles = {"text": "text"}
     if "label" in frame.columns:
         roles["label"] = "label"
     data = Data(
         kind="text", frame=frame, roles=roles,
-        item_loader=lambda i: frame["text"].iloc[i]
+        item_loader=partial(text_item, frame)
     )
 
     return data
@@ -963,6 +1007,12 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
                 ),
                 "columns": ["invalid_points"],
             })
+    elif data.kind == "text":
+        # 外を指すリンクで読まなかった件
+        unreadable = int(frame["error"].notna().sum()) if (
+            "error" in frame.columns
+        ) else 0
+        result["unreadable"] = unreadable
     else:
         unreadable = 0
     if unreadable:
@@ -974,7 +1024,10 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
     if data.kind == "text":
         # 同じ文 (分割をまたぐと検証が甘くなる) と空の文
         text = data.roles.get("text", "text")
-        values = frame[text].fillna("").astype(str).str.strip()
+        read = frame[frame["error"].isna()] if (
+            "error" in frame.columns
+        ) else frame
+        values = read[text].fillna("").astype(str).str.strip()
         empty = int((values == "").sum())
         repeated = int(values[values != ""].duplicated().sum())
         result["empty"] = empty
@@ -1034,7 +1087,8 @@ def register_collections() -> None:
     ))
     register_loader(Loader(
         "text_lines", "text", (".txt",), sniff_text, load_text,
-        {"encoding": "文字コード (既定 utf-8)"},
+        {"encoding": "文字コード (既定 utf-8)",
+         "follow_links": FOLLOW_LINKS_HELP},
         "文 (1 行 1 文の .txt か, <クラス>/<文>.txt のディレクトリ)"
     ))
     register_loader(Loader(
