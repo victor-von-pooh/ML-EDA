@@ -13,7 +13,11 @@
 
 ## 優先度 低
 
-無し
+### 1 件の音声の先頭の秒だけを読む口
+- 何を: `Data.load_item` に `seconds` の引数を足し, 音声は先頭の秒だけを読む (`read_audio(path, seconds)` に渡す). 音声以外の種類に `seconds` を渡すと理由付きの `ValueError` にする. docs/DESIGN.md の `load_item` の説明を直す
+- なぜ: 長い録音の先頭だけを見たい画面 (ML-Fathom の再生と波形) が, `load_item` を通さず `read_audio` を直接呼び, 文書に無い `source` の `root` から場所を組み立てることになるため
+- 終わりの条件: `seconds=None` は今と同じく全部を読み, ファイルより長い秒は全部を返し, 返す辞書が `read_audio` と同じ. 0 と負の秒の扱いが決まっている. 音声以外に渡すと誤り. テストがある
+- つながり: ML-Fathom (音声の再生と波形を `load_item` で読むように直す)
 
 ## 条件待ち
 
