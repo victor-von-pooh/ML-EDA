@@ -17,7 +17,7 @@ from ml_eda.itemprep import (
     apply_steps, check_entry_steps, mask_steps, nearest
 )
 from ml_eda.loaders import (
-    ARGUMENT_HINT, load_data, outside_message, points_outside
+    ARGUMENT_HINT, load_data, option_flag, outside_message, points_outside
 )
 from ml_eda.media import (
     IMAGE_EXTENSIONS, POINT_EXTENSIONS, image_header, list_files,
@@ -301,6 +301,73 @@ def split_items(
                 "グループを細かくするか割合を上げてください"
             )
     result = ([str(label) for label in labels], conf, notes)
+
+    return result
+
+
+def links_followed(follow_links: Any) -> bool:
+    """
+    引数 follow_links を真偽にする関数
+
+    Parameters
+    ----------
+    follow_links: Any
+        引数の値 (画面からの文字の "false" や "0" も読む)
+
+    Returns
+    ----------
+    followed: bool
+        外を指すリンクの先も読むか
+
+    Raises
+    ----------
+    ValueError
+        知らない文字の場合
+    """
+    # 読み込みの設定と同じ読み方 (文字の "false" を真にしない)
+    followed = option_flag(
+        {"follow_links": follow_links}, "follow_links", False
+    )
+
+    return followed
+
+
+def drop_outside(
+    files: list[Path], base: Path, label: str, follow_links: bool
+) -> tuple[list[Path], list[str]]:
+    """
+    読み込んだディレクトリの外を指すリンクのファイルを除く関数
+
+    Parameters
+    ----------
+    files: list[Path]
+        ファイル
+    base: Path
+        読み込んだディレクトリ (それ自体のリンクもたどって比べる)
+    label: str
+        注意に使う, ファイルの呼び名
+    follow_links: bool
+        外を指すリンクの先も読むか (True なら除かない)
+
+    Returns
+    ----------
+    result: tuple[list[Path], list[str]]
+        残したファイルと, 除いたものの注意
+    """
+    # たどった後の場所で比べる. 除いた件は数と例と, 読む案内を注意に
+    notes: list[str] = []
+    if links_followed(follow_links):
+        result = (files, notes)
+        return result
+    outside = [file for file in files if points_outside(base, file)]
+    if outside:
+        names = [file.relative_to(base).as_posix() for file in outside]
+        notes.append(
+            f"{label}のディレクトリの外を指すリンクが {len(outside)} 件あり, "
+            f"除きました (例: {', '.join(names[:EXAMPLES])}. 読むには "
+            f"{ARGUMENT_HINT} にしてください)"
+        )
+    result = ([file for file in files if file not in outside], notes)
 
     return result
 
@@ -836,7 +903,7 @@ def export_image_masks(
     groups: Optional[dict] = None, classes: Any = None,
     origin: Optional[dict] = None, name: Optional[str] = None,
     overwrite: bool = False, mask_suffix: str = "",
-    item_steps: Optional[dict] = None
+    item_steps: Optional[dict] = None, follow_links: bool = False
 ) -> dict:
     """
     画像と領域の対を, 版 2 のデータセットに書き出す関数
@@ -870,6 +937,9 @@ def export_image_masks(
         項目 image にかける中身の手順 ({"image": [{"op": "resize", ...}]}.
         resize, grayscale, rgb). 領域には画像の resize と同じ大きさの
         resize_mask をかける. 渡すと版 3 で書く
+    follow_links: bool = False
+        画像と領域のディレクトリの外を指すリンクの先も写すか (False では
+        除いて notes に書く)
 
     Returns
     ----------
@@ -900,13 +970,20 @@ def export_image_masks(
     for place in (image_dir, mask_dir):
         if not place.is_dir():
             raise ValueError(f"{place} はディレクトリではありません")
+    image_files, image_notes = drop_outside(
+        list_files(image_dir, IMAGE_EXTENSIONS), image_dir, "画像",
+        follow_links
+    )
+    mask_files, mask_notes = drop_outside(
+        list_files(mask_dir, IMAGE_EXTENSIONS), mask_dir, "領域",
+        follow_links
+    )
     pairs, notes = pair_files(
-        index_by_stem(list_files(image_dir, IMAGE_EXTENSIONS), "画像"),
-        index_by_stem(
-            list_files(mask_dir, IMAGE_EXTENSIONS), "領域", mask_suffix
-        ),
+        index_by_stem(image_files, "画像"),
+        index_by_stem(mask_files, "領域", mask_suffix),
         ("画像", "領域"), unlabeled_mode(split)
     )
+    notes = image_notes + mask_notes + notes
     alone = [(stem, image) for stem, image, mask in pairs if mask is None]
     pairs = [pair for pair in pairs if pair[2] is not None]
     if not pairs:
@@ -1149,7 +1226,9 @@ def read_pair(target: Path, row: dict) -> dict:
     return check
 
 
-def kept_frames(source: Path, transforms: dict) -> tuple[list[dict], int]:
+def kept_frames(
+    source: Path, transforms: dict, base: Optional[Path] = None
+) -> tuple[list[dict], int]:
     """
     撮影の枚のうち, 画像のある枚を選ぶ関数
 
@@ -1159,6 +1238,9 @@ def kept_frames(source: Path, transforms: dict) -> tuple[list[dict], int]:
         撮影のディレクトリ
     transforms: dict
         transforms.json の中身
+    base: Optional[Path] = None
+        外かを比べるディレクトリ (リンクをたどった後にこの外を指す画像の
+        枚は除く. None ならリンクの先をたどる)
 
     Returns
     ----------
@@ -1172,7 +1254,7 @@ def kept_frames(source: Path, transforms: dict) -> tuple[list[dict], int]:
     """
     # 画像が撮影の中にある枚だけ
     frames = [dict(entry) for entry in transforms["frames"]
-              if inside(source, entry.get("file_path")) is not None]
+              if inside(source, entry.get("file_path"), base) is not None]
     if not frames:
         raise ValueError(f"{source.name} の撮影に画像のある枚がありません")
     result = (frames, len(transforms["frames"]) - len(frames))
@@ -1218,7 +1300,10 @@ def frames_shift(frames: list[dict], label: str) -> np.ndarray:
     return shift
 
 
-def capture_shift(capture: Union[str, Path]) -> np.ndarray:
+def capture_shift(
+    capture: Union[str, Path], follow_links: bool = False,
+    base: Optional[Path] = None
+) -> np.ndarray:
     """
     撮影の正規化の平行移動 (書き出しと同じ決まり) を求める関数
 
@@ -1229,6 +1314,12 @@ def capture_shift(capture: Union[str, Path]) -> np.ndarray:
     ----------
     capture: Union[str, Path]
         撮影のディレクトリ (transforms.json を持つ)
+    follow_links: bool = False
+        リンクをたどった後に外を指すファイルも読むか (False では無い
+        ものとし, transforms.json が外なら誤り)
+    base: Optional[Path] = None
+        外かを比べるディレクトリ (既定は撮影のディレクトリ.
+        export_capture_clouds は渡した撮影の場所を渡す)
 
     Returns
     ----------
@@ -1238,19 +1329,52 @@ def capture_shift(capture: Union[str, Path]) -> np.ndarray:
     Raises
     ----------
     ValueError
-        画像のある枚が無い場合と, その枚に姿勢が無い場合
+        画像のある枚が無い場合, その枚に姿勢が無い場合と, transforms.json
+        が外を指すリンクの場合
     """
     # 画像のある枚の姿勢だけから (書き出しで残す枚と同じ)
     source = Path(capture).expanduser()
-    frames, _ = kept_frames(source, read_transforms(source))
+    limit = link_limit(source, follow_links, base)
+    frames, _ = kept_frames(
+        source, read_transforms(source, limit, ARGUMENT_HINT), limit
+    )
     shift = frames_shift(frames, source.name)
 
     return shift
 
 
+def link_limit(
+    source: Path, follow_links: bool, base: Optional[Path]
+) -> Optional[Path]:
+    """
+    撮影の外を指すリンクを比べるディレクトリを返す関数
+
+    Parameters
+    ----------
+    source: Path
+        撮影のディレクトリ
+    follow_links: bool
+        外を指すリンクの先も読むか
+    base: Optional[Path]
+        外かを比べるディレクトリ (None なら撮影のディレクトリ)
+
+    Returns
+    ----------
+    limit: Optional[Path]
+        比べるディレクトリ (たどるなら None)
+    """
+    # read_capture と同じ決まり
+    limit = None if links_followed(follow_links) else (
+        source if base is None else base
+    )
+
+    return limit
+
+
 def normalize_capture(
     capture: Union[str, Path], target: Union[str, Path],
-    steps: Optional[list] = None
+    steps: Optional[list] = None, follow_links: bool = False,
+    base: Optional[Path] = None
 ) -> dict:
     """
     撮影を写し, 姿勢と撮影が持つ点群に正規化の平行移動をかける関数
@@ -1268,6 +1392,12 @@ def normalize_capture(
         各枚の画像にかける中身の手順 (版 3 のデータセットの撮影の項目の
         steps. resize, grayscale, rgb). resize では深度と信頼度と内部
         パラメータも同じ倍率に直す
+    follow_links: bool = False
+        リンクをたどった後に外を指すファイルも読むか (False では無い
+        ものとし, transforms.json が外なら誤り)
+    base: Optional[Path] = None
+        外かを比べるディレクトリ (既定は撮影のディレクトリ.
+        export_capture_clouds は渡した撮影の場所を渡す)
 
     Returns
     ----------
@@ -1278,28 +1408,31 @@ def normalize_capture(
     Raises
     ----------
     ValueError
-        画像のある枚が無い場合, その枚に姿勢が無い場合, 中身の手順の誤り
-        と, 手順をかける撮影の画像の大きさがそろわない場合
+        画像のある枚が無い場合, その枚に姿勢が無い場合, 中身の手順の
+        誤り, 手順をかける撮影の画像の大きさがそろわない場合と,
+        transforms.json が外を指すリンクの場合
     """
     # 画像のある枚だけを残し, その姿勢から平行移動を決める
     checked = check_entry_steps(steps or [], "capture")
     source = Path(capture).expanduser()
     target = Path(target).expanduser()
-    transforms = read_transforms(source)
-    frames, dropped = kept_frames(source, transforms)
+    limit = link_limit(source, follow_links, base)
+    transforms = read_transforms(source, limit, ARGUMENT_HINT)
+    frames, dropped = kept_frames(source, transforms, limit)
     shift = frames_shift(frames, source.name)
     notes = []
     if dropped:
         notes.append(
-            f"{source.name} の撮影の, 画像の無い {dropped} 枚を除きました"
+            f"{source.name} の撮影の, 画像の無い (か外を指すリンクの) "
+            f"{dropped} 枚を除きました"
         )
 
-    # 各ファイルを同じ相対の場所に写す. 撮影の外を指す場所と無いファイル
-    # の欄は除く
+    # 各ファイルを同じ相対の場所に写す. 撮影の外を指す場所 (リンクを
+    # たどった後に外のものも) と無いファイルの欄は除く
     target.mkdir(parents=True)
     for entry in frames:
         for key in FRAME_FILES:
-            place = inside(source, entry.get(key))
+            place = inside(source, entry.get(key), limit)
             if place is None:
                 entry.pop(key, None)
                 continue
@@ -1317,7 +1450,7 @@ def normalize_capture(
               if key not in ("frames", "point_cloud")}
     copied["frames"] = frames
     notes += copy_capture_cloud(
-        source, target, transforms.get("point_cloud"), shift, copied
+        source, target, transforms.get("point_cloud"), shift, copied, limit
     )
 
     # 中身の手順 (各枚の画像と, 大きさに合わせて深度と内部パラメータ)
@@ -1531,7 +1664,7 @@ def scale_intrinsics(holder: dict, transforms: dict, sizes: tuple) -> None:
 
 def copy_capture_cloud(
     source: Path, target: Path, described: Any, shift: np.ndarray,
-    copied: dict
+    copied: dict, base: Optional[Path] = None
 ) -> list[str]:
     """
     撮影が持つ点群に平行移動をかけて写す関数
@@ -1548,6 +1681,8 @@ def copy_capture_cloud(
         世界の座標に足す量
     copied: dict
         写す transforms.json (写せたら point_cloud を入れる)
+    base: Optional[Path] = None
+        外かを比べるディレクトリ (None ならリンクの先をたどる)
 
     Returns
     ----------
@@ -1558,11 +1693,11 @@ def copy_capture_cloud(
     notes: list[str] = []
     if not isinstance(described, dict) or not described.get("file_path"):
         return notes
-    cloud = inside(source, described.get("file_path"))
+    cloud = inside(source, described.get("file_path"), base)
     if cloud is None:
         notes.append(
             f"{source.name} の撮影の点群 ({described.get('file_path')}) が"
-            "無いか撮影の外を指すので, 除きました"
+            "無いか撮影の外を指す (リンクの先が外のものも) ので, 除きました"
         )
         return notes
 
@@ -1580,7 +1715,9 @@ def copy_capture_cloud(
     return notes
 
 
-def find_clouds(path: Path) -> dict[str, Path]:
+def find_clouds(
+    path: Path, follow_links: bool = False
+) -> tuple[dict[str, Path], list[str]]:
     """
     点群のファイルを stem で引けるようにする関数
 
@@ -1590,11 +1727,13 @@ def find_clouds(path: Path) -> dict[str, Path]:
     ----------
     path: Path
         点群のディレクトリ
+    follow_links: bool = False
+        点群のディレクトリの外を指すリンクの先も読むか (False では除く)
 
     Returns
     ----------
-    clouds: dict[str, Path]
-        stem から点群のファイル
+    result: tuple[dict[str, Path], list[str]]
+        stem から点群のファイルと, 外を指すリンクを除いた注意
 
     Raises
     ----------
@@ -1609,13 +1748,15 @@ def find_clouds(path: Path) -> dict[str, Path]:
         if child.is_file() and not child.name.startswith(".")
         and child.suffix.lower() in POINT_EXTENSIONS
     )
-    clouds = index_by_stem(files, "点群")
+    files, notes = drop_outside(files, path, "点群", follow_links)
+    result = (index_by_stem(files, "点群"), notes)
 
-    return clouds
+    return result
 
 
 def capture_pairs(
-    captures: Union[str, Path], clouds: Union[str, Path], keep: bool = False
+    captures: Union[str, Path], clouds: Union[str, Path], keep: bool = False,
+    follow_links: bool = False
 ) -> tuple[Any, list[tuple[str, int, Optional[Path]]], list[str]]:
     """
     撮影と点群を, 撮影のディレクトリの名前と点群の stem で組にする関数
@@ -1628,6 +1769,9 @@ def capture_pairs(
         点群のディレクトリ
     keep: bool = False
         点群の無い撮影を, 点群を None にして組の後ろに足すか
+    follow_links: bool = False
+        撮影と点群のディレクトリの外を指すリンクの先も読むか (False では
+        外を指す撮影は読めない撮影, 点群は除いて注意に)
 
     Returns
     ----------
@@ -1639,8 +1783,11 @@ def capture_pairs(
     ValueError
         撮影が無い場合と, 同じ stem の点群が 2 つある場合
     """
-    # 読めない撮影は除いて注意に
-    data = load_data(Path(captures).expanduser(), loader="capture")
+    # 読めない撮影 (外を指すリンクも) は除いて注意に
+    data = load_data(
+        Path(captures).expanduser(), loader="capture",
+        follow_links=follow_links
+    )
     named: dict[str, Path] = {}
     positions: dict[str, int] = {}
     unreadable = []
@@ -1653,10 +1800,11 @@ def capture_pairs(
             continue
         named[stem] = Path(str(place))
         positions[stem] = position
-    pairs, notes = pair_files(
-        named, find_clouds(Path(clouds).expanduser()), ("撮影", "点群"),
-        keep
+    cloud_files, cloud_notes = find_clouds(
+        Path(clouds).expanduser(), follow_links
     )
+    pairs, notes = pair_files(named, cloud_files, ("撮影", "点群"), keep)
+    notes = cloud_notes + notes
     if data.source.get("capped"):
         notes.insert(0, "撮影が上限を超えたので, 先頭だけを読みました")
     if unreadable:
@@ -1677,7 +1825,8 @@ def export_capture_clouds(
     path: Union[str, Path], split: Optional[dict] = None,
     groups: Optional[dict] = None, origin: Optional[dict] = None,
     cloud_units: str = "meter", name: Optional[str] = None,
-    overwrite: bool = False, item_steps: Optional[dict] = None
+    overwrite: bool = False, item_steps: Optional[dict] = None,
+    follow_links: bool = False
 ) -> dict:
     """
     多視点の撮影と正解の点群の対を, 版 2 のデータセットに書き出す関数
@@ -1710,6 +1859,9 @@ def export_capture_clouds(
     item_steps: Optional[dict] = None
         項目にかける中身の手順 (capture は各枚の画像に resize, grayscale,
         rgb. cloud は sample_points). 渡すと版 3 で書く
+    follow_links: bool = False
+        撮影 (中の各枚と点群も) と点群のディレクトリの外を指すリンクの先も
+        写すか (False では外を指す撮影, 枚, 点群を除いて notes に書く)
 
     Returns
     ----------
@@ -1732,8 +1884,9 @@ def export_capture_clouds(
         )
     scale = CLOUD_UNITS[cloud_units]
     data, pairs, notes = capture_pairs(
-        captures, clouds, unlabeled_mode(split)
+        captures, clouds, unlabeled_mode(split), follow_links
     )
+    base = Path(captures).expanduser().absolute()
     alone = [pair for pair in pairs if pair[2] is None]
     pairs = [pair for pair in pairs if pair[2] is not None]
     if not pairs:
@@ -1755,7 +1908,7 @@ def export_capture_clouds(
             place = item_dir(index)
             summary = normalize_capture(
                 data.load_item(position)["path"], target / place / "capture",
-                steps.get("capture")
+                steps.get("capture"), follow_links, base
             )
             shift = summary["shift"]
             notes += summary["notes"]

@@ -3,14 +3,18 @@ import wave
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from ml_eda import (
-    describe_loaders, export_image_masks, load_data, load_items, profile,
+    capture_shift, describe_loaders, detect, export_capture_clouds,
+    export_image_masks, load_data, load_items, normalize_capture, profile,
     read_capture
 )
 from ml_eda.loaders import option_flag
-from ml_eda.synthetic import write_image_masks, write_png
+from ml_eda.synthetic import (
+    write_image_masks, write_png, write_shape_captures
+)
 
 
 def write_tone(path: Path) -> None:
@@ -444,3 +448,249 @@ def test_option_flag(tmp_path: Path) -> None:
     assert "digest" in load_data(images).frame.columns
     with pytest.raises(ValueError, match="digest"):
         load_data(images, digest="n")
+
+
+def link_out(place: Path, outside: Path) -> None:
+    """
+    ファイルかディレクトリを外へ移し, 元の場所にそこへのリンクを置く関数
+
+    Parameters
+    ----------
+    place: Path
+        元の場所
+    outside: Path
+        移す先 (読み込むディレクトリの外)
+
+    Returns
+    ----------
+    None
+    """
+    # 中身は同じまま, 場所だけを外にする
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    place.rename(outside)
+    place.symlink_to(outside)
+
+
+def test_text_links(tmp_path: Path) -> None:
+    """
+    文のディレクトリの, 外と中を指すリンクの扱いを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 実の文, 外を指すリンク, 中を指すリンク
+    folder = tmp_path / "texts"
+    folder.mkdir()
+    (folder / "a.txt").write_text("hello world", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
+    (folder / "out.txt").symlink_to(tmp_path / "secret.txt")
+    (folder / "same.txt").symlink_to(folder / "a.txt")
+
+    # 既定は外を読まず, 理由を残す (空の文には数えない)
+    data = load_data(folder, loader="text_lines")
+    frame = data.frame.set_index("file")
+    assert "follow_links を true にしてください" in frame.loc[
+        "out.txt", "error"
+    ]
+    assert pd.isna(frame.loc["out.txt", "text"])
+    assert frame.loc["same.txt", "text"] == "hello world"
+    assert "secret" not in data.frame["text"].fillna("").tolist()
+    result = profile(data)["items"]
+    assert result["unreadable"] == 1
+    assert result["empty"] == 0
+    position = list(data.frame["file"]).index("out.txt")
+    with pytest.raises(ValueError, match="外を指すリンク"):
+        data.load_item(position)
+
+    # たどる設定では読み, 誤りの列は無い
+    data = load_data(folder, loader="text_lines", follow_links="true")
+    assert "error" not in data.frame.columns
+    assert data.load_item(position) == "secret"
+
+
+def test_export_image_masks_links(tmp_path: Path) -> None:
+    """
+    画像と領域の書き出しが外を指すリンクを写さないことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 1 枚の画像と, 別の 1 枚の領域を外へのリンクにする
+    pytest.importorskip("PIL.Image")
+    made = write_image_masks(tmp_path / "raw", count=4)
+    images = sorted(Path(made["images"]).iterdir())
+    masks = sorted(Path(made["masks"]).iterdir())
+    link_out(images[0], tmp_path / "outside" / images[0].name)
+    link_out(masks[1], tmp_path / "outside" / ("mask_" + masks[1].name))
+
+    # 既定: 外のファイルは除き, notes に案内付きで書く
+    info = export_image_masks(
+        made["images"], made["masks"], tmp_path / "ds",
+        split={"method": "none"}
+    )
+    notes = " ".join(info["notes"])
+    assert "画像のディレクトリの外を指すリンクが 1 件" in notes
+    assert "領域のディレクトリの外を指すリンクが 1 件" in notes
+    assert "follow_links=True にしてください" in notes
+    assert len(load_items(tmp_path / "ds").items) == 2
+
+    # 文字の "false" と "0" は読まない側
+    for flag in ("false", "0"):
+        info = export_image_masks(
+            made["images"], made["masks"], tmp_path / f"text_{flag}",
+            split={"method": "none"}, follow_links=flag
+        )
+        assert len(load_items(tmp_path / f"text_{flag}").items) == 2
+
+    # たどる設定では全てを写す
+    info = export_image_masks(
+        made["images"], made["masks"], tmp_path / "all",
+        split={"method": "none"}, follow_links=True
+    )
+    assert len(load_items(tmp_path / "all").items) == 4
+    assert not any("外を指すリンク" in note for note in info["notes"])
+
+
+def test_export_capture_links(tmp_path: Path) -> None:
+    """
+    撮影と点群の書き出しが外を指すリンクを写さないことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 撮影の 1 枚, 撮影自体, 点群を外へのリンクにする
+    pytest.importorskip("PIL.Image")
+    made = write_shape_captures(tmp_path / "raw", views=4, points=100)
+    captures, clouds = Path(made["captures"]), Path(made["clouds"])
+    outside = tmp_path / "outside"
+    link_out(
+        captures / "box_a" / "images" / "001.png", outside / "001.png"
+    )
+    link_out(captures / "box_b", outside / "box_b")
+    link_out(clouds / "sphere_a.ply", outside / "sphere_a.ply")
+
+    # 既定: 外の撮影と点群は組にせず, 外の枚は除いて notes に書く
+    info = export_capture_clouds(
+        captures, clouds, tmp_path / "ds", split={"method": "none"}
+    )
+    notes = " ".join(info["notes"])
+    assert "読めない撮影が 1 件" in notes
+    assert "点群のディレクトリの外を指すリンクが 1 件" in notes
+    assert "外を指すリンクの) 1 枚を除きました" in notes
+    dataset = load_items(tmp_path / "ds")
+    assert sorted(dataset.items["id"]) == ["box_a", "sphere_b"]
+    export_capture_clouds(
+        captures, clouds, tmp_path / "text", split={"method": "none"},
+        follow_links="false"
+    )
+    assert sorted(load_items(tmp_path / "text").items["id"]) == [
+        "box_a", "sphere_b"
+    ]
+    frames = {
+        item["id"]: len(item["capture"]["poses"])
+        for item in dataset.split("train")
+    }
+    assert frames == {"box_a": 3, "sphere_b": 4}
+
+    # たどる設定では全てを写す
+    export_capture_clouds(
+        captures, clouds, tmp_path / "all", split={"method": "none"},
+        follow_links=True
+    )
+    dataset = load_items(tmp_path / "all")
+    assert len(dataset.items) == 4
+    assert all(
+        len(item["capture"]["poses"]) == 4 for item in dataset.split("train")
+    )
+
+
+def test_normalize_capture_links(tmp_path: Path) -> None:
+    """
+    normalize_capture と capture_shift が外を指すリンクを読まないことを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 1 枚の画像を外へのリンクにする
+    pytest.importorskip("PIL.Image")
+    made = write_shape_captures(tmp_path / "raw", views=4, points=100)
+    capture = Path(made["captures"]) / "box_a"
+    link_out(capture / "images" / "002.png", tmp_path / "out" / "002.png")
+
+    # 既定は除き, 平行移動も同じ枚から求める
+    summary = normalize_capture(capture, tmp_path / "new")
+    assert summary["frames"] == 3
+    assert np.allclose(summary["shift"], capture_shift(capture))
+    assert not (tmp_path / "new" / "images" / "002.png").exists()
+    summary = normalize_capture(
+        capture, tmp_path / "text", follow_links="false"
+    )
+    assert summary["frames"] == 3
+    with pytest.raises(ValueError, match="follow_links"):
+        capture_shift(capture, follow_links="maybe")
+
+    # たどる設定では全ての枚
+    summary = normalize_capture(capture, tmp_path / "all", follow_links=True)
+    assert summary["frames"] == 4
+    assert np.allclose(
+        summary["shift"], capture_shift(capture, follow_links=True)
+    )
+
+    # transforms.json が外なら, 引数の案内付きの誤り
+    link_out(capture / "transforms.json", tmp_path / "out" / "t.json")
+    with pytest.raises(ValueError, match="follow_links=True にしてください"):
+        normalize_capture(capture, tmp_path / "again")
+    with pytest.raises(ValueError, match="follow_links=True"):
+        capture_shift(capture)
+
+
+def test_sniff_capture_links(tmp_path: Path) -> None:
+    """
+    推定が設定 follow_links を撮影の確かめに使うことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 撮影の transforms.json が全て外へのリンク
+    folder = tmp_path / "captures"
+    capture = write_small_capture(folder / "one")
+    link_out(capture / "transforms.json", tmp_path / "out.json")
+
+    # 既定では撮影と見なさず, たどる設定 (文字も) では撮影
+    assert "capture" not in [item["loader"] for item in detect(folder)]
+    for flag in (True, "true"):
+        assert detect(folder, follow_links=flag)[0]["loader"] == "capture"
+    data = load_data(folder, follow_links=True)
+    assert data.kind == "capture"
+    assert data.frame.loc[0, "frames"] == 2
