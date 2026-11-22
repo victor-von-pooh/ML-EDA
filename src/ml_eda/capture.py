@@ -751,7 +751,8 @@ def load_captures(path: Path, **options: Any) -> Data:
     ValueError
         撮影が無い場合と, min_confidence が 0 から 255 の整数でない場合
     """
-    # 撮影の一覧と, 深度を読めるか (Pillow)
+    # 撮影の一覧と, 深度を読めるか (Pillow). 根は絶対パス
+    path = path.absolute()
     captures = find_captures(path)
     if not captures:
         raise ValueError(f"{path.name} に {TRANSFORMS} を持つ撮影がありません")

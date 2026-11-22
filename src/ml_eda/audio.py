@@ -426,7 +426,8 @@ def load_audio(path: Path, **options: Any) -> Data:
     ImportError
         全てのファイルが soundfile で読む形式で, soundfile が無い場合
     """
-    # ファイルの一覧とラベル
+    # ファイルの一覧とラベル. 根は絶対パス
+    path = path.absolute()
     root = path if path.is_dir() else path.parent
     files = list_files(path, AUDIO_EXTENSIONS) if path.is_dir() else [path]
     if not files:
