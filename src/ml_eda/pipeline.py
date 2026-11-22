@@ -277,7 +277,7 @@ def group_name(frame: pd.DataFrame, split: dict) -> str:
     ValueError
         グループの列を書いていない場合か, 表に無い場合
     """
-    # 書いていなければ書くように案内し, 表に無ければ列の名前を挙げる
+    # 書いていない場合は書く案内, 表に無い場合は列の名前を挙げた誤り
     column = split.get("column")
     if not column:
         raise ValueError(
