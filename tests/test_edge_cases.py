@@ -866,3 +866,42 @@ def test_unknown_step_params() -> None:
     recipe = {"steps": [{"op": "lag", "columns": ["sales"], "lagz": [1]}]}
     with pytest.raises(ValueError, match="lagz"):
         load_recipe(recipe)
+
+
+def test_unknown_item_step_params() -> None:
+    """
+    中身の手順の知らない引数のあるレシピを, 読んだ時点で止めることを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 知っている引数と当てはめた値 (state) は通る
+    recipe = {"item_steps": [
+        {"op": "vocabulary", "length": 8, "unit": "char",
+         "state": {"vocabulary": ["<pad>", "<unk>", "a"]}},
+        {"op": "resize", "width": 4, "height": 4},
+    ]}
+    assert len(load_recipe(recipe)["item_steps"]) == 2
+
+    # 知らない引数は, 中身の手順の位置と名前, 引数の名前を挙げて止まる
+    recipe = {"item_steps": [
+        {"op": "resize", "width": 4, "height": 4},
+        {"op": "vocabulary", "length": 8, "max_token": 100},
+    ]}
+    with pytest.raises(ValueError, match=r"中身の手順 2 \(vocabulary\).*"
+                                         r"max_token"):
+        load_recipe(recipe)
+
+    # prepare と前と後の様子も同じ所で止まり, 並びでない item_steps も誤り
+    frame = pd.DataFrame({"text": ["a b", "c d"], "y": [0, 1]})
+    data = Data(kind="text", frame=frame, roles={"text": "text"})
+    with pytest.raises(ValueError, match="max_token"):
+        prepare(data, recipe, read_items=False)
+    with pytest.raises(ValueError, match="リスト"):
+        load_recipe({"item_steps": {"op": "resize"}})
