@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -351,6 +352,57 @@ def read_head(path: Path, size: int = SNIFF_BYTES) -> bytes:
         head = file.read(size)
 
     return head
+
+
+def within(
+    root: Path, name: Any, directory: bool, follow_links: bool = False,
+    missing: type = ValueError
+) -> Path:
+    """
+    説明と表に書かれた場所を, データセットのディレクトリの中に限って返す
+    関数
+
+    Parameters
+    ----------
+    root: Path
+        データセットのディレクトリ
+    name: Any
+        書かれた場所 (root からの相対)
+    directory: bool
+        ディレクトリを指すか (False ならファイル)
+    follow_links: bool = False
+        リンクをたどった後に root の外を指す場所も読むか
+    missing: type = ValueError
+        無い場合の誤りの型 (load_dataset は FileNotFoundError)
+
+    Returns
+    ----------
+    path: Path
+        絶対パス
+
+    Raises
+    ----------
+    ValueError
+        文字でない, 外を指す (絶対パスや .., follow_links が False で
+        リンクの先が外) 場合と, 無い場合 (missing の型)
+    """
+    # 書かれた場所の文字の上で中にあり, リンクをたどった後も中にあるもの
+    # だけ (root 自体のリンクはたどって比べる)
+    text = name if isinstance(name, str) else ""
+    normal = os.path.normpath(text) if text else ""
+    outside = not text or os.path.isabs(text) or normal == ".." or (
+        normal.startswith(".." + os.sep)
+    )
+    if outside:
+        raise ValueError(f"データセットの外か空の場所です: {name}")
+    path = (root / normal).absolute()
+    found = path.is_dir() if directory else path.is_file()
+    if not found:
+        raise missing(f"データセットに {text} がありません")
+    if not follow_links and points_outside(root, path):
+        raise ValueError(outside_message(text, ARGUMENT_HINT))
+
+    return path
 
 
 def decodes(head: bytes, encoding: str) -> Optional[str]:

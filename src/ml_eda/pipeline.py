@@ -2,6 +2,7 @@ import datetime as dt
 import re
 import shutil
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -14,6 +15,7 @@ from ml_eda.itemprep import (
     apply_steps, check_item_steps, fit_item_steps, item_notes,
     run_item_steps, to_array
 )
+from ml_eda.loaders import within
 from ml_eda.profile import finding, to_json
 from ml_eda.recipe import (
     HIDDEN, STEPS, WANT, category_key, check_recipe_steps, load_recipe,
@@ -2085,7 +2087,9 @@ class Dataset:
         return tensors
 
 
-def load_dataset(path: Union[str, Path]) -> Dataset:
+def load_dataset(
+    path: Union[str, Path], follow_links: bool = False
+) -> Dataset:
     """
     書き出したデータセットを読み込む関数
 
@@ -2093,6 +2097,9 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
     ----------
     path: Union[str, Path]
         export_dataset で書き出したディレクトリ
+    follow_links: bool = False
+        説明, 分割のデータ, 中身の配列, レシピのうち, リンクをたどった後に
+        データセットの外を指すものも読むか (False では誤り)
 
     Returns
     ----------
@@ -2104,11 +2111,18 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
     ValueError
         版 2 と 3 (ファイルの組. load_items で読む) と, 新しい版
         の場合と, レシピに知らない手順, 手順と中身の手順の知らない引数が
-        ある場合
+        ある場合, 説明に書かれた場所がデータセットの外 (絶対パスや ..,
+        リンクの先) を指す場合
+    FileNotFoundError
+        説明と, 説明に書かれたファイルが無い場合
     """
-    # 説明と版の確認
-    root = Path(path).expanduser()
-    info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
+    # 説明と版の確認. 読む場所は全てデータセットの中に限る
+    root = Path(path).expanduser().absolute()
+    place = partial(
+        within, root, directory=False, follow_links=follow_links,
+        missing=FileNotFoundError
+    )
+    info = yaml.safe_load(place("dataset.yaml").read_text(encoding="utf-8"))
     version = info.get("format_version") if isinstance(info, dict) else None
     if version in ITEMS_FORMAT_VERSIONS:
         raise ValueError(
@@ -2125,13 +2139,15 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
     # 分割ごとの表とレシピ
     frames = {}
     for split, item in info["splits"].items():
-        file = root / item["file"]
+        file = place(item["file"])
         frames[split] = (
             pd.read_parquet(file) if file.suffix == ".parquet"
             else pd.read_csv(file)
         )
+        if item.get("items"):
+            place(item["items"])
     recipe = yaml.safe_load(
-        (root / info.get("recipe", "recipe.yaml")).read_text(encoding="utf-8")
+        place(info.get("recipe", "recipe.yaml")).read_text(encoding="utf-8")
     )
 
     # 当てはめたレシピの手順と引数 (知らない引数を黙って無視しない. 空の
