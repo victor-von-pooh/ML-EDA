@@ -4,7 +4,7 @@
 
 ## できること
 
-表, 時系列, 画像, 文, 点群のように形の違うデータを読み込み, 探索的に分析し (EDA), 前処理のレシピで学習用のデータセットに書き出す. 書き出したデータセットは, [ML-Found](https://github.com/victor-von-pooh/ML-Found) の学習スクリプトがそのまま読み込める.
+表, 時系列, 画像, 文, 点群, 音声のように形の違うデータを読み込み, 探索的に分析し (EDA), 前処理のレシピで学習用のデータセットに書き出す. 書き出したデータセットは, [ML-Found](https://github.com/victor-von-pooh/ML-Found) の学習スクリプトがそのまま読み込める.
 
 - **読み込み**: 拡張子と中身から形を判定する (csv, tsv, json, jsonl, parquet, xlsx, npy など. 文字コードと区切り文字も推定)
 - **分析**: 列の型の推定, 統計とヒストグラム, 相関, 目的の列との関連の強さ, 時系列の間隔と周期, 気付き (欠損の多い列, ID らしい列, リークの疑い, クラスの偏りなど)
@@ -75,11 +75,11 @@ export_dataset(data, "recipe.yaml", "datasets/titanic")
 
 目的の列の欠けた行は既定 (`unlabeled: drop`) で落とす. 分割に `unlabeled: keep` を書くと, 落とさずに `unlabeled` の分割 (`unlabeled.parquet`) に残す (半教師あり学習や異常の検知のため). 前処理の値は学習用だけで当てはめ, 正解の無い行には推論のときと同じようにかける. `tensors("unlabeled")` は特徴量だけを返す.
 
-### 画像, 文, 点群
+### 画像, 文, 点群, 音声
 
 画像のディレクトリ (`<クラス>/<画像>` ならラベル付き), 1 行 1 文の `.txt` か `<クラス>/<文>.txt`, 点群 (`.ply`, `.pcd`, `.xyz`, `.npy`. 1 つか `<クラス>/<点群>`) も `load_data` で読める. 表 (`data.frame`) は 1 行 1 件の様子 (画像なら幅, 高さ, ラベル) で, 中身は `data.load_item(i)` で読む. 分析には大きさのばらつきなどの気付きが加わる.
 
-音声 (`.wav` の PCM と 32 bit の浮動小数. 1 つか `<クラス>/<音声>`) も `load_data` で読める (種類 `audio`). 表は標本化の周波数, チャンネル数, 長さなどで, `data.load_item(i)` か `read_audio(ファイル)` が `samples` ((標本の数, チャンネル) の float32) と `sample_rate` を返す. 分析には周波数のばらつき, 長さ, 無音と音の割れの気付きが加わる. 音声の前処理と書き出し (`prepare`) は対象外.
+音声 (`.wav` の PCM と 32 bit の浮動小数. 1 つか `<クラス>/<音声>`) も `load_data` で読める (種類 `audio`). 表は標本化の周波数, チャンネル数, 長さなどで, `data.load_item(i)` か `read_audio(ファイル)` が `samples` ((標本の数, チャンネル) の float32) と `sample_rate` を返す. 分析には周波数のばらつき, 長さ, 無音と音の割れの気付きが加わる.
 
 学習用にするには, レシピに中身の手順 (`item_steps`) を書く.
 
@@ -92,9 +92,23 @@ item_steps:
 split: {method: stratified, valid: 0.2}
 ```
 
+音声は, 標本化の周波数, チャンネル, 長さをそろえる.
+
+```yaml
+target: label
+task: classification
+item_steps:
+  - {op: resample, rate: 16000}           # method: sinc (既定) か linear
+  - {op: mix_channels, channels: 1}
+  - {op: fix_length, seconds: 1.0}        # align: start (既定) か center
+steps:
+  - {op: filter_rows, column: error, compare: isna}   # 読めない件を除く
+split: {method: stratified, valid: 0.2}
+```
+
 文の区切り方 (文字 `char`, 語 `word`, 部分語 `subword`) は, 分析の結果の `result["items"]["tokenizers"]` が見本の文で比べて勧める (語彙の大きさ, 1 つの文のトークンの数, 語彙に無いトークンの割合). `recommended` をそのまま `item_steps` に入れられる. 部分語は `tokenizers` が要る (`[all]` か `[text]` で入る).
 
-`load_dataset(...).tensors("train")` は (画像なら (件数, チャンネル, 高さ, 幅)) の配列とラベルを返す.
+`load_dataset(...).tensors("train")` は (画像なら (件数, チャンネル, 高さ, 幅), 音声なら (件数, チャンネル, 標本の数)) の配列とラベルを返す.
 
 ### 学習で使う
 
