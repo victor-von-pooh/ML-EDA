@@ -21,7 +21,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | --- | --- | --- | --- |
 | 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
 | データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
-| データの読み方 (`Data.source` の `loader` と `options`) | 持つ | 版を持たない (読み込みの名前と設定) | ML-Quest (問題の設定の `data` に残す), ML-Fathom. 下の「読み込み」 |
+| データの読み方 (`Data.source` の `loader`, `options`, `size`, `modified`) | 持つ | 版を持たない (読み込みの名前と設定, 読んだときの大きさと更新時刻) | ML-Quest (問題の設定の `data` に残し, `size` と `modified` で入れた後にファイルが変わったかを確かめる), ML-Fathom. 下の「読み込み」と「データの形」の `source` |
 | 1 件の場所 (`Data.source` の `root` と `frame` の `path`) | 持つ | 版を持たない (下の形) | ML-Fathom (1 件の中身を読む前に, 読み込んだディレクトリの中かを確かめる), ML-Inference (撮影の 1 件の場所). 下の「データの形」の `source` |
 | 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の値の決まり (`convention.shift`) は, 見本の一覧の版 2 でこれと同じ向き (ML-Found の `load_samples` は逆の向きの版 1 を版 2 の意味に写して返す) |
 | 表の 1 ページ (`frame_view`) | 持つ | 版を持たない (下の形) | ML-Fathom (表の中身). 下の「公開の名前」 |
@@ -72,8 +72,10 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 
 - `kind`: 種類
 - `frame`: 上の `DataFrame`
-- `source`: 読み込んだ場所 (`path`. シンボリックリンクと `..` をたどった絶対パス), 読み込み (`loader`) の名前, 読み込みの設定 (`options`), 種類ごとの値の辞書. 他のリポジトリが頼ってよい欄は `loader`, `options` と, 下の `root` だけ. 他の欄 (`path`, `size`, `modified`, 表の `encoding`, `sep`, `sheets`, `sheet`, 撮影の `min_confidence`, `depth_read`, 撮影と音声の `capped`, 音声の `missing_reader` など) は分析が使う内側の値で, 名前と形を約束しない
-    - `root`: 1 件の場所の根. 画像 (`image_folder`), 点群 (`pointcloud`), 撮影 (`capture`), 音声 (`audio_folder`) の読み込みが入れる (表と文は持たない). 文字の絶対パスで, 今のディレクトリに依らない. 渡した場所を絶対パスにしただけで, シンボリックリンクと `..` はたどらない (`path` と違う)
+- `source`: 読み込んだ場所 (`path`. シンボリックリンクと `..` をたどった絶対パス), 読み込み (`loader`) の名前, 読み込みの設定 (`options`), 種類ごとの値の辞書. 他のリポジトリが頼ってよい欄は `loader`, `options`, `size`, `modified` と, 下の `root` だけ. 他の欄 (`path`, 表の `encoding`, `sep`, `sheets`, `sheet`, 撮影の `min_confidence`, `depth_read`, 撮影と音声の `capped`, 音声の `missing_reader` など) は分析が使う内側の値で, 名前と形を約束しない
+    - `loader`, `options`: 読み込みの名前 (`str`) と, `load_data` に渡した設定の辞書. 頼ってよいのは, 同じデータを同じ読み方で読み直すのに要るため (ML-Quest が問題の設定の `data` に残す. ML-Fathom も同じ名前と設定で `load_data` を呼び直す. 2 章の表)
+    - `size`, `modified`: `load_data` が読んだときの, 渡した場所 (リンクの先) の大きさ (`int`. バイト) と更新時刻 (`float`. 1970 年からの秒). `os.stat` の `st_size` と `st_mtime` そのもので, ディレクトリではディレクトリ自身の値 (中のファイルの合計や最新ではない. ファイルを足すか消すと変わるが, 中のファイルを書き換えても変わらない). 頼ってよいのは, 入れた後にファイルが変わったかを使う側が確かめるため (ML-Quest)
+    - `root`: 1 件の場所の根. 画像 (`image_folder`), 点群 (`pointcloud`), 撮影 (`capture`), 音声 (`audio_folder`) の読み込みが入れる (表と文は持たない). 文字の絶対パスで, 今のディレクトリに依らない. 渡した場所を絶対パスにしただけで, シンボリックリンクと `..` はたどらない (`path` と違う). 絶対パスにするのは, 今のディレクトリが変わっても同じ場所を指すため. たどらないのは, 使う側が渡した名前のまま比べられ, 外を読まないことを確かめる側が `root` と `root` / `path` の両方を自分でたどって外かを判定できるため (読み込みが先にたどると, リンクで置いた根の名前が消える)
     - `frame` の `path` 列: `root` からの相対の場所 (`/` 区切り). `root` / `path` が 1 件 (画像, 点群, 音声はファイル, 撮影はディレクトリ). `<クラス>/<ファイル>` の形ならクラスのフォルダを含む. `load_item` も `root` / `path` を読む
     - ディレクトリを読んだ場合, `root` はそのディレクトリ. ファイル 1 つ (画像 1 枚, 点群 1 つ, 音声 1 つ) を読んだ場合, `root` はそのファイルのあるディレクトリで, `path` はファイルの名前. 撮影は, 1 回の撮影 (`transforms.json` を持つディレクトリ) を読んだ場合, `root` はその親で, `path` は撮影のディレクトリの名前. 撮影を並べたディレクトリを読んだ場合, `root` はそのディレクトリ
     - 読み込みが並べるのは `root` の下の場所だけ. ただし中のシンボリックリンクの先はたどる. 読み込んだディレクトリの外を読まないことを確かめる側は, `root` と `root` / `path` の両方のリンクをたどった後で比べる

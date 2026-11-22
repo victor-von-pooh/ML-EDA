@@ -207,3 +207,36 @@ def test_root_keeps_links(
     assert linked.source["path"] == str((tmp_path / "data").resolve())
     climbed = load_data(Path("data") / ".." / "data", loader="image_folder")
     assert climbed.source["root"] == str(Path.cwd() / "data" / ".." / "data")
+
+
+@pytest.mark.parametrize("place", ["table.csv", "sounds"])
+def test_size_and_modified(tmp_path: Path, place: str) -> None:
+    """
+    source の size と modified が, 読んだ場所の大きさ (int) と更新時刻
+    (float) になることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    place: str
+        読む場所 (表のファイルか, 音声のディレクトリ)
+
+    Returns
+    ----------
+    None
+    """
+    # 表のファイルと, ディレクトリ (ディレクトリ自身の値)
+    target = tmp_path / place
+    if place == "table.csv":
+        target.write_text("a,b\n1,2\n3,4\n", encoding="utf-8")
+    else:
+        write_folder(target, "audio")
+    data = load_data(target)
+    stat = target.stat()
+    assert type(data.source["size"]) is int
+    assert type(data.source["modified"]) is float
+    assert data.source["size"] == stat.st_size
+    assert data.source["modified"] == stat.st_mtime
+    assert data.source["loader"] in ("csv", "audio_folder")
+    assert isinstance(data.source["options"], dict)
