@@ -1264,13 +1264,50 @@ def to_plain(value: Any) -> Any:
     return plain
 
 
+def check_empty_params(place: str, step: dict) -> None:
+    """
+    手順の引数に空 (None, YAML の空) が無いかを確かめる関数
+
+    既定を使う場合は引数を省く決まりなので, 空の引数は誤りにする
+    (vocabulary の max_tokens の int(None) のように, 当てはめの時に
+    分かりにくい誤りになるため)
+
+    Parameters
+    ----------
+    place: str
+        誤りの文に添える手順の位置と名前
+    step: dict
+        手順 (op と引数, 当てはめた値の state)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        空の引数がある場合
+    """
+    # op と当てはめた値 (state) の他の, 値が None の引数
+    empty = sorted(
+        str(key) for key, value in step.items()
+        if key not in STEP_KEYS and value is None
+    )
+    if empty:
+        raise ValueError(
+            f"{place} の引数 {', '.join(empty)} が空です (既定を使う場合は"
+            "引数を省いてください)"
+        )
+
+
 def check_step_params(index: int, step: dict) -> None:
     """
-    手順の引数が, その手順の知っている引数だけかを確かめる関数
+    手順の引数が, その手順の知っている引数だけで, 空でないかを確かめる関数
 
     知らない引数を黙って無視すると, 新しい版の ML-EDA で書いたレシピを
     古い版で読んだときに, 別の列を作って後の手順で分かりにくい誤りに
-    なるため, 読んだ時点で止める
+    なるため, 読んだ時点で止める. 空 (None) の引数も, 当てはめの時に
+    分かりにくい誤りになるため, 読んだ時点で止める
 
     Parameters
     ----------
@@ -1286,7 +1323,7 @@ def check_step_params(index: int, step: dict) -> None:
     Raises
     ----------
     ValueError
-        知らない引数がある場合
+        知らない引数か空 (None) の引数がある場合
     """
     # op と当てはめた値 (state) の他は, 登録した引数だけ
     known = set(STEPS[step["op"]].params) | STEP_KEYS
@@ -1299,14 +1336,17 @@ def check_step_params(index: int, step: dict) -> None:
             "新しい版の ML-EDA で書いたレシピなら, ML-EDA を上げて"
             "ください)"
         )
+    check_empty_params(f"手順 {index + 1} ({step['op']})", step)
 
 
 def check_item_step_params(index: int, step: Any) -> None:
     """
-    中身の手順の引数が, その手順の知っている引数だけかを確かめる関数
+    中身の手順の引数が, その手順の知っている引数だけで, 空でないかを
+    確かめる関数
 
     表の手順 (check_step_params) と同じく, 知らない引数を黙って無視して
-    別の配列を作らないよう, 読んだ時点で止める. 知らない手順と種類に
+    別の配列を作らないよう, また空 (None) の引数で当てはめの時に分かり
+    にくい誤りにならないよう, 読んだ時点で止める. 知らない手順と種類に
     合わない手順は, 種類の分かる prepare で確かめる
 
     Parameters
@@ -1323,7 +1363,7 @@ def check_item_step_params(index: int, step: Any) -> None:
     Raises
     ----------
     ValueError
-        知らない引数がある場合
+        知らない引数か空 (None) の引数がある場合
     """
     # 登録簿にある手順だけ (op と当てはめた値 state の他は登録した引数)
     if not isinstance(step, dict) or step.get("op") not in ITEM_STEPS:
@@ -1339,6 +1379,7 @@ def check_item_step_params(index: int, step: Any) -> None:
             f"{', '.join(sorted(params)) or '無し'}. 新しい版の ML-EDA で"
             "書いたレシピなら, ML-EDA を上げてください)"
         )
+    check_empty_params(f"中身の手順 {index + 1} ({step['op']})", step)
 
 
 def load_recipe(recipe: Union[str, Path, dict]) -> dict:
@@ -1358,8 +1399,9 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     Raises
     ----------
     ValueError
-        新しい版, 知らない手順, 手順と中身の手順の知らない引数, 形の誤りの
-        場合と, 目的の列の無いレシピで split.unlabeled が keep の場合
+        新しい版, 知らない手順, 手順と中身の手順の知らない引数と空 (None)
+        の引数, 形の誤りの場合と, 目的の列の無いレシピで split.unlabeled
+        が keep の場合
     """
     # ファイルなら読み込み
     if isinstance(recipe, (str, Path)):

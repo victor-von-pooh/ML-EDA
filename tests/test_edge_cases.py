@@ -871,6 +871,49 @@ def test_unknown_step_params() -> None:
         load_recipe(recipe)
 
 
+def test_empty_step_params() -> None:
+    """
+    表の手順と中身の手順の空 (None) の引数のあるレシピを, 読んだ時点で
+    止めることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 空の当てはめた値 (state) は引数でないので通る
+    recipe = {"steps": [{"op": "standardize", "columns": ["x"],
+                         "state": None}]}
+    assert len(load_recipe(recipe)["steps"]) == 1
+
+    # 表の手順の空の引数は, 手順の位置と名前, 引数の名前を挙げて止まる
+    # (省いた場合と同じ意味になる columns と by も)
+    recipe = {"steps": [
+        {"op": "standardize", "columns": ["x"]},
+        {"op": "lag", "columns": None, "by": None, "lags": [1]},
+    ]}
+    with pytest.raises(ValueError, match=r"手順 2 \(lag\) の引数 by, "
+                                         r"columns が空"):
+        load_recipe(recipe)
+
+    # YAML の空も同じく止まる
+    text = "steps:\n  - {op: filter_rows, column: x, compare: isna, value:}\n"
+    with pytest.raises(ValueError, match=r"手順 1 \(filter_rows\).*value"):
+        load_recipe(yaml.safe_load(text))
+
+    # 中身の手順の空の引数も, 中身の手順の位置と名前, 引数の名前を挙げる
+    recipe = {"item_steps": [
+        {"op": "resize", "width": 4, "height": 4},
+        {"op": "vocabulary", "length": 8, "max_tokens": None},
+    ]}
+    with pytest.raises(ValueError, match=r"中身の手順 2 \(vocabulary\) "
+                                         r"の引数 max_tokens が空"):
+        load_recipe(recipe)
+
+
 def test_unknown_item_step_params() -> None:
     """
     中身の手順の知らない引数のあるレシピを, 読んだ時点で止めることを
