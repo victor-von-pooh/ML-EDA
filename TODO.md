@@ -19,11 +19,11 @@
 - 終わりの条件: `source` の `root` と `path` の決まりが DESIGN.md にあり, 種類ごとのテストがある
 - つながり: ML-Fathom の「読み込んだディレクトリの外のファイルを分析と書き出しで読まない」
 
-### 画面が使う名前を公開する
-- 何を: `pipeline.frame_view` (表の行数, 列と型, 先頭の行), `pipeline.DATASET_FORMAT_VERSION` と `pipeline.ITEMS_FORMAT_VERSIONS` (書き出しの約束の版), `media.read_image` (1 枚の画像を読む) を `ml_eda` から公開し (`__all__` に足す), docs/DESIGN.md に書く
-- なぜ: 画面 (ML-Fathom) は公開の名前だけを使う決まりで, 表の見え方 (`preview` の前と後と同じ形), 版の番号, 画像の読み方は ML-EDA と同じでないと食い違うので, 画面で同じものを持てないため
-- 終わりの条件: 4 つの名前が `ml_eda` から読め, 公開の名前のテストがある
-- つながり: ML-Fathom の「ML-EDA に公開してもらう名前に置き換える」
+### 画面と推論が使う名前を公開する
+- 何を: 次の 4 つを `ml_eda` から公開し (`__all__` に足し, `ml_eda.frame_view` のように読めるようにする. 元のモジュールの名前は残す), docs/DESIGN.md の「2. 他のリポジトリとの約束」に形を書く. 1. `pipeline.frame_view` (表の 1 ページ. 戻り値の鍵 `rows`, `columns` (`name`, `dtype`), `head` と値の型を約束にする) 2. 3. `pipeline.DATASET_FORMAT_VERSION` と `pipeline.ITEMS_FORMAT_VERSIONS` (書き出しの約束の版. 後者は版の組) 4. `media.read_image` (ファイル 1 つの画像を配列にする低い層)
+- なぜ: ML-Fathom (表の中身, 書き出したデータセットの版の見分け, 撮影の 1 枚) と ML-Inference (一式の版の確かめ) が公開されていない名前として使っていて, 同じものを持つと表の見え方, 版の番号, 画像の読み方が ML-EDA と食い違うため
+- 終わりの条件: 4 つが `from ml_eda import ...` で読め, `__all__` にある. `frame_view` の戻り値の鍵と型を固定するテストがある. DESIGN.md に 4 つの名前と形がある
+- つながり: ML-Fathom の「ML-EDA に公開してもらう名前に置き換える」, ML-Inference (`bundle.py` の版の import)
 
 ## 条件待ち
 
