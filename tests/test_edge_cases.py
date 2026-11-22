@@ -914,6 +914,60 @@ def test_empty_step_params() -> None:
         load_recipe(recipe)
 
 
+def test_dataset_recipe_params(tmp_path: Path) -> None:
+    """
+    書き出したデータセットの recipe.yaml の知らない引数を, load_dataset で
+    止めることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest の一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 書き出したままのデータセットは読める
+    frame = pd.DataFrame({"x": np.arange(20.0), "y": [0, 1] * 10})
+    recipe = {
+        "target": "y", "task": "classification",
+        "steps": [{"op": "standardize", "columns": ["x"]}],
+        "split": {"method": "random", "valid": 0.2},
+    }
+    export_dataset(table(frame), recipe, tmp_path / "ds")
+    place = tmp_path / "ds" / "recipe.yaml"
+    written = yaml.safe_load(place.read_text(encoding="utf-8"))
+    assert len(load_dataset(tmp_path / "ds").recipe["steps"]) == 1
+
+    # 空の引数は, 空を誤りにする前に書き出したデータセットのために通る
+    # (columns の空は auto と同じに当てはめ, 列は当てはめた値に残る)
+    written["steps"][0]["columns"] = None
+    place.write_text(yaml.safe_dump(written), encoding="utf-8")
+    dataset = load_dataset(tmp_path / "ds")
+    assert len(dataset.transform(frame[["x"]])) == 20
+
+    # 表の手順の知らない引数は, 手順の位置と名前, 引数の名前を挙げて止まる
+    written["steps"][0] = {**written["steps"][0], "scale": 2}
+    place.write_text(yaml.safe_dump(written), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"手順 1 \(standardize\).*scale"):
+        load_dataset(tmp_path / "ds")
+
+    # 知らない手順も止まる
+    written["steps"] = [{"op": "rescale"}]
+    place.write_text(yaml.safe_dump(written), encoding="utf-8")
+    with pytest.raises(ValueError, match="rescale"):
+        load_dataset(tmp_path / "ds")
+
+    # 中身の手順の知らない引数も止まる
+    written["steps"] = []
+    written["item_steps"] = [{"op": "vocabulary", "length": 8, "lang": "ja"}]
+    place.write_text(yaml.safe_dump(written), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"中身の手順 1 \(vocabulary\).*"
+                                         r"lang"):
+        load_dataset(tmp_path / "ds")
+
+
 def test_unknown_item_step_params() -> None:
     """
     中身の手順の知らない引数のあるレシピを, 読んだ時点で止めることを

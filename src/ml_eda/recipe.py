@@ -1300,7 +1300,9 @@ def check_empty_params(place: str, step: dict) -> None:
         )
 
 
-def check_step_params(index: int, step: dict) -> None:
+def check_step_params(
+    index: int, step: dict, empty: bool = True
+) -> None:
     """
     手順の引数が, その手順の知っている引数だけで, 空でないかを確かめる関数
 
@@ -1315,6 +1317,8 @@ def check_step_params(index: int, step: dict) -> None:
         手順の位置 (0 から)
     step: dict
         手順 (op と引数, 当てはめた値の state)
+    empty: bool = True
+        空 (None) の引数も確かめるか
 
     Returns
     ----------
@@ -1323,7 +1327,7 @@ def check_step_params(index: int, step: dict) -> None:
     Raises
     ----------
     ValueError
-        知らない引数か空 (None) の引数がある場合
+        知らない引数か, empty の場合に空 (None) の引数がある場合
     """
     # op と当てはめた値 (state) の他は, 登録した引数だけ
     known = set(STEPS[step["op"]].params) | STEP_KEYS
@@ -1336,10 +1340,13 @@ def check_step_params(index: int, step: dict) -> None:
             "新しい版の ML-EDA で書いたレシピなら, ML-EDA を上げて"
             "ください)"
         )
-    check_empty_params(f"手順 {index + 1} ({step['op']})", step)
+    if empty:
+        check_empty_params(f"手順 {index + 1} ({step['op']})", step)
 
 
-def check_item_step_params(index: int, step: Any) -> None:
+def check_item_step_params(
+    index: int, step: Any, empty: bool = True
+) -> None:
     """
     中身の手順の引数が, その手順の知っている引数だけで, 空でないかを
     確かめる関数
@@ -1355,6 +1362,8 @@ def check_item_step_params(index: int, step: Any) -> None:
         中身の手順の位置 (0 から)
     step: Any
         中身の手順 (op と引数, 当てはめた値の state)
+    empty: bool = True
+        空 (None) の引数も確かめるか
 
     Returns
     ----------
@@ -1363,7 +1372,7 @@ def check_item_step_params(index: int, step: Any) -> None:
     Raises
     ----------
     ValueError
-        知らない引数か空 (None) の引数がある場合
+        知らない引数か, empty の場合に空 (None) の引数がある場合
     """
     # 登録簿にある手順だけ (op と当てはめた値 state の他は登録した引数)
     if not isinstance(step, dict) or step.get("op") not in ITEM_STEPS:
@@ -1379,7 +1388,49 @@ def check_item_step_params(index: int, step: Any) -> None:
             f"{', '.join(sorted(params)) or '無し'}. 新しい版の ML-EDA で"
             "書いたレシピなら, ML-EDA を上げてください)"
         )
-    check_empty_params(f"中身の手順 {index + 1} ({step['op']})", step)
+    if empty:
+        check_empty_params(f"中身の手順 {index + 1} ({step['op']})", step)
+
+
+def check_recipe_steps(
+    steps: Any, item_steps: Any, empty: bool = True
+) -> None:
+    """
+    レシピの表の手順と中身の手順の, 手順の名前と引数を確かめる関数
+
+    Parameters
+    ----------
+    steps: Any
+        表の手順の並び
+    item_steps: Any
+        中身の手順の並び
+    empty: bool = True
+        空 (None) の引数も確かめるか
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        表の手順の知らない手順, 手順と中身の手順の知らない引数, empty の
+        場合に空 (None) の引数がある場合と, item_steps が並びでない場合
+    """
+    # 表の手順は名前と引数
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or step.get("op") not in STEPS:
+            raise ValueError(
+                f"手順 {index + 1} の op が知らないものです: "
+                f"{step.get('op') if isinstance(step, dict) else step}"
+            )
+        check_step_params(index, step, empty)
+
+    # 中身の手順は引数 (知らない手順は種類の分かる prepare で)
+    if not isinstance(item_steps, list):
+        raise ValueError("item_steps は手順の並び (リスト) にしてください")
+    for index, step in enumerate(item_steps):
+        check_item_step_params(index, step, empty)
 
 
 def load_recipe(recipe: Union[str, Path, dict]) -> dict:
@@ -1430,17 +1481,7 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     task = loaded.setdefault("task", "none")
     if task not in TASKS:
         raise ValueError(f"知らないタスクです: {task}")
-    for index, step in enumerate(loaded["steps"]):
-        if not isinstance(step, dict) or step.get("op") not in STEPS:
-            raise ValueError(
-                f"手順 {index + 1} の op が知らないものです: "
-                f"{step.get('op') if isinstance(step, dict) else step}"
-            )
-        check_step_params(index, step)
-    if not isinstance(loaded["item_steps"], list):
-        raise ValueError("item_steps は手順の並び (リスト) にしてください")
-    for index, step in enumerate(loaded["item_steps"]):
-        check_item_step_params(index, step)
+    check_recipe_steps(loaded["steps"], loaded["item_steps"])
     method = loaded["split"].get("method", "random")
     if method not in SPLIT_METHODS:
         raise ValueError(f"知らない分割のしかたです: {method}")
