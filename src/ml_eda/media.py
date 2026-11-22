@@ -243,7 +243,8 @@ def load_images(path: Path, **options: Any) -> Data:
         1 行が 1 枚の画像のデータ (path, label, width, height, channels,
         mode, format, bytes, digest). 画素は load_item で読む
     """
-    # ファイルの一覧とラベル (無い場合は置き方を案内)
+    # ファイルの一覧とラベル (無い場合は置き方を案内). 根は絶対パス
+    path = path.absolute()
     root = path if path.is_dir() else path.parent
     files = list_files(path, IMAGE_EXTENSIONS) if path.is_dir() else [path]
     labels = labels_of(root, files) if path.is_dir() else None
@@ -754,7 +755,8 @@ def load_points(path: Path, **options: Any) -> Data:
         1 行が 1 つの点群のデータ (path, label, 点の数, 範囲, 属性).
         点は load_item で読む
     """
-    # ファイルの一覧とラベル (無い場合は誤り)
+    # ファイルの一覧とラベル (無い場合は誤り). 根は絶対パス
+    path = path.absolute()
     root = path if path.is_dir() else path.parent
     files = (
         list_files(path, (".ply", ".pcd", ".xyz", ".pts"))
