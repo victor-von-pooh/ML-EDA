@@ -6,8 +6,10 @@ import numpy as np
 import pandas as pd
 
 from ml_eda.data import Data
-from ml_eda.loaders import Loader, register_loader
-from ml_eda.media import MAX_FILES, labels_of, list_files
+from ml_eda.loaders import (
+    FOLLOW_LINKS_HELP, Loader, check_inside, register_loader
+)
+from ml_eda.media import MAX_FILES, labels_of, link_base, list_files
 
 # 標準ライブラリと numpy で読む拡張子 (WAVE)
 WAVE_EXTENSIONS = (".wav", ".wave")
@@ -411,7 +413,7 @@ def load_audio(path: Path, **options: Any) -> Data:
     path: Path
         ファイルかディレクトリ
     **options: Any
-        使わない
+        follow_links (既定 False. True なら外を指すリンクの先も読む)
 
     Returns
     ----------
@@ -434,7 +436,9 @@ def load_audio(path: Path, **options: Any) -> Data:
         raise ValueError(f"{path.name} に音声のファイルがありません")
     labels = labels_of(root, files) if path.is_dir() else None
 
-    # ファイルごとのヘッダー (soundfile が無くて読めない件は数える)
+    # ファイルごとのヘッダー (soundfile が無くて読めない件は数える. 外を
+    # 指すリンクは読まずに理由を残す)
+    base = link_base(path, options)
     rows = []
     missing = 0
     for index, file in enumerate(files):
@@ -442,6 +446,7 @@ def load_audio(path: Path, **options: Any) -> Data:
         if labels:
             row["label"] = labels[index]
         try:
+            check_inside(base, file, row["path"])
             chunks = audio_chunks(file)
             row.update({
                 "sample_rate": chunks["sample_rate"],
@@ -467,10 +472,12 @@ def load_audio(path: Path, **options: Any) -> Data:
         roles["label"] = "label"
     data = Data(
         kind="audio", frame=frame, roles=roles,
-        item_loader=lambda i: read_audio(root / frame["path"].iloc[i]),
-        head_loader=lambda i, seconds: read_audio(
-            root / frame["path"].iloc[i], seconds
-        )
+        item_loader=lambda i: read_audio(check_inside(
+            base, root / frame["path"].iloc[i], frame["path"].iloc[i]
+        )),
+        head_loader=lambda i, seconds: read_audio(check_inside(
+            base, root / frame["path"].iloc[i], frame["path"].iloc[i]
+        ), seconds)
     )
     data.source = {
         "root": str(root), "capped": len(files) >= MAX_FILES,
@@ -734,7 +741,7 @@ def register_audio() -> None:
     # WAVE は標準ライブラリと numpy, 他の形式は soundfile で読む
     register_loader(Loader(
         "audio_folder", "audio", AUDIO_EXTENSIONS, sniff_audio, load_audio,
-        {},
+        {"follow_links": FOLLOW_LINKS_HELP},
         "音声 (.wav の PCM と 32 bit の浮動小数. .flac, .mp3, .ogg, .opus, "
         ".aif, .aiff は soundfile が要る. 1 つか, <クラス>/<音声> の"
         "ディレクトリ)"

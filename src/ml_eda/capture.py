@@ -9,7 +9,10 @@ import numpy as np
 import pandas as pd
 
 from ml_eda.data import Data
-from ml_eda.loaders import Loader, register_loader
+from ml_eda.loaders import (
+    FOLLOW_LINKS_HELP, Loader, check_inside, option_flag, points_outside,
+    register_loader
+)
 
 # 撮影の決まりのファイルの名前
 TRANSFORMS = "transforms.json"
@@ -133,7 +136,9 @@ def read_transforms(capture: Path) -> dict:
     return transforms
 
 
-def inside(capture: Path, name: Any) -> Optional[Path]:
+def inside(
+    capture: Path, name: Any, base: Optional[Path] = None
+) -> Optional[Path]:
     """
     transforms.json に書かれた場所を, 撮影のディレクトリの中に限って返す
     関数
@@ -144,15 +149,18 @@ def inside(capture: Path, name: Any) -> Optional[Path]:
         撮影のディレクトリ
     name: Any
         書かれた場所 (撮影のディレクトリからの相対)
+    base: Optional[Path] = None
+        読み込んだディレクトリ (リンクをたどった後にこの外を指すファイルは
+        無いものとする. None ならリンクの先をたどる)
 
     Returns
     ----------
     path: Optional[Path]
         ファイルの場所 (文字でない, 撮影のディレクトリの外 (絶対パスや
-        ..), 無い場合は None)
+        ..), リンクをたどった後に base の外, 無い場合は None)
     """
-    # 書かれた場所の文字の上で中にあるファイルだけ (シンボリックリンクの
-    # 先は, 撮影を置いた人の判断としてたどる)
+    # 書かれた場所の文字の上で中にあり, リンクをたどった後も読み込んだ
+    # ディレクトリの中にあるファイルだけ
     path: Optional[Path] = None
     if not isinstance(name, str) or not name or os.path.isabs(name):
         return path
@@ -160,7 +168,10 @@ def inside(capture: Path, name: Any) -> Optional[Path]:
     if normal == ".." or normal.startswith(".." + os.sep):
         return path
     try:
-        if (capture / normal).is_file():
+        found = (capture / normal).is_file() and not (
+            base is not None and points_outside(base, capture / normal)
+        )
+        if found:
             path = (capture / normal).absolute()
     except (OSError, ValueError):
         path = None
@@ -509,7 +520,8 @@ def depth_scale(depth: dict) -> float:
 
 
 def depth_stats(
-    capture: Path, frames: list[dict], depth: dict, min_confidence: int
+    capture: Path, frames: list[dict], depth: dict, min_confidence: int,
+    base: Optional[Path] = None
 ) -> dict:
     """
     各枚の深度と信頼度の画像から, 有効率と撮影距離を求める関数
@@ -524,6 +536,8 @@ def depth_stats(
         transforms.json の depth (形式と欠けの値)
     min_confidence: int
         信頼できる深度とする信頼度 (0 から 255)
+    base: Optional[Path] = None
+        読み込んだディレクトリ (None ならリンクの先をたどる)
 
     Returns
     ----------
@@ -540,10 +554,10 @@ def depth_stats(
     invalid = invalid if isinstance(invalid, (int, float)) else 0
     valid_rates, confident_rates, medians, sources = [], [], [], set()
     for frame in frames:
-        path = inside(capture, frame.get("raw_depth_file_path"))
+        path = inside(capture, frame.get("raw_depth_file_path"), base)
         source = "raw"
         if path is None:
-            path = inside(capture, frame.get("depth_file_path"))
+            path = inside(capture, frame.get("depth_file_path"), base)
             source = "smoothed"
         if path is None:
             continue
@@ -556,7 +570,7 @@ def depth_stats(
             medians.append(float(np.median(values[valid])) * scale)
 
         # 信頼度 (形が合わなければその枚は数えない)
-        path = inside(capture, frame.get("confidence_file_path"))
+        path = inside(capture, frame.get("confidence_file_path"), base)
         if path is None:
             continue
         with Image.open(path) as image:
@@ -615,7 +629,8 @@ def ply_points(path: Path) -> Optional[int]:
 
 
 def describe_capture(
-    capture: Path, min_confidence: int, with_depth: bool
+    capture: Path, min_confidence: int, with_depth: bool,
+    base: Optional[Path] = None
 ) -> dict:
     """
     1 回の撮影を 1 行の値にまとめる関数
@@ -628,6 +643,8 @@ def describe_capture(
         信頼できる深度とする信頼度
     with_depth: bool
         深度の画像を読むか (Pillow が無ければ読まない)
+    base: Optional[Path] = None
+        読み込んだディレクトリ (None ならリンクの先をたどる)
 
     Returns
     ----------
@@ -645,7 +662,7 @@ def describe_capture(
         "fl_x": transforms.get("fl_x"),
         "device": (transforms.get("capture") or {}).get("device_model"),
         "missing_files": sum(
-            inside(capture, frame.get("file_path")) is None
+            inside(capture, frame.get("file_path"), base) is None
             for frame in frames
         ),
     }
@@ -653,7 +670,8 @@ def describe_capture(
     # 深度と距離
     if with_depth:
         row.update(depth_stats(
-            capture, tracked, transforms.get("depth") or {}, min_confidence
+            capture, tracked, transforms.get("depth") or {}, min_confidence,
+            base
         ))
 
     # 物の中心から見た方位の隙間 (姿勢が 2 枚以上ある場合)
@@ -667,7 +685,8 @@ def describe_capture(
 
     # 点群
     cloud = inside(
-        capture, (transforms.get("point_cloud") or {}).get("file_path")
+        capture, (transforms.get("point_cloud") or {}).get("file_path"),
+        base
     )
     if cloud is not None:
         row["points"] = ply_points(cloud)
@@ -675,7 +694,9 @@ def describe_capture(
     return row
 
 
-def capture_item(root: Path, frame: pd.DataFrame, index: int) -> dict:
+def capture_item(
+    root: Path, base: Optional[Path], frame: pd.DataFrame, index: int
+) -> dict:
     """
     1 回の撮影の中身 (各枚の場所と姿勢) を読む関数
 
@@ -683,6 +704,8 @@ def capture_item(root: Path, frame: pd.DataFrame, index: int) -> dict:
     ----------
     root: Path
         読み込んだ場所 (撮影の path はここからの相対)
+    base: Optional[Path]
+        読み込んだディレクトリ (None ならリンクの先をたどる)
     frame: pd.DataFrame
         撮影の表
     index: int
@@ -698,12 +721,14 @@ def capture_item(root: Path, frame: pd.DataFrame, index: int) -> dict:
         決まり)
     """
     # 場所は撮影のディレクトリの中に限った絶対パス
-    capture = (root / str(frame["path"].iloc[index])).resolve()
+    name = str(frame["path"].iloc[index])
+    capture = check_inside(base, root / name, name).resolve()
     transforms = read_transforms(capture)
     frames = []
     for entry in transforms["frames"]:
         places = {
-            key: inside(capture, entry.get(name)) for key, name in (
+            key: inside(capture, entry.get(field), base)
+            for key, field in (
                 ("image", "file_path"), ("raw_depth", "raw_depth_file_path"),
                 ("depth", "depth_file_path"),
                 ("confidence", "confidence_file_path"),
@@ -716,7 +741,8 @@ def capture_item(root: Path, frame: pd.DataFrame, index: int) -> dict:
             "tracking": entry.get("tracking_state", "TRACKING"),
         })
     cloud = inside(
-        capture, (transforms.get("point_cloud") or {}).get("file_path")
+        capture, (transforms.get("point_cloud") or {}).get("file_path"),
+        base
     )
     item = {
         "path": str(capture),
@@ -739,7 +765,8 @@ def load_captures(path: Path, **options: Any) -> Data:
     path: Path
         撮影のディレクトリか, それを並べたディレクトリ
     **options: Any
-        min_confidence (信頼できる深度とする信頼度. 既定 128)
+        min_confidence (信頼できる深度とする信頼度. 既定 128),
+        follow_links (既定 False. True なら外を指すリンクの先も読む)
 
     Returns
     ----------
@@ -768,20 +795,25 @@ def load_captures(path: Path, **options: Any) -> Data:
     except ImportError:
         with_depth = False
 
-    # 撮影ごとの 1 行 (読めない撮影は理由を残す)
+    # 撮影ごとの 1 行 (読めない撮影と外を指すリンクは理由を残す). 外かは
+    # 渡したディレクトリ (1 回の撮影ならその撮影) と比べる
     root = path.parent if (path / TRANSFORMS).is_file() else path
+    base = None if option_flag(options, "follow_links", False) else path
     rows = []
     for capture in captures:
         row: dict = {"path": capture.relative_to(root).as_posix()}
         try:
-            row.update(describe_capture(capture, min_confidence, with_depth))
+            check_inside(base, capture, row["path"])
+            row.update(describe_capture(
+                capture, min_confidence, with_depth, base
+            ))
         except (OSError, ValueError, KeyError, TypeError) as error:
             row["error"] = str(error) or type(error).__name__
         rows.append(row)
     frame = pd.DataFrame(rows).reindex(columns=list(COLUMNS))
     data = Data(
         kind="capture", frame=frame, roles={"path": "path"},
-        item_loader=partial(capture_item, root, frame)
+        item_loader=partial(capture_item, root, base, frame)
     )
     data.source = {
         "root": str(root), "min_confidence": min_confidence,
@@ -965,7 +997,8 @@ def register_capture() -> None:
     # ディレクトリだけを読むので拡張子は無し
     register_loader(Loader(
         "capture", "capture", (), sniff_capture, load_captures,
-        {"min_confidence": "信頼できる深度とする信頼度 (0 から 255. 既定 128)"},
+        {"min_confidence": "信頼できる深度とする信頼度 (0 から 255. 既定 128)",
+         "follow_links": FOLLOW_LINKS_HELP},
         "多視点の撮影 (transforms.json を持つディレクトリか, それを並べた"
         "ディレクトリ. 深度を読むには Pillow が要る)"
     ))

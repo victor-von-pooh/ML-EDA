@@ -10,7 +10,8 @@ import pandas as pd
 
 from ml_eda.data import Data
 from ml_eda.loaders import (
-    Loader, guess_encoding, read_head, register_loader
+    FOLLOW_LINKS_HELP, Loader, check_inside, guess_encoding, option_flag,
+    outside_message, points_outside, read_head, register_loader
 )
 
 # 画像の拡張子
@@ -59,6 +60,31 @@ def list_files(root: Path, extensions: tuple) -> list[Path]:
     files = sorted(files)[:MAX_FILES]
 
     return files
+
+
+def link_base(path: Path, options: dict) -> Optional[Path]:
+    """
+    外を指すリンクを確かめる根を返す関数
+
+    Parameters
+    ----------
+    path: Path
+        渡した場所 (絶対パス)
+    options: dict
+        読み込みの設定 (follow_links)
+
+    Returns
+    ----------
+    base: Optional[Path]
+        渡したディレクトリ. ファイル 1 つか, follow_links が true なら None
+        (確かめない)
+    """
+    # 渡したもの自体 (ファイル 1 つも) は信頼する
+    base: Optional[Path] = path if path.is_dir() and not option_flag(
+        options, "follow_links", False
+    ) else None
+
+    return base
 
 
 def labels_of(root: Path, files: list[Path]) -> Optional[list[str]]:
@@ -235,7 +261,8 @@ def load_images(path: Path, **options: Any) -> Data:
         ディレクトリか画像のファイル
     **options: Any
         digest (既定 True. False なら中身の hash を求めない. 大きな
-        フォルダで全てのファイルを読む時間を省くため)
+        フォルダで全てのファイルを読む時間を省くため), follow_links
+        (既定 False. True なら外を指すリンクの先も読む)
 
     Returns
     ----------
@@ -254,15 +281,22 @@ def load_images(path: Path, **options: Any) -> Data:
             "のような形なら, train のディレクトリを選んでください)"
         )
 
-    # ヘッダーから大きさとモード (画面からの設定は文字で来る)
-    hashing = options.get("digest", True)
-    if isinstance(hashing, str):
-        hashing = hashing.strip().lower() not in ("false", "0", "no", "")
+    # ヘッダーから大きさとモード (外を指すリンクは読まずに理由を残す)
+    hashing = option_flag(options, "digest", True)
+    base = link_base(path, options)
     rows = []
     for index, file in enumerate(files):
         row = {"path": file.relative_to(root).as_posix()}
         if labels:
             row["label"] = labels[index]
+        if base is not None and points_outside(base, file):
+            row.update({
+                "width": None, "height": None, "channels": None,
+                "mode": None, "format": None,
+                "error": outside_message(row["path"]),
+            })
+            rows.append(row)
+            continue
         row.update(image_header(file))
         row["bytes"] = file.stat().st_size
         if hashing:
@@ -274,7 +308,9 @@ def load_images(path: Path, **options: Any) -> Data:
         roles["label"] = "label"
     data = Data(
         kind="image", frame=frame, roles=roles,
-        item_loader=lambda i: read_image(root / frame["path"].iloc[i])
+        item_loader=lambda i: read_image(check_inside(
+            base, root / frame["path"].iloc[i], frame["path"].iloc[i]
+        ))
     )
     data.source = {"root": str(root)}
 
@@ -747,7 +783,7 @@ def load_points(path: Path, **options: Any) -> Data:
     path: Path
         ファイルかディレクトリ
     **options: Any
-        使わない
+        follow_links (既定 False. True なら外を指すリンクの先も読む)
 
     Returns
     ----------
@@ -766,13 +802,15 @@ def load_points(path: Path, **options: Any) -> Data:
         raise ValueError(f"{path.name} に点群のファイルがありません")
     labels = labels_of(root, files) if path.is_dir() else None
 
-    # ファイルごとの点の数と範囲
+    # ファイルごとの点の数と範囲 (外を指すリンクは読まずに理由を残す)
+    base = link_base(path, options)
     rows = []
     for index, file in enumerate(files):
         row: dict = {"path": file.relative_to(root).as_posix()}
         if labels:
             row["label"] = labels[index]
         try:
+            check_inside(base, file, row["path"])
             row.update(describe_cloud(read_cloud(file)))
         except (ValueError, OSError, struct.error, IndexError) as error:
             row["error"] = str(error) or type(error).__name__
@@ -783,7 +821,9 @@ def load_points(path: Path, **options: Any) -> Data:
         roles["label"] = "label"
     data = Data(
         kind="pointcloud", frame=frame, roles=roles,
-        item_loader=lambda i: read_cloud(root / frame["path"].iloc[i])
+        item_loader=lambda i: read_cloud(check_inside(
+            base, root / frame["path"].iloc[i], frame["path"].iloc[i]
+        ))
     )
     data.source = {"root": str(root)}
 
@@ -988,7 +1028,8 @@ def register_collections() -> None:
         "image_folder", "image", IMAGE_EXTENSIONS, sniff_image, load_images,
         {"digest": "中身の hash を求めるか (既定 true. false で, 大きな"
                    "フォルダの全てのファイルを読む時間を省く. 同じ画像の"
-                   "気付きは出ない)"},
+                   "気付きは出ない)",
+         "follow_links": FOLLOW_LINKS_HELP},
         "画像 (1 枚か, <クラス>/<画像> のディレクトリ. Pillow が要る)"
     ))
     register_loader(Loader(
@@ -998,7 +1039,7 @@ def register_collections() -> None:
     ))
     register_loader(Loader(
         "pointcloud", "pointcloud", POINT_EXTENSIONS, sniff_points,
-        load_points, {},
+        load_points, {"follow_links": FOLLOW_LINKS_HELP},
         "点群 (.ply, .pcd (ASCII), .xyz, .pts, .npy. 1 つかディレクトリ)"
     ))
 

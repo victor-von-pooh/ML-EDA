@@ -23,6 +23,13 @@ UNITS = (
     "cm", "mm", "m", "mL", "ml", "L"
 )
 
+# 設定 follow_links の説明 (画像, 点群, 撮影, 音声の読み込み)
+FOLLOW_LINKS_HELP = (
+    "読み込んだディレクトリの外を指すシンボリックリンクの先を読むか (既定 "
+    "false. false では読めない件として理由を残す. 読み込んだディレクトリ"
+    "自体がリンクの場合は, その先の中を読む)"
+)
+
 # 試す文字コード (日本語の csv によくあるものを含む)
 ENCODINGS = ("utf-8-sig", "utf-8", "cp932", "euc-jp", "latin-1")
 
@@ -91,6 +98,112 @@ def describe_loaders() -> list[dict]:
     ]
 
     return loaders
+
+
+def option_flag(options: dict, name: str, default: bool) -> bool:
+    """
+    読み込みの真偽の設定を読む関数 (画面からの文字も読む)
+
+    Parameters
+    ----------
+    options: dict
+        読み込みの設定
+    name: str
+        設定の名前
+    default: bool
+        無い場合の値
+
+    Returns
+    ----------
+    flag: bool
+        設定の値 (文字の false, 0, no と空は False)
+    """
+    # 画面からの設定は文字で来る
+    flag = options.get(name, default)
+    if isinstance(flag, str):
+        flag = flag.strip().lower() not in ("false", "0", "no", "")
+    flag = bool(flag)
+
+    return flag
+
+
+def points_outside(base: Path, path: Path) -> bool:
+    """
+    リンクをたどった後の場所が, 読み込んだディレクトリの外かを返す関数
+
+    Parameters
+    ----------
+    base: Path
+        読み込んだディレクトリ (それ自体のリンクもたどって比べる)
+    path: Path
+        確かめる場所
+
+    Returns
+    ----------
+    outside: bool
+        たどった後の path が, たどった後の base の下に無いか (リンクが
+        輪になってたどれない場合も True)
+    """
+    # 両方のリンクをたどってから比べる
+    try:
+        outside = not path.resolve().is_relative_to(base.resolve())
+    except (OSError, RuntimeError):
+        outside = True
+
+    return outside
+
+
+def outside_message(name: str) -> str:
+    """
+    外を指すリンクを読まない理由の文を返す関数
+
+    Parameters
+    ----------
+    name: str
+        件の場所 (読み込んだディレクトリからの相対)
+
+    Returns
+    ----------
+    message: str
+        理由と, 読む場合の設定の案内
+    """
+    # 設定 follow_links で読めることを添える
+    message = (
+        f"{name} は読み込んだディレクトリの外を指すリンクなので読みません "
+        "(読むには読み込みの設定 follow_links を true にしてください)"
+    )
+
+    return message
+
+
+def check_inside(base: Optional[Path], path: Path, name: str) -> Path:
+    """
+    読み込んだディレクトリの外を指すリンクを誤りにする関数
+
+    Parameters
+    ----------
+    base: Optional[Path]
+        読み込んだディレクトリ (None ならリンクの先をたどって読む)
+    path: Path
+        読む場所
+    name: str
+        誤りに書く件の場所
+
+    Returns
+    ----------
+    path: Path
+        中にあれば渡した場所
+
+    Raises
+    ----------
+    ValueError
+        リンクをたどった後に外を指す場合
+    """
+    # たどる設定でなければ, たどった後の場所で比べる
+    if base is not None and points_outside(base, path):
+        raise ValueError(outside_message(name))
+
+    return path
 
 
 def detect(path: Union[str, Path]) -> list[dict]:

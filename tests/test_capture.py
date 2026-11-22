@@ -253,11 +253,15 @@ def test_capture_review_cases(tmp_path: Path) -> None:
     codes = {item["code"] for item in profile(load_data(still))["findings"]}
     assert "no_orbit" in codes
 
-    # 撮影の中の画像のディレクトリが別の場所へのシンボリックリンクでも読む
+    # 撮影の中の画像のディレクトリが外へのリンクなら, 既定では無いものと
+    # し, follow_links でたどる
     linked = write_capture(tmp_path / "linked", [0, 120, 240], 200)
     (linked / "images").rename(tmp_path / "shared_images")
     (linked / "images").symlink_to(tmp_path / "shared_images")
-    assert load_data(linked).frame.loc[0, "missing_files"] == 0
+    assert load_data(linked).frame.loc[0, "missing_files"] == 3
+    assert load_data(linked, follow_links=True).frame.loc[
+        0, "missing_files"
+    ] == 0
 
     # OpenCV とだけ書いた座標の決まり (+Z が前) でも一周を測る
     flipped = write_capture(tmp_path / "cv", list(range(0, 360, 60)), 200)
