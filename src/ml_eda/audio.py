@@ -493,8 +493,9 @@ def audio_findings(data: Data, result: dict) -> list[dict]:
             "severity": "info", "code": "clipped_items",
             "message": (
                 f"見本の {result['sampled']} 件のうち {result['clipped']} 件で"
-                f", 標本の {CLIPPED_SHARE:.0%} 以上が満点の端に張り付いて"
-                "います (音が割れている). 録音の大きさを確かめてください"
+                f", 標本の {CLIPPED_SHARE:.0%} 以上が音の大きさの上限 (形式の満点) に"
+                "張り付いています (音が割れている). 録音の大きさを確かめて"
+                "ください"
             ),
             "columns": [],
         })
