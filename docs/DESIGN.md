@@ -426,7 +426,6 @@ split:
 
 **元の場所** (`source`): 書き出したデータセットは人に渡すことがあるので, 手元のディレクトリの構成を残さない. 入力と正解のディレクトリは渡した場所の名前 (`.` と `..` を畳んだ最後の部分. シンボリックリンクはたどらない. `~` だけと根は空) だけを書き (`images`, `masks` や `captures`, `clouds`), `paths: name_only` と `note` (名前だけを残したこと) を添える. 絶対パスもデータセットからの相対の場所も書かない (相対の場所も `../../` から手元の構成が分かるため). 読む側は `source` を読まない.
 
-
 ### 画像と領域の対 (`export_image_masks`)
 
 `export_image_masks(images, masks, path, split=None, groups=None, classes=None, origin=None, name=None, overwrite=False, mask_suffix="", item_steps=None, follow_links=False)`. Pillow が要る.
