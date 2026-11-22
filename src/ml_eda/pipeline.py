@@ -275,14 +275,17 @@ def group_name(frame: pd.DataFrame, split: dict) -> str:
     Raises
     ----------
     ValueError
-        グループの列が無い場合
+        グループの列を書いていない場合か, 表に無い場合
     """
-    # 書いていないか表に無ければ誤り
+    # 書いていない場合は書く案内, 表に無い場合は列の名前を挙げた誤り
     column = split.get("column")
-    if not column or column not in frame.columns:
+    if not column:
         raise ValueError(
-            f"グループの分割には列 (split.column) が要ります: {column}"
+            "グループを使う分割には, グループの列 (split.column) を"
+            "書いてください"
         )
+    if column not in frame.columns:
+        raise ValueError(f"グループの列 (split.column) がありません: {column}")
 
     return column
 

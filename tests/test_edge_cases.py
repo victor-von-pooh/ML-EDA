@@ -414,8 +414,11 @@ def test_group_time_split(tmp_path: Path) -> None:
     # 日時の列とグループの列が要る
     with pytest.raises(ValueError, match="日時の列"):
         prepare(table(frame.drop(columns=["t"])), recipe)
+    recipe["split"]["column"] = "h"
+    with pytest.raises(ValueError, match="split.column\\) がありません: h"):
+        prepare(series, recipe)
     recipe["split"].pop("column")
-    with pytest.raises(ValueError, match="split.column"):
+    with pytest.raises(ValueError, match="を書いてください"):
         prepare(series, recipe)
 
     # 時刻の順の分割の重なりの気付きは group_time を勧める
