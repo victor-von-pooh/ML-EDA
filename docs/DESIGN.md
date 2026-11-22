@@ -23,6 +23,21 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
 | データの読み方 (`Data.source` の `loader` と `options`) | 持つ | 版を持たない (読み込みの名前と設定) | ML-Quest (問題の設定の `data` に残す), ML-Fathom. 下の「読み込み」 |
 | 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の値の決まり (`convention.shift`) は, 見本の一覧の版 2 でこれと同じ向き (ML-Found の `load_samples` は逆の向きの版 1 を版 2 の意味に写して返す) |
+| 表の 1 ページ (`frame_view`) | 持つ | 版を持たない (下の形) | ML-Fathom (表の中身). 下の「公開の名前」 |
+| 書き出しの版の定数 (`DATASET_FORMAT_VERSION`, `ITEMS_FORMAT_VERSIONS`) | 持つ | データセットの版そのもの | ML-Fathom (書き出したデータセットの版の見分け), ML-Inference (一式の版の確かめ). 下の「公開の名前」 |
+| 画像 1 枚の読み方 (`read_image`) | 持つ | 版を持たない | ML-Fathom (撮影の 1 枚). 下の「公開の名前」 |
+
+### 公開の名前
+
+他のリポジトリが使ってよい名前は, `ml_eda` の `__all__` にあり `from ml_eda import ...` で読めるものだけ. 元のモジュール (`ml_eda.pipeline` など) の名前も残すが, 他のリポジトリは `ml_eda` から読む. 画面と推論が使う次の名前の形を約束にする.
+
+- `frame_view(frame, rows)`: 表の行数, 列と型, 先頭の `rows` 行を JSON にできる辞書で返す. 鍵は次の 3 つ
+    - `rows`: 表の全ての行数 (`int`)
+    - `columns`: 列ごとの `{"name": str, "dtype": str}` の並び (`dtype` は pandas の型の名前. 例 `int64`, `float64`, `object`, `datetime64[ns]`)
+    - `head`: 先頭の行の並び. 1 行は列の順の値の並び. 値は `int`, 有限の `float`, `bool`, `str`, `None` のどれか. 欠損と無限大は `None`, リストと辞書と配列と日時とカテゴリなど数と真偽でないものは文字 (`str()`)
+- `DATASET_FORMAT_VERSION`: `load_dataset` が読む列の正解のデータセットの版 (`int`. 今は 1)
+- `ITEMS_FORMAT_VERSIONS`: `load_items` が読むファイルの組のデータセットの版の組 (`tuple[int, ...]`. 今は `(2, 3)`)
+- `read_image(path)`: ファイル 1 つの画像を numpy の配列にする低い層. 形は (高さ, 幅) か (高さ, 幅, チャンネル), 型は `uint8`, 書き込める写し. EXIF の向きを直し, パレットなどは RGB (透明があれば RGBA), 16 ビットと浮動小数は 0 から 255 に縮めた 1 チャンネル, 2 値は 0 と 255 にそろえる. 版 2 の書き出しと `load_item` の画像と同じ読み方
 
 ## 3. 用語
 

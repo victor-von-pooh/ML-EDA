@@ -1426,15 +1426,18 @@ def frame_view(frame: pd.DataFrame, rows: int) -> dict:
     Returns
     ----------
     view: dict
-        行数, 列の名前と型, 先頭の行 (値は文字か数)
+        行数 (rows), 列の名前と型 (columns の name と dtype), 先頭の行
+        (head. 値は int, 有限の float, bool, str か None)
     """
-    # 先頭の行を JSON にできる値にする
+    # 先頭の行を JSON にできる値にする (入れ物は文字, 欠損と無限大は None)
     head = frame.head(rows)
     records = [
         [
             str(value) if isinstance(value, (list, dict, np.ndarray))
             else None if pd.isna(value) else (
-                value if isinstance(value, (int, float, bool, np.number))
+                value if isinstance(
+                    value, (int, float, bool, np.number, np.bool_)
+                )
                 else str(value)
             )
             for value in row
@@ -1449,6 +1452,7 @@ def frame_view(frame: pd.DataFrame, rows: int) -> dict:
         ],
         "head": records,
     }
+    view = to_json(view)
 
     return view
 
