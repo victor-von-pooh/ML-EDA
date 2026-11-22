@@ -977,3 +977,89 @@ def test_lag_window_gap() -> None:
         with pytest.raises(ValueError, match="gap"):
             apply_lag(frame, {"columns": ["v"], "windows": [2], "gap": bad},
                       {})
+
+
+def test_public_names_for_screen_and_inference() -> None:
+    """
+    画面と推論が使う名前が公開され, frame_view の形が約束どおりかを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    import ml_eda
+    from ml_eda import (
+        DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS, frame_view, read_image
+    )
+    from ml_eda import media, pipeline
+
+    # 公開の名前と, 元のモジュールの名前が同じもの
+    for name in ("frame_view", "DATASET_FORMAT_VERSION",
+                 "ITEMS_FORMAT_VERSIONS", "read_image"):
+        assert name in ml_eda.__all__
+    assert frame_view is pipeline.frame_view
+    assert read_image is media.read_image
+    assert DATASET_FORMAT_VERSION == pipeline.DATASET_FORMAT_VERSION == 1
+    assert ITEMS_FORMAT_VERSIONS == pipeline.ITEMS_FORMAT_VERSIONS == (2, 3)
+
+    # 鍵は rows, columns (name, dtype), head の 3 つ
+    frame = pd.DataFrame({
+        "i": [1, 2, 3],
+        "f": [1.5, np.nan, np.inf],
+        "b": [True, False, True],
+        "nb": pd.array([True, None, False], dtype="boolean"),
+        "ni": pd.array([1, None, 3], dtype="Int64"),
+        "s": ["a", None, "c"],
+        "t": pd.to_datetime(["2024-01-01", None, "2024-01-03"]),
+        "l": [[1], [2], [3]],
+        "c": pd.Categorical(["x", "y", "x"]),
+    })
+    view = frame_view(frame, 2)
+    assert set(view) == {"rows", "columns", "head"}
+    assert view["rows"] == 3 and type(view["rows"]) is int
+    assert view["columns"][0] == {"name": "i", "dtype": "int64"}
+    assert [c["name"] for c in view["columns"]] == list(frame.columns)
+    for column in view["columns"]:
+        assert set(column) == {"name", "dtype"}
+        assert all(type(value) is str for value in column.values())
+
+    # 値は int, 有限の float, bool, str か None. 欠損と無限大は None
+    assert view["head"] == [
+        [1, 1.5, True, True, 1, "a", "2024-01-01 00:00:00", "[1]", "x"],
+        [2, None, False, None, None, None, None, "[2]", "y"],
+    ]
+    for row in view["head"]:
+        assert len(row) == len(frame.columns)
+        for value in row:
+            assert value is None or type(value) in (int, float, bool, str)
+    assert frame_view(frame.iloc[2:], 5)["head"][0][1] is None
+    json.dumps(view, allow_nan=False)
+
+
+def test_public_read_image(tmp_path: Path) -> None:
+    """
+    公開の read_image が 1 枚の画像を uint8 の書き込める配列にするかを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    Image = pytest.importorskip("PIL.Image")
+    from ml_eda import read_image
+
+    # 色の画像は (高さ, 幅, 3) の uint8
+    Image.new("RGB", (4, 3), (10, 20, 30)).save(tmp_path / "rgb.png")
+    image = read_image(tmp_path / "rgb.png")
+    assert image.shape == (3, 4, 3) and image.dtype == np.uint8
+    assert image.flags.writeable and image[0, 0].tolist() == [10, 20, 30]
