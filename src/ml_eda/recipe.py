@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from ml_eda.itemprep import ITEM_STEPS
+
 # レシピの形式の版
 FORMAT_VERSION = 1
 
@@ -1299,6 +1301,46 @@ def check_step_params(index: int, step: dict) -> None:
         )
 
 
+def check_item_step_params(index: int, step: Any) -> None:
+    """
+    中身の手順の引数が, その手順の知っている引数だけかを確かめる関数
+
+    表の手順 (check_step_params) と同じく, 知らない引数を黙って無視して
+    別の配列を作らないよう, 読んだ時点で止める. 知らない手順と種類に
+    合わない手順は, 種類の分かる prepare で確かめる
+
+    Parameters
+    ----------
+    index: int
+        中身の手順の位置 (0 から)
+    step: Any
+        中身の手順 (op と引数, 当てはめた値の state)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        知らない引数がある場合
+    """
+    # 登録簿にある手順だけ (op と当てはめた値 state の他は登録した引数)
+    if not isinstance(step, dict) or step.get("op") not in ITEM_STEPS:
+        return
+    params = ITEM_STEPS[step["op"]].params
+    unknown = sorted(
+        str(key) for key in step if key not in set(params) | STEP_KEYS
+    )
+    if unknown:
+        raise ValueError(
+            f"中身の手順 {index + 1} ({step['op']}) に知らない引数があります: "
+            f"{', '.join(unknown)} (この版の ML-EDA が知る引数は "
+            f"{', '.join(sorted(params)) or '無し'}. 新しい版の ML-EDA で"
+            "書いたレシピなら, ML-EDA を上げてください)"
+        )
+
+
 def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     """
     レシピを読み込み, 形を確かめる関数
@@ -1316,8 +1358,8 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     Raises
     ----------
     ValueError
-        新しい版, 知らない手順, 手順の知らない引数, 形の誤りの場合と, 目的
-        の列の無いレシピで split.unlabeled が keep の場合
+        新しい版, 知らない手順, 手順と中身の手順の知らない引数, 形の誤りの
+        場合と, 目的の列の無いレシピで split.unlabeled が keep の場合
     """
     # ファイルなら読み込み
     if isinstance(recipe, (str, Path)):
@@ -1353,6 +1395,10 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
                 f"{step.get('op') if isinstance(step, dict) else step}"
             )
         check_step_params(index, step)
+    if not isinstance(loaded["item_steps"], list):
+        raise ValueError("item_steps は手順の並び (リスト) にしてください")
+    for index, step in enumerate(loaded["item_steps"]):
+        check_item_step_params(index, step)
     method = loaded["split"].get("method", "random")
     if method not in SPLIT_METHODS:
         raise ValueError(f"知らない分割のしかたです: {method}")
