@@ -1,4 +1,5 @@
 import math
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -37,7 +38,7 @@ def audio_parts(audio: Any, op: str) -> tuple[np.ndarray, int]:
     ValueError
         辞書でない, 標本が 2 次元でない, 周波数が 1 以上でない場合
     """
-    # read_audio の返す形だけを受け取る
+    # read_audio の返す形だけの受け取り
     if not isinstance(audio, dict) or "samples" not in audio:
         raise ValueError(
             f"{op} には read_audio の形 (samples と sample_rate の辞書) を"
@@ -84,7 +85,7 @@ def whole_number(op: str, name: str, value: Any) -> int:
     ValueError
         1 以上の整数でない場合
     """
-    # 真偽値と小数は受け取らない
+    # 真偽値と小数は誤り
     if isinstance(value, bool) or not isinstance(
         value, (int, np.integer)
     ) or value < 1:
@@ -96,9 +97,46 @@ def whole_number(op: str, name: str, value: Any) -> int:
     return number
 
 
+def positive_number(op: str, name: str, value: Any) -> float:
+    """
+    手順の引数を 0 より大きい有限の数として確かめる関数
+
+    Parameters
+    ----------
+    op: str
+        手順の名前
+    name: str
+        引数の名前
+    value: Any
+        引数の値
+
+    Returns
+    ----------
+    number: float
+        値
+
+    Raises
+    ----------
+    ValueError
+        0 より大きい有限の数でない場合
+    """
+    # 真偽値と文字は誤り
+    if isinstance(value, bool) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ) or not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"{op} の {name} は 0 より大きい数にしてください (今は {value})"
+        )
+    number = float(value)
+
+    return number
+
+
+@lru_cache(maxsize=16)
 def sinc_bank(up: int, down: int) -> tuple[np.ndarray, int]:
     """
-    多相のフィルタの位相ごとの重みを作る関数
+    多相のフィルタの位相ごとの重みを作る関数 (比ごとに 1 度だけ作り,
+    書き込めない配列を返す)
 
     Parameters
     ----------
@@ -112,7 +150,7 @@ def sinc_bank(up: int, down: int) -> tuple[np.ndarray, int]:
     bank: tuple[np.ndarray, int]
         (位相, 重み) の配列と, 片側の重みの数
     """
-    # 下げる場合は先の周波数の半分で切る (零点の間を比で広げる)
+    # 下げる場合は先の周波数の半分での切り (零点の間を比で広げる)
     cutoff = min(1.0, up / down)
     half = int(math.ceil(SINC_ZEROS / cutoff))
     offsets = np.arange(-half + 1, half + 1)
@@ -126,6 +164,7 @@ def sinc_bank(up: int, down: int) -> tuple[np.ndarray, int]:
 
     # 位相ごとに重みの和を 1 (直流をそのまま通す)
     weights /= weights.sum(axis=1, keepdims=True)
+    weights.flags.writeable = False
     bank = (weights, half)
 
     return bank
@@ -157,14 +196,23 @@ def resample_sinc(samples: np.ndarray, up: int, down: int) -> np.ndarray:
     base = numerator // up
     phase = numerator % up
 
-    # 両側を 0 で埋め, 重みの列ごとに足し込む (記憶は出力の大きさだけ)
+    # 両側の 0 の埋め
     padded = np.zeros((count + 2 * half, samples.shape[1]), dtype=np.float64)
     padded[half:half + count] = samples
     accumulated = np.zeros((total, samples.shape[1]), dtype=np.float64)
-    for column, offset in enumerate(range(-half + 1, half + 1)):
-        accumulated += (
-            padded[base + offset + half] * weights[phase, column][:, None]
-        )
+
+    # 少ない方の軸での繰り返し (重みの列ごとか, 出力の標本ごと)
+    if total < 2 * half:
+        for number in range(total):
+            start = base[number] + 1
+            accumulated[number] = (
+                weights[phase[number]] @ padded[start:start + 2 * half]
+            )
+    else:
+        for column, offset in enumerate(range(-half + 1, half + 1)):
+            accumulated += (
+                padded[base + offset + half] * weights[phase, column][:, None]
+            )
     result = accumulated.astype(np.float32)
 
     return result
@@ -238,7 +286,7 @@ def resample(audio: Any, params: dict, state: dict) -> dict:
         resampled = {**audio, "samples": samples, "sample_rate": rate}
         return resampled
 
-    # 既約の比で変える
+    # 既約の比での変換
     divisor = math.gcd(rate, source)
     up, down = rate // divisor, source // divisor
     change = resample_sinc if method == "sinc" else resample_linear
@@ -272,7 +320,7 @@ def mix_channels(audio: Any, params: dict, state: dict) -> dict:
     ValueError
         channels が 1 以上の整数でない場合と, 混ぜ方の決まらない組の場合
     """
-    # 1 は平均, 1 チャンネルからは同じ音を並べる
+    # 1 は平均, 1 チャンネルからは同じ音の並び
     samples, _ = audio_parts(audio, "mix_channels")
     channels = whole_number("mix_channels", "channels", params.get("channels"))
     have = samples.shape[1]
@@ -320,23 +368,16 @@ def fix_length(audio: Any, params: dict, state: dict) -> dict:
     """
     # 引数の確認と, そろえる標本の数
     samples, rate = audio_parts(audio, "fix_length")
-    seconds = params.get("seconds")
-    if isinstance(seconds, bool) or not isinstance(
-        seconds, (int, float, np.integer, np.floating)
-    ) or not math.isfinite(seconds) or seconds <= 0:
-        raise ValueError(
-            f"fix_length の seconds は 0 より大きい数にしてください (今は "
-            f"{seconds})"
-        )
+    seconds = positive_number("fix_length", "seconds", params.get("seconds"))
     align = params.get("align", "start")
     if align not in ALIGNS:
         raise ValueError(
             f"fix_length の align は {', '.join(ALIGNS)} のどれかにして"
             f"ください: {align}"
         )
-    length = max(int(round(seconds * rate)), 1)
+    length = max(int(math.floor(seconds * rate + 0.5)), 1)
 
-    # 長ければ切り, 短ければ 0 で埋める (center は両側, 余りは後ろ)
+    # 長ければ切り, 短ければ 0 の埋め (center は両側, 余りは後ろ)
     count = len(samples)
     gap = abs(count - length)
     before = gap // 2 if align == "center" else 0

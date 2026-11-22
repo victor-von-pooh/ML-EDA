@@ -4,7 +4,7 @@
 
 ## できること
 
-表, 時系列, 画像, 文, 点群のように形の違うデータを読み込み, 探索的に分析し (EDA), 前処理のレシピで学習用のデータセットに書き出す. 書き出したデータセットは, [ML-Found](https://github.com/victor-von-pooh/ML-Found) の学習スクリプトがそのまま読み込める.
+表, 時系列, 画像, 文, 点群, 音声のように形の違うデータを読み込み, 探索的に分析し (EDA), 前処理のレシピで学習用のデータセットに書き出す. 書き出したデータセットは, [ML-Found](https://github.com/victor-von-pooh/ML-Found) の学習スクリプトがそのまま読み込める.
 
 - **読み込み**: 拡張子と中身から形を判定する (csv, tsv, json, jsonl, parquet, xlsx, npy など. 文字コードと区切り文字も推定)
 - **分析**: 列の型の推定, 統計とヒストグラム, 相関, 目的の列との関連の強さ, 時系列の間隔と周期, 気付き (欠損の多い列, ID らしい列, リークの疑い, クラスの偏りなど)
@@ -101,6 +101,8 @@ item_steps:
   - {op: resample, rate: 16000}           # method: sinc (既定) か linear
   - {op: mix_channels, channels: 1}
   - {op: fix_length, seconds: 1.0}        # align: start (既定) か center
+steps:
+  - {op: filter_rows, column: error, compare: isna}   # 読めない件を除く
 split: {method: stratified, valid: 0.2}
 ```
 

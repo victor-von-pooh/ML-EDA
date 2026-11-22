@@ -392,8 +392,8 @@ def test_resample() -> None:
     gap = np.abs(done["samples"] - sine(440, 0.5, 22050))[400:-400]
     assert gap.max() < 2e-3
 
-    # 先の周波数の半分より高い音 (7 kHz を 8 kHz に) は落ち, 線形補間は
-    # 折り返して残る
+    # 先の周波数の半分より高い音 (7 kHz を 8 kHz に) の落ちと, 線形補間の
+    # 折り返し. 半分より低い音 (6 kHz を 16 kHz に) はそのまま
     high = {"samples": sine(7000, 0.5, 48000), "sample_rate": 48000}
     sinc = resample(high, {"rate": 8000}, {})["samples"][200:-200]
     linear = resample(
@@ -401,6 +401,27 @@ def test_resample() -> None:
     )["samples"][200:-200]
     assert np.sqrt(np.mean(sinc ** 2)) < 0.01
     assert np.sqrt(np.mean(linear ** 2)) > 0.1
+    near = {"samples": sine(6000, 0.5, 48000), "sample_rate": 48000}
+    kept = resample(near, {"rate": 16000}, {})["samples"][200:-200]
+    assert abs(np.sqrt(np.mean(kept ** 2)) - 0.5 / np.sqrt(2)) < 0.01
+
+    # 互いに素な比 (44099 から 48000) と, 極端に下げる比 (出力の標本ごとの
+    # 繰り返し), 線形補間で上げる向き
+    prime = {"samples": sine(440, 0.2, 44099), "sample_rate": 44099}
+    done = resample(prime, {"rate": 48000}, {})["samples"]
+    assert done.shape == (-(-len(prime["samples"]) * 48000 // 44099), 1)
+    gap = np.abs(done[:9600] - sine(440, 0.2, 48000))[300:-300]
+    assert gap.max() < 2e-3
+    flat_long = {"samples": np.full((48000, 1), 0.5, np.float32),
+                 "sample_rate": 48000}
+    tiny = resample(flat_long, {"rate": 100}, {})["samples"]
+    assert tiny.shape == (100, 1)
+    assert np.allclose(tiny[20:-20], 0.5, atol=1e-3)
+    assert resample(flat_long, {"rate": 1}, {})["samples"].shape == (1, 1)
+    done = resample(low, {"rate": 22050, "method": "linear"}, {})
+    assert done["samples"].shape == (11025, 1)
+    gap = np.abs(done["samples"] - sine(440, 0.5, 22050))[400:-400]
+    assert gap.max() < 2e-2
 
     # 直流はそのまま, 同じ周波数と空の音声はそのまま, ステレオも
     flat = {"samples": np.full((3000, 2), 0.25, np.float32),
@@ -441,13 +462,15 @@ def test_mix_and_fix_length() -> None:
         {"samples": mono, "sample_rate": 8000}, {"channels": 2}, {}
     )["samples"]
     assert wide.shape == (4, 2) and np.allclose(wide, 0.5)
-    assert mix_channels(audio, {"channels": 2}, {})["samples"] is not None
+    assert np.array_equal(
+        mix_channels(audio, {"channels": 2}, {})["samples"], stereo
+    )
     with pytest.raises(ValueError, match="混ぜ方"):
         mix_channels(audio, {"channels": 3}, {})
     with pytest.raises(ValueError, match="channels"):
         mix_channels(audio, {"channels": 0}, {})
 
-    # 長さ: 先頭を残して切る, 後ろを 0 で埋める, 真ん中を残す
+    # 長さ: 先頭を残した切り, 後ろの 0 の埋め, 真ん中を残した切りと埋め
     ramp = np.arange(10, dtype=np.float32)[:, None]
     audio = {"samples": ramp, "sample_rate": 10}
     cut = fix_length(audio, {"seconds": 0.4}, {})["samples"]
@@ -498,7 +521,7 @@ def test_audio_export(tmp_path: Path) -> None:
         "split": {"method": "stratified", "valid": 0.3, "seed": 0},
     }
 
-    # 中身を読まない確かめ: 読めない件と, そろえる手順の無いもの
+    # 中身を読まない確かめ: 読めない件, そろえる手順の無いもの, 引数の誤り
     notes = prepare(
         data, {**recipe, "item_steps": []}, read_items=False
     ).notes
@@ -509,15 +532,33 @@ def test_audio_export(tmp_path: Path) -> None:
         prepare(data, {**recipe, "item_steps": [
             {"op": "resample", "rate": 16000, "method": "cubic"}
         ]}, read_items=False)
+    for spec in ({"op": "resample", "rate": 0},
+                 {"op": "mix_channels", "channels": 1.5},
+                 {"op": "fix_length", "seconds": -1}):
+        with pytest.raises(ValueError, match=spec["op"]):
+            prepare(data, {**recipe, "item_steps": [spec]},
+                    read_items=False)
     with pytest.raises(ValueError, match="audio に使えない"):
         prepare(data, {**recipe, "item_steps": [{"op": "resize"}]},
                 read_items=False)
 
-    # 読めない件があれば, 除き方を添えて止まる
+    # 周波数をそろえる場合, 長さは秒で比べる (16 kHz の 1 秒と 8 kHz の
+    # 2 秒は標本の数が同じでも, そろえた後は違う)
+    pair = tmp_path / "pair"
+    write_wave(pair / "a" / "one.wav", tone(1.0, 16000))
+    write_wave(pair / "b" / "two.wav", tone(2.0, 8000), 8000)
+    write_wave(pair / "b" / "same.wav", tone(1.0, 44100), 44100)
+    notes = prepare(load_data(pair), {
+        **recipe, "item_steps": [{"op": "resample", "rate": 16000}],
+        "split": {"method": "none"},
+    }, read_items=False).notes
+    assert any("長さ" in note for note in notes)
+
+    # 読めない件での, 除き方を添えた誤り
     with pytest.raises(ValueError, match="error がある"):
         export_dataset(data, recipe, tmp_path / "bad")
 
-    # 読めない件を除いて書き出す
+    # 読めない件を除いた書き出し
     recipe["steps"] = [
         {"op": "filter_rows", "column": "error", "compare": "isna"}
     ]

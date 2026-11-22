@@ -8,7 +8,7 @@ import pandas as pd
 
 from ml_eda.audioprep import (
     ALIGNS, RESAMPLE_METHODS, audio_array, fix_length, mix_channels,
-    resample
+    positive_number, resample, whole_number
 )
 
 # 当てはめに使う学習用の件数の上限 (画像の平均など)
@@ -689,21 +689,53 @@ def check_item_steps(steps: Any, kind: str) -> None:
                         "(pip install tokenizers)"
                     )
 
-        # 音声の選び方の引数 (中身を読む前に止める)
-        choices = {"resample": ("method", RESAMPLE_METHODS),
-                   "fix_length": ("align", ALIGNS)}
-        if op in choices:
-            name, allowed = choices[op]
-            value = spec.get(name, allowed[0])
-            if value not in allowed:
-                raise ValueError(
-                    f"{op} の {name} は {', '.join(allowed)} のどれかにして"
-                    f"ください: {value}"
-                )
+        # 音声の引数 (中身を読む前に止める)
+        if kind == "audio":
+            check_audio_params(op, spec)
 
     # 文は語彙で番号にしないと学習に渡せない
     if kind == "text" and not any(s["op"] == "vocabulary" for s in steps):
         raise ValueError("文は vocabulary の手順で番号の並びにしてください")
+
+
+def check_audio_params(op: str, spec: dict) -> None:
+    """
+    音声の中身の手順の引数の値を, 中身を読まずに確かめる関数
+
+    Parameters
+    ----------
+    op: str
+        手順の名前
+    spec: dict
+        手順 (op と引数)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        数の引数の範囲の外と, 選び方の引数が決まった値でない場合
+    """
+    # 数の引数 (rate と channels は 1 以上の整数, seconds は正の数)
+    counts = {"resample": "rate", "mix_channels": "channels"}
+    if op in counts:
+        whole_number(op, counts[op], spec.get(counts[op]))
+    if op == "fix_length":
+        positive_number(op, "seconds", spec.get("seconds"))
+
+    # 選び方の引数
+    choices = {"resample": ("method", RESAMPLE_METHODS),
+               "fix_length": ("align", ALIGNS)}
+    if op in choices:
+        name, allowed = choices[op]
+        value = spec.get(name, allowed[0])
+        if value not in allowed:
+            raise ValueError(
+                f"{op} の {name} は {', '.join(allowed)} のどれかにして"
+                f"ください: {value}"
+            )
 
 
 def item_notes(frame: pd.DataFrame, steps: list, kind: str) -> list[str]:
@@ -783,17 +815,22 @@ def audio_notes(frame: pd.DataFrame, ops: set) -> list[str]:
     notes: list[str]
         注意
     """
-    # 周波数, チャンネル, 長さのうち, そろえる手順の無いもの
+    # 周波数, チャンネル, 長さのうち, そろえる手順の無いもの (周波数を
+    # そろえる場合, 長さは秒での比べ)
+    length = "duration" if "resample" in ops else "frames"
     checks = (
         ("sample_rate", "resample", "標本化の周波数"),
         ("channels", "mix_channels", "チャンネルの数"),
-        ("frames", "fix_length", "長さ"),
+        (length, "fix_length", "長さ"),
     )
     notes = []
     for column, op, label in checks:
         if op in ops or column not in frame.columns:
             continue
-        if frame[column].dropna().nunique() > 1:
+        values = frame[column].dropna()
+        if column == "duration":
+            values = values.round(3)
+        if values.nunique() > 1:
             notes.append(f"音声の{label}がそろっていません. {op} を足して"
                          "ください")
 
