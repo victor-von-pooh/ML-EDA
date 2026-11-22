@@ -2164,7 +2164,9 @@ def load_dataset(
     return dataset
 
 
-def item_input(root: Path, splits: dict) -> Optional[dict]:
+def item_input(
+    root: Path, splits: dict, follow_links: bool = False
+) -> Optional[dict]:
     """
     画像, 文, 点群, 音声の中身の配列から, モデルの入力の形と型を求める関数
 
@@ -2174,11 +2176,20 @@ def item_input(root: Path, splits: dict) -> Optional[dict]:
         データセットのディレクトリ
     splits: dict
         説明の splits
+    follow_links: bool = False
+        リンクをたどった後にデータセットの外を指す場所も読むか
 
     Returns
     ----------
     result: Optional[dict]
         {name, shape, dtype} (中身の配列の無いデータセットは None)
+
+    Raises
+    ----------
+    ValueError
+        配列の場所がデータセットの外を指す場合
+    FileNotFoundError
+        配列が無い場合
     """
     # 学習用を先に, 無ければ配列を持つ最初の分割. 型はファイルの頭だけ
     names = [name for name in splits if name == "train"] + [
@@ -2189,7 +2200,10 @@ def item_input(root: Path, splits: dict) -> Optional[dict]:
         result = None
         return result
     item = splits[chosen[0]]
-    array = np.load(root / item["items"], allow_pickle=False, mmap_mode="r")
+    array = np.load(
+        within(root, item["items"], False, follow_links, FileNotFoundError),
+        allow_pickle=False, mmap_mode="r"
+    )
     shape = list(item.get("shape") or array.shape)
     result = {
         "name": MODEL_INPUT,
@@ -2200,7 +2214,9 @@ def item_input(root: Path, splits: dict) -> Optional[dict]:
     return result
 
 
-def text_vocabulary(root: Path, info: dict) -> Optional[int]:
+def text_vocabulary(
+    root: Path, info: dict, follow_links: bool = False
+) -> Optional[int]:
     """
     文のデータセットの当てはめた語彙から, 語彙の大きさを求める関数
 
@@ -2210,19 +2226,31 @@ def text_vocabulary(root: Path, info: dict) -> Optional[int]:
         データセットのディレクトリ
     info: dict
         説明 (dataset.yaml)
+    follow_links: bool = False
+        リンクをたどった後にデータセットの外を指す場所も読むか
 
     Returns
     ----------
     size: Optional[int]
         語彙の大きさ (語の番号の上限 + 1. <pad> と <unk> を含む). 文でない
         か, 当てはめた vocabulary の手順が無い場合は None
+
+    Raises
+    ----------
+    ValueError
+        レシピの場所がデータセットの外を指す場合
+    FileNotFoundError
+        レシピが無い場合
     """
     # 当てはめたレシピの中身の手順の最後の vocabulary
     size: Optional[int] = None
     if info.get("kind") != "text":
         return size
     recipe = yaml.safe_load(
-        (root / info.get("recipe", "recipe.yaml")).read_text(encoding="utf-8")
+        within(
+            root, info.get("recipe", "recipe.yaml"), False, follow_links,
+            FileNotFoundError
+        ).read_text(encoding="utf-8")
     ) or {}
     for step in recipe.get("item_steps") or []:
         if not isinstance(step, dict) or step.get("op") != "vocabulary":
@@ -2415,7 +2443,9 @@ def items_model_inputs(info: dict) -> dict:
     )
 
 
-def model_inputs(path: Union[str, Path]) -> dict:
+def model_inputs(
+    path: Union[str, Path], follow_links: bool = False
+) -> dict:
     """
     書き出したデータセットから, モデルの入力と出す値の数を求める関数
 
@@ -2423,6 +2453,9 @@ def model_inputs(path: Union[str, Path]) -> dict:
     ----------
     path: Union[str, Path]
         export_dataset で書き出したディレクトリ
+    follow_links: bool = False
+        説明, 中身の配列, レシピのうち, リンクをたどった後にデータセットの
+        外を指すものも読むか (False では誤り. load_dataset と同じ)
 
     Returns
     ----------
@@ -2435,14 +2468,18 @@ def model_inputs(path: Union[str, Path]) -> dict:
     ----------
     ValueError
         知らない版のデータセットと, 版 2 と 3 (ファイルの組) で入力と
-        正解の種類の組を知らない場合
+        正解の種類の組を知らない場合, 読む場所がデータセットの外 (絶対
+        パスや .., リンクの先) を指す場合
     FileNotFoundError
-        dataset.yaml が無い場合と, 文のデータセットで書き出したレシピが
-        無い場合
+        dataset.yaml が無い場合と, 中身の配列か文のデータセットで書き出した
+        レシピが無い場合
     """
-    # 説明と版の確認 (分割のデータは読まない. ファイルの組は説明だけ)
-    root = Path(path).expanduser()
-    info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
+    # 説明と版の確認 (分割のデータは読まない. ファイルの組は説明だけ).
+    # 読む場所はデータセットの中に限る
+    root = Path(path).expanduser().absolute()
+    info = yaml.safe_load(within(
+        root, "dataset.yaml", False, follow_links, FileNotFoundError
+    ).read_text(encoding="utf-8"))
     version = info.get("format_version") if isinstance(info, dict) else None
     if version in ITEMS_FORMAT_VERSIONS:
         result = items_model_inputs(info)
@@ -2454,10 +2491,10 @@ def model_inputs(path: Union[str, Path]) -> dict:
         )
 
     # 入力 (画像などは中身の配列, 表は学習に使う列を並べた 1 つ)
-    single = item_input(root, info.get("splits") or {})
+    single = item_input(root, info.get("splits") or {}, follow_links)
     if single is not None:
         # 文の語の番号は, 埋め込みに要る語彙の大きさも (書き出したレシピから)
-        vocabulary = text_vocabulary(root, info)
+        vocabulary = text_vocabulary(root, info, follow_links)
         if vocabulary is not None:
             single["vocabulary"] = vocabulary
     if single is None:

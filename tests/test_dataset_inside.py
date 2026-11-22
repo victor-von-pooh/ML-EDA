@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from ml_eda import export_dataset, load_data, load_dataset
+from ml_eda import export_dataset, load_data, load_dataset, model_inputs
 
 
 def test_dataset_inside(tmp_path: Path) -> None:
@@ -67,3 +67,60 @@ def test_dataset_inside(tmp_path: Path) -> None:
         load_dataset(root)
     with pytest.raises(FileNotFoundError):
         load_dataset(tmp_path / "missing")
+
+
+def test_model_inputs_inside(tmp_path: Path) -> None:
+    """
+    版 1 の model_inputs がデータセットの中だけを読むことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 中身の配列とレシピを持つ文のデータセットを書き出す
+    for label, words in (("pos", "good great"), ("neg", "bad awful")):
+        (tmp_path / "reviews" / label).mkdir(parents=True)
+        for index in range(5):
+            (tmp_path / "reviews" / label / f"{index}.txt").write_text(
+                f"this is {words} {index}", encoding="utf-8"
+            )
+    recipe = {
+        "target": "label", "task": "classification",
+        "item_steps": [{"op": "vocabulary", "length": 6}],
+        "split": {"method": "stratified", "valid": 0.2},
+    }
+    root = tmp_path / "ds"
+    export_dataset(load_data(tmp_path / "reviews"), recipe, root)
+    expected = model_inputs(root)
+    info = yaml.safe_load((root / "dataset.yaml").read_text("utf-8"))
+    items = info["splits"]["train"]["items"]
+
+    # 中身の配列の場所が .. で外を指すと誤り
+    (tmp_path / "secret.npy").write_bytes((root / items).read_bytes())
+    info["splits"]["train"]["items"] = "../secret.npy"
+    (root / "dataset.yaml").write_text(yaml.safe_dump(info), "utf-8")
+    with pytest.raises(ValueError, match="データセットの外"):
+        model_inputs(root)
+    info["splits"]["train"]["items"] = items
+    (root / "dataset.yaml").write_text(yaml.safe_dump(info), "utf-8")
+
+    # 中身の配列とレシピが外を指すリンクなら案内付きの誤り, たどる設定で読む
+    for name in (items, info.get("recipe", "recipe.yaml")):
+        outside = tmp_path / ("outside_" + Path(name).name)
+        (root / name).rename(outside)
+        (root / name).symlink_to(outside)
+        with pytest.raises(ValueError, match="follow_links=True"):
+            model_inputs(root)
+        assert model_inputs(root, follow_links=True) == expected
+        (root / name).unlink()
+        outside.rename(root / name)
+
+    # 無いレシピは FileNotFoundError
+    (root / info.get("recipe", "recipe.yaml")).unlink()
+    with pytest.raises(FileNotFoundError):
+        model_inputs(root)
