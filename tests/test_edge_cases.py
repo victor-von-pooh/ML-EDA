@@ -399,6 +399,17 @@ def test_group_time_split(tmp_path: Path) -> None:
         {"time": "t"}
     )
     assert labels.tolist() == ["train"] * 2 + ["test"] * 8
+    big = pd.DataFrame({
+        "t": pd.date_range("2024-01-01", periods=10),
+        "g": [0, 0, 1, 1, 1, 1, 1, 1, 2, 3], "y": [0, 1] * 5,
+    })
+    stamped = Data(kind="timeseries", frame=big, roles={"time": "t"})
+    notes = prepare(stamped, {
+        "target": "y", "task": "classification",
+        "split": {"method": "group_time", "column": "g", "test": 0.3,
+                  "valid": 0.0},
+    }).notes
+    assert any("test の行は 8 行" in note for note in notes)
 
     # 日時の列とグループの列が要る
     with pytest.raises(ValueError, match="日時の列"):
@@ -470,6 +481,44 @@ def test_stratified_group_split() -> None:
         chosen = set(small["g"][labels == "valid"])
         assert len(chosen & {"a", "c"}) == 1
         assert len(chosen & {"b", "d"}) == 1
+
+    # 多くのクラス: 層ごとの件数がグループより小さくても, 全体で配る
+    many = pd.DataFrame({
+        "customer": np.repeat(np.arange(100), 10),
+        "y": np.repeat(np.arange(50), 20), "x": np.arange(1000.0),
+    })
+    split = {"method": "stratified_group", "column": "customer",
+             "valid": 0.1, "test": 0.1, "seed": 0}
+    prepared = prepare(table(many), {"target": "y", "task": "classification",
+                                     "split": split})
+    sizes = {name: len(part) for name, part in prepared.frames.items()}
+    assert sizes == {"train": 800, "valid": 100, "test": 100}
+    assert prepared.notes == []
+
+    # 少ないグループ: 割合があれば 1 つは入れ, 外れた件数は注意にする
+    few = pd.DataFrame({"customer": np.repeat([0, 1, 2], 10),
+                        "y": [0] * 20 + [1] * 10, "x": np.arange(30.0)})
+    prepared = prepare(table(few), {"target": "y", "task": "classification",
+                                    "split": {**split, "valid": 0.05,
+                                              "test": 0.0}})
+    assert len(prepared.frames["valid"]) == 10
+    assert any("大きく外れました" in note for note in prepared.notes)
+    alone = few.assign(customer=0)
+    prepared = prepare(table(alone), {"target": "y", "task": "classification",
+                                      "split": split})
+    assert set(prepared.frames) == {"train"}
+    assert any("0 件になりました" in note for note in prepared.notes)
+
+    # 回帰の値は層を作れない
+    with pytest.raises(ValueError, match="regression"):
+        load_recipe({"target": "x", "task": "regression", "split": split})
+    with pytest.raises(ValueError, match="ほぼ全て違う"):
+        prepare(table(many), {"target": "x", "split": split})
+
+    # 層化の分割の重なりの気付きは stratified_group を勧める
+    recipe["split"]["method"] = "stratified"
+    message = prepare(table(frame), recipe).findings[0]["message"]
+    assert "stratified_group (column: customer)" in message
 
     # 目的の列が要り, 知らない分け方は読んだ時点で誤り
     with pytest.raises(ValueError, match="目的の列"):

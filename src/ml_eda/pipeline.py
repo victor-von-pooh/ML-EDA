@@ -44,6 +44,13 @@ HIDDEN_COLUMNS = (SPLIT_COLUMN, TIME_COLUMN, ROW_COLUMN, GROUP_COLUMN)
 # 重なりの例として挙げる値の数
 OVERLAP_EXAMPLES = 3
 
+# グループの層化で, 目的の値の種類がこれより多く, 行の半分より多ければ
+# 層を作れない (回帰の値など) とする
+STRATA_LIMIT = 20
+
+# グループでまとめる分割のしかた (分割の件数が割合から外れうる)
+GROUP_METHODS = ("group", "group_time", "stratified_group")
+
 # 目的の列があるのにタスクを決めていない場合の注意
 NO_TASK_NOTE = (
     "タスクが決まっていません. 目的の列はそのままの値で書き出します"
@@ -213,9 +220,7 @@ def assign_splits(
 
     # グループごとに同じ分割にする (行の件数が割合に近くなるまで加える)
     if method == "group":
-        # 列の確認と, 値を文字にそろえた鍵
-        group_codes(frame, split)
-        column = split["column"]
+        column = group_name(frame, split)
         keys = frame[column].astype(str).where(frame[column].notna(), None)
         sizes = keys.value_counts(dropna=False)
         groups = list(sizes.index)
@@ -251,6 +256,37 @@ def assign_splits(
     return assigned
 
 
+def group_name(frame: pd.DataFrame, split: dict) -> str:
+    """
+    分割に使うグループの列の名前を, 表にあるかを確かめて返す関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        表
+    split: dict
+        レシピの分割 (column がグループの列)
+
+    Returns
+    ----------
+    column: str
+        グループの列の名前
+
+    Raises
+    ----------
+    ValueError
+        グループの列が無い場合
+    """
+    # 書いていないか表に無ければ誤り
+    column = split.get("column")
+    if not column or column not in frame.columns:
+        raise ValueError(
+            f"グループの分割には列 (split.column) が要ります: {column}"
+        )
+
+    return column
+
+
 def group_codes(frame: pd.DataFrame, split: dict) -> np.ndarray:
     """
     グループの列の値を, グループの番号にする関数
@@ -273,11 +309,7 @@ def group_codes(frame: pd.DataFrame, split: dict) -> np.ndarray:
         グループの列が無い場合
     """
     # 値は型に依らない文字にそろえ, 欠損も 1 つの番号にする
-    column = split.get("column")
-    if not column or column not in frame.columns:
-        raise ValueError(
-            f"グループの分割には列 (split.column) が要ります: {column}"
-        )
+    column = group_name(frame, split)
     keys = frame[column].astype(str).where(frame[column].notna(), None)
     codes, _ = pd.factorize(keys, use_na_sentinel=False)
 
@@ -285,11 +317,11 @@ def group_codes(frame: pd.DataFrame, split: dict) -> np.ndarray:
 
 
 def fill_groups(
-    groups: list, sizes: pd.Series, n_valid: int, n_test: int,
-    nearest: bool = False
+    groups: list, sizes: pd.Series, n_valid: int, n_test: int
 ) -> dict:
     """
-    並べたグループを, 割合の件数に合う限りテスト用と検証用に入れる関数
+    並べたグループを, 割合の件数に収まる限りテスト用と検証用に入れる
+    関数
 
     Parameters
     ----------
@@ -301,14 +333,11 @@ def fill_groups(
         検証用の行の数
     n_test: int
         テスト用の行の数
-    nearest: bool = False
-        False なら件数に収まる場合だけ入れ, True なら入れると件数に
-        近づく場合 (件数を超えても) に入れる
 
     Returns
     ----------
     labels: dict
-        グループの鍵から分割の名前 (合わないグループは学習用)
+        グループの鍵から分割の名前 (収まらないグループは学習用)
     """
     # テスト用, 検証用の順に, 合うかを確かめて入れる
     labels: dict = {}
@@ -319,11 +348,7 @@ def fill_groups(
         labels[group] = "train"
         for name in ("test", "valid"):
             after = filled[name] + size
-            if nearest:
-                fits = abs(after - wanted[name]) < wanted[name] - filled[name]
-            else:
-                fits = wanted[name] > 0 and after <= wanted[name]
-            if fits:
+            if wanted[name] > 0 and after <= wanted[name]:
                 labels[group] = name
                 filled[name] = after
                 break
@@ -414,7 +439,8 @@ def stratified_group_splits(
     グループの層は, そのグループの行で最も多い目的の値 (同じ数なら文字の
     小さい値). 検証用とテスト用の件数を層の行の数に比例して配り, 層ごと
     に無作為に並べたグループを, 入れると配った件数に近づく限り入れる
-    (層ごとの件数はグループより小さくなりやすいので, 少し超えてもよい)
+    (少し超えてもよい). 層で配り残した件数と超えた件数は次の層に回し,
+    全体で足りなければ学習用のグループを足す
 
     Parameters
     ----------
@@ -439,7 +465,7 @@ def stratified_group_splits(
     Raises
     ----------
     ValueError
-        グループの列か目的の列が無い場合
+        グループの列か目的の列が無い場合と, 目的の値がほぼ全て違う場合
     """
     # グループごとの層 (最も多い目的の値)
     target = roles.get("target")
@@ -449,6 +475,12 @@ def stratified_group_splits(
         )
     codes = group_codes(frame, split)
     values = frame[target].astype(str).to_numpy()
+    distinct = len(set(values))
+    if distinct > STRATA_LIMIT and distinct > len(values) * 0.5:
+        raise ValueError(
+            f"目的の列 {target} の値がほぼ全て違う ({distinct} 種類) ので, "
+            "グループの層を作れません (回帰の値なら group にしてください)"
+        )
     table = pd.crosstab(codes, values)
     strata = table.idxmax(axis=1)
     sizes = pd.Series(codes).value_counts()
@@ -461,18 +493,69 @@ def stratified_group_splits(
     test_shares = allocate(
         [size - share for size, share in zip(rows, valid_shares)], n_test
     )
-    labels: dict = {}
+    labels = {group: "train" for group in strata.index}
+    carry = {"test": 0, "valid": 0}
     for groups, v_count, t_count in zip(members, valid_shares, test_shares):
         groups = list(groups)
         rng.shuffle(groups)
-        labels.update(
-            fill_groups(groups, sizes, v_count, t_count, nearest=True)
-        )
+        wanted = {"test": carry["test"] + t_count,
+                  "valid": carry["valid"] + v_count}
+        got = {"test": 0, "valid": 0}
+        for group in groups:
+            size = int(sizes[group])
+            for name in ("test", "valid"):
+                after = got[name] + size
+                if abs(after - wanted[name]) < wanted[name] - got[name]:
+                    labels[group] = name
+                    got[name] = after
+                    break
+        carry = {name: wanted[name] - got[name] for name in carry}
+
+    # 全体で足りなければ, 学習用のグループを全体の件数に近い順に足す
+    for name, count in (("test", n_test), ("valid", n_valid)):
+        top_up(labels, sizes, name, count)
     assigned = pd.Series(
         [labels[code] for code in codes], index=frame.index, dtype=object
     )
 
     return assigned
+
+
+def top_up(labels: dict, sizes: pd.Series, name: str, count: int) -> None:
+    """
+    分割の行の数が全体の件数に届かない場合に, 学習用のグループを足す関数
+
+    入れると件数に近づくグループを近い順に足す. 割合があるのに 0 件の
+    場合は, 学習用にグループが残る限り, 件数に最も近いグループを 1 つ
+    足す (split_counts の 1 件以上の決まりと同じ)
+
+    Parameters
+    ----------
+    labels: dict
+        グループの鍵から分割の名前 (書き換える)
+    sizes: pd.Series
+        グループの鍵ごとの行の数
+    name: str
+        足す分割の名前 (valid か test)
+    count: int
+        その分割の行の数
+
+    Returns
+    ----------
+    None
+    """
+    # 学習用のグループを 1 つずつ, 件数に近づく限り
+    while count > 0:
+        filled = sum(int(sizes[g]) for g, n in labels.items() if n == name)
+        rest = [g for g, n in labels.items() if n == "train"]
+        if len(rest) < 2 or filled >= count:
+            return
+        best = min(rest, key=lambda g: (abs(filled + int(sizes[g]) - count),
+                                        str(g)))
+        after = filled + int(sizes[best])
+        if filled and abs(after - count) >= count - filled:
+            return
+        labels[best] = name
 
 
 def align_to_time(labels: pd.Series, times: pd.Series) -> pd.Series:
@@ -626,6 +709,54 @@ def count_overlap(keys: pd.Series, splits: pd.Series) -> dict:
     }
 
     return overlap
+
+
+def split_notes(split: dict, result: pd.DataFrame) -> list[str]:
+    """
+    グループでまとめた分割の件数が, 割合から大きく外れたことを注意にする
+    関数
+
+    Parameters
+    ----------
+    split: dict
+        レシピの分割 (method, valid, test)
+    result: pd.DataFrame
+        分割の列を持つ, 手順をかけた表 (正解の付いた行)
+
+    Returns
+    ----------
+    notes: list[str]
+        0 件になった分割と, 割合の件数の半分より多く外れた分割の注意
+    """
+    # 割合を書いた分割だけ (割合の件数は split_counts と同じ決まり)
+    notes: list[str] = []
+    method = split.get("method", "random")
+    if method not in GROUP_METHODS:
+        return notes
+    ratios = {"valid": float(split.get("valid", 0.2)),
+              "test": float(split.get("test", 0.0))}
+    wanted = dict(zip(
+        ("valid", "test"),
+        split_counts(len(result), ratios["valid"], ratios["test"])
+    ))
+    for name in ("valid", "test"):
+        got = int((result[SPLIT_COLUMN] == name).sum())
+        if ratios[name] <= 0:
+            continue
+        if got == 0:
+            notes.append(
+                f"{name} の割合を {ratios[name]} にしましたが, 0 件になりました "
+                f"({method} の分割で, グループが大きく割合に収まらないか, "
+                "件が少ないため). グループを細かくするか割合を上げてください"
+            )
+        elif abs(got - wanted[name]) > wanted[name] / 2:
+            notes.append(
+                f"{name} の行は {got} 行で, 割合の {wanted[name]} 行から大きく"
+                f"外れました ({method} の分割で, 大きなグループが境目にある"
+                "ため). グループを細かくするか割合を見直してください"
+            )
+
+    return notes
 
 
 def overlap_findings(
@@ -1035,6 +1166,7 @@ def prepare(
     # 分割をまたぐグループと画像の重なり (文は注意にも足す)
     findings = overlap_findings(data, recipe, result)
     overlaps = [item["message"] for item in findings]
+    overlaps += split_notes(recipe["split"], result)
 
     # 学習に使う列 (画像などは中身の配列を使うので無し. 役割の列を除く)
     reserved = {target, roles.get("id"), roles.get("time"), SPLIT_COLUMN}

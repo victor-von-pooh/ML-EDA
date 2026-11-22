@@ -1356,6 +1356,11 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     method = loaded["split"].get("method", "random")
     if method not in SPLIT_METHODS:
         raise ValueError(f"知らない分割のしかたです: {method}")
+    if method == "stratified_group" and task in ("regression", "forecasting"):
+        raise ValueError(
+            "グループの層化 (stratified_group) は目的の値で層を作るので, "
+            f"{task} では使えません (group にしてください)"
+        )
     unlabeled = loaded["split"].get("unlabeled", "drop")
     if unlabeled not in UNLABELED_MODES:
         raise ValueError(
