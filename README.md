@@ -21,7 +21,8 @@
 | ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs` |
 | ML-Quest (問題の設定) | データの読み方 (`Data.source`), レシピの雛形と書き戻し, ファイルの組の書き出しの設定. 手元のデータの答えの候補 |
 | ML-CreateArchitecture (モデルの作成) | `model_inputs` でモデルの定義の入力と出力をデータセットに合わせる |
-| ML-Found, ML-Inference, ML-Provide | 書き出したデータセットの読み込み (`load_dataset`, `load_items`) と, 推論のときの同じ前処理 |
+| ML-Found | `task_from_dataset` が `dataset.yaml` を読む (`ml_eda` は使わない) |
+| ML-Inference, ML-Provide | 書き出したデータセットの読み込み (`load_dataset`, `load_items`), 推論のときの同じ前処理, 書き出し (`export_dataset` など) |
 
 ## 導入
 
