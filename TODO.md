@@ -19,6 +19,12 @@
 - 終わりの条件: `source` の `root` と `path` の決まりが DESIGN.md にあり, 種類ごとのテストがある
 - つながり: ML-Fathom の「読み込んだディレクトリの外のファイルを分析と書き出しで読まない」
 
+### 画面が使う名前を公開する
+- 何を: `pipeline.frame_view` (表の行数, 列と型, 先頭の行), `pipeline.DATASET_FORMAT_VERSION` と `pipeline.ITEMS_FORMAT_VERSIONS` (書き出しの約束の版), `media.read_image` (1 枚の画像を読む) を `ml_eda` から公開し (`__all__` に足す), docs/DESIGN.md に書く
+- なぜ: 画面 (ML-Fathom) は公開の名前だけを使う決まりで, 表の見え方 (`preview` の前と後と同じ形), 版の番号, 画像の読み方は ML-EDA と同じでないと食い違うので, 画面で同じものを持てないため
+- 終わりの条件: 4 つの名前が `ml_eda` から読め, 公開の名前のテストがある
+- つながり: ML-Fathom の「ML-EDA に公開してもらう名前に置き換える」
+
 ## 条件待ち
 
 ### 読み込んだディレクトリの外を指すリンクの扱い
