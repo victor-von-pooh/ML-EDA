@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from ml_eda import detect, load_data, prepare, profile, read_audio
+from ml_eda.audio import clip_level
 
 
 def write_wave(
@@ -255,3 +256,72 @@ def test_audio_edge_cases(tmp_path: Path) -> None:
     assert result["items"]["clipped"] == 2
     codes = {item["code"] for item in result["findings"]}
     assert {"clipped_items", "mixed_lengths"} <= codes
+
+
+def test_audio_clipping(tmp_path: Path) -> None:
+    """
+    音の割れの判定が, 形式と bit 数ごとの満点の端で数えることを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest の一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 16 bit 以上と浮動小数の割れていない大きな音 (最大 0.995) は数えない
+    loud = tone(0.5, 8000) * 1.99
+    quiet = tmp_path / "quiet"
+    for bits in (16, 24, 32):
+        write_wave(quiet / f"loud{bits}.wav", loud, 8000, bits=bits)
+    write_float_wave(quiet / "loudf.wav", loud, 8000)
+    result = profile(load_data(quiet))
+    assert result["items"]["sampled"] == 4
+    assert result["items"]["clipped"] == 0
+    codes = {item["code"] for item in result["findings"]}
+    assert "clipped_items" not in codes
+
+    # 端に張り付いた音は全ての bit 数で, 浮動小数は 1 を超える値も数える
+    clipped = np.clip(tone(0.5, 8000) * 4, -1, 1)
+    harsh = tmp_path / "harsh"
+    for bits in (8, 16, 24, 32):
+        write_wave(harsh / f"clip{bits}.wav", clipped, 8000, bits=bits)
+    write_float_wave(harsh / "clipf.wav", clipped, 8000)
+    write_float_wave(harsh / "overf.wav", tone(0.5, 8000) * 4, 8000)
+    result = profile(load_data(harsh))
+    assert result["items"]["clipped"] == 6
+    codes = {item["code"] for item in result["findings"]}
+    assert "clipped_items" in codes
+
+
+def test_clip_level_bounds() -> None:
+    """
+    音の割れとする振幅の端の境界を, 形式と bit 数ごとに確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 整数の形式は正の最大の値から (1 つ下は数えない)
+    for bits in (8, 16, 24):
+        full = 1 << (bits - 1)
+        level = clip_level(bits, "pcm")
+        assert np.float32((full - 1) / full) >= level
+        assert np.float32((full - 2) / full) < level
+
+    # 32 bit の PCM の端は float32 で 1 に丸まり, 0.995 は数えない
+    assert clip_level(32, "pcm") == np.float32(1.0)
+    assert np.float32(0.995) < clip_level(32, "pcm")
+
+    # 浮動小数は 1 から (1 を超える値も)
+    level = clip_level(32, "float")
+    assert np.float32(1.0) >= level
+    assert np.float32(1.5) >= level
+    assert np.float32(0.9999) < level
