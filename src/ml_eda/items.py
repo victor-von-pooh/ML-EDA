@@ -17,7 +17,7 @@ from ml_eda.itemprep import (
     apply_steps, check_entry_steps, mask_steps, nearest
 )
 from ml_eda.loaders import (
-    ARGUMENT_HINT, load_data, option_flag, outside_message, points_outside
+    ARGUMENT_HINT, load_data, option_flag, points_outside, within
 )
 from ml_eda.media import (
     IMAGE_EXTENSIONS, POINT_EXTENSIONS, image_header, list_files,
@@ -2023,53 +2023,6 @@ def export_capture_clouds(
         raise
 
     return info
-
-
-def within(
-    root: Path, name: Any, directory: bool, follow_links: bool = False
-) -> Path:
-    """
-    表に書かれた場所を, データセットのディレクトリの中に限って返す関数
-
-    Parameters
-    ----------
-    root: Path
-        データセットのディレクトリ
-    name: Any
-        書かれた場所 (root からの相対)
-    directory: bool
-        ディレクトリを指すか (False ならファイル)
-    follow_links: bool = False
-        リンクをたどった後に root の外を指す場所も読むか
-
-    Returns
-    ----------
-    path: Path
-        絶対パス
-
-    Raises
-    ----------
-    ValueError
-        文字でない, 外を指す (絶対パスや .., follow_links が False で
-        リンクの先が外), 無い場合
-    """
-    # 書かれた場所の文字の上で中にあり, リンクをたどった後も中にあるもの
-    # だけ (root 自体のリンクはたどって比べる)
-    text = name if isinstance(name, str) else ""
-    normal = os.path.normpath(text) if text else ""
-    outside = not text or os.path.isabs(text) or normal == ".." or (
-        normal.startswith(".." + os.sep)
-    )
-    if outside:
-        raise ValueError(f"データセットの外か空の場所です: {name}")
-    path = (root / normal).absolute()
-    found = path.is_dir() if directory else path.is_file()
-    if not found:
-        raise ValueError(f"データセットに {text} がありません")
-    if not follow_links and points_outside(root, path):
-        raise ValueError(outside_message(text, ARGUMENT_HINT))
-
-    return path
 
 
 def with_channels(array: np.ndarray) -> np.ndarray:

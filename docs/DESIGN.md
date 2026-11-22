@@ -318,7 +318,7 @@ split:
 
 他の組 (画像と `boxes` など) は「まだ返せない」と誤りで止まる (項目の形は `dataset.yaml` の `entries` を見る). 知らない版も止まる.
 
-`load_dataset(path)` は分割ごとの `DataFrame` を返す. `unlabeled` の分割の `arrays` と `tensors` は目的の値を返さない (`arrays` は y が None, `tensors` は特徴量だけ). 画像, 文, 点群, 音声では `arrays` と `tensors` が中身の配列を返し, `transform_item` で新しい 1 件に同じ中身の手順をかける. `arrays` で numpy の配列, `tensors` で PyTorch のテンソルにもできる (PyTorch が入っている場合). `transform` は新しいデータに当てはめた前処理をかける.
+`load_dataset(path, follow_links=False)` は分割ごとの `DataFrame` を返す. 読むのはデータセットのディレクトリの中だけ: `dataset.yaml`, 説明に書かれた分割のデータ (`file`), 中身の配列 (`items`), レシピ (`recipe`) の場所は, 絶対パスか `..` で外を指せば誤り (`ValueError`. 書かれた場所の文字の上で確かめる). リンクをたどった後に外 (データセットのディレクトリもたどった後の場所) を指す場合も, 引数 `follow_links=True` を案内する誤りにする (`load_items` と同じ決まり. `follow_links=True` ではたどる). 無いファイルは `FileNotFoundError`. `unlabeled` の分割の `arrays` と `tensors` は目的の値を返さない (`arrays` は y が None, `tensors` は特徴量だけ). 画像, 文, 点群, 音声では `arrays` と `tensors` が中身の配列を返し, `transform_item` で新しい 1 件に同じ中身の手順をかける. `arrays` で numpy の配列, `tensors` で PyTorch のテンソルにもできる (PyTorch が入っている場合). `transform` は新しいデータに当てはめた前処理をかける.
 
 `load_dataset` は `recipe.yaml` も `load_recipe` と同じく確かめ, 表の手順の知らない手順と, 表の手順と中身の手順の知らない引数があれば, 手順の位置と名前, 引数の名前を挙げて止める (より新しい版の ML-EDA で書いたデータセットを読む場合に, `transform` と `transform_item` が, この版の知らない引数を黙って無視して別の値を作らないため). 空 (None) の引数は確かめない. 空の引数は, 書き出した時の当てはめと同じ読まれ方をする (`params.get(鍵, 既定)` で読む `datetime_parts` の `drop` や `vocabulary` の `lowercase` のように, 省いた場合と違う値になる引数も, 書き出した時と同じ値になる) ので, 読み込みで挙動は変わらない. 空の引数のある古い書き出しも読めるようにするため.
 
@@ -508,6 +508,7 @@ split:
 - 読み込みは手元のファイルだけ. ネットワークは使わない
 - 読み込んだディレクトリの外を指すシンボリックリンクは, 画像, 文, 点群, 撮影, 音声のディレクトリの読み込みとその `load_item`, `load_items`, `read_capture`, 版 2 の書き出し (`export_image_masks`, `export_capture_clouds`), `normalize_capture`, `capture_shift` では既定で読まない (4 章の「外を指すリンク」. 読み込みの設定 `follow_links` か, 関数の引数 `follow_links=True` でたどる)
 - `pickle` を使う形式 (`.pkl`, `allow_pickle` の `.npy`) は読まない (任意のコードを動かせるため)
+- 書き出したデータセットの読み込み (`load_dataset`, `load_items`) は, 説明と表に書かれた場所をデータセットのディレクトリの中に限る (8 章と 9 章. 絶対パスと `..` は誤り. 外を指すリンクは `follow_links` でたどる)
 
 ## 11. 課題の型への広げ方
 
