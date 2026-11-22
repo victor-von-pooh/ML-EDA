@@ -86,7 +86,7 @@ class Prepared:
     classes: list = field(default_factory=list)
     # 前処理の後の注意 (数値でない列が残っているなど)
     notes: list = field(default_factory=list)
-    # 画像, 文, 点群の中身の手順をかけた, 分割ごとの配列
+    # 画像, 文, 点群, 音声の中身の手順をかけた, 分割ごとの配列
     arrays: dict = field(default_factory=dict)
     # 分割の後に分かる気付き (分割をまたぐグループや画像の重なり)
     findings: list = field(default_factory=list)
@@ -1119,16 +1119,11 @@ def prepare(
         手順の失敗, 目的の列が手順で消えた場合, 学習用の行が無い場合,
         回帰の目的の列が数値でない場合
     """
-    # 多視点の撮影と音声は, 今は読み込みと分析だけ
+    # 多視点の撮影は, 今は読み込みと分析だけ
     if data.kind == "capture":
         raise ValueError(
             "多視点の撮影は, 今は読み込みと分析だけです (前処理と書き出し"
             "は, 多視点の学習の正解の形が決まってから)"
-        )
-    if data.kind == "audio":
-        raise ValueError(
-            "音声は, 今は読み込みと分析だけです (前処理と書き出しは, 音声の"
-            "中身の手順を足してから)"
         )
 
     # 分割と手順
@@ -1192,7 +1187,7 @@ def prepare(
             frames[UNLABELED] = extra
             positions[UNLABELED] = extra_rows
 
-    # 画像, 文, 点群は中身の手順で配列にする (表の列は学習に使わない)
+    # 画像, 文, 点群, 音声は中身の手順で配列にする (表の列は使わない)
     arrays: dict = {}
     if data.item_loader is not None:
         check_item_steps(recipe["item_steps"], data.kind)
@@ -1249,7 +1244,7 @@ def preview_items(
     fit_limit: int = 100, seed: Optional[int] = None
 ) -> dict:
     """
-    画像, 文, 点群の中身の手順を, 学習用の見本で当てはめて, 数件に
+    画像, 文, 点群, 音声の中身の手順を, 学習用の見本で当てはめて, 数件に
     かけた前と後を返す関数 (画面で手順の効き方を見るため)
 
     Parameters
@@ -1280,7 +1275,7 @@ def preview_items(
     """
     # 引数と手順の確認, 表の手順と分割による学習用の位置の決定
     if data.item_loader is None:
-        raise ValueError("中身を持たない種類です (画像, 文, 点群で使う)")
+        raise ValueError("中身を持たない種類です (画像, 文, 点群, 音声で使う)")
     if count < 0 or fit_limit < 1:
         raise ValueError("count は 0 以上, fit_limit は 1 以上にしてください")
     loaded = load_recipe(recipe)
@@ -1360,8 +1355,8 @@ def item_reader(data: Data) -> Any:
             where = row.get("path", row.get("file", index))
             raise ValueError(
                 f"{where} を読めません ({error}). 表の手順 filter_rows で, "
-                "読めない件 (画像は width が欠損, 点群は error がある件) を"
-                "除いてください"
+                "読めない件 (画像は width が欠損, 点群と音声は error がある"
+                "件) を除いてください"
             ) from error
 
         return item
@@ -2030,12 +2025,13 @@ class Dataset:
 
     def transform_item(self, item: Any) -> np.ndarray:
         """
-        新しい画像, 文, 点群に, 当てはめた中身の手順をかける関数
+        新しい画像, 文, 点群, 音声に, 当てはめた中身の手順をかける関数
 
         Parameters
         ----------
         item: Any
-            中身 (画像は配列, 文は文字, 点群は points を持つ辞書)
+            中身 (画像は配列, 文は文字, 点群は points を持つ辞書, 音声は
+            read_audio の辞書. 画像と音声はファイルの場所も)
 
         Returns
         ----------
@@ -2048,6 +2044,10 @@ class Dataset:
             from ml_eda.media import read_image
 
             item = read_image(Path(item))
+        if isinstance(item, (str, Path)) and self.info["kind"] == "audio":
+            from ml_eda.audio import read_audio
+
+            item = read_audio(Path(item))
         result = apply_steps(item, self.recipe.get("item_steps", []))
         array = to_array(result, self.info["kind"])
 
@@ -2146,7 +2146,7 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
 
 def item_input(root: Path, splits: dict) -> Optional[dict]:
     """
-    画像, 文, 点群の中身の配列から, モデルの入力の形と型を求める関数
+    画像, 文, 点群, 音声の中身の配列から, モデルの入力の形と型を求める関数
 
     Parameters
     ----------

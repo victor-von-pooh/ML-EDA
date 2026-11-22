@@ -6,8 +6,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ml_eda import detect, load_data, prepare, profile, read_audio
+from ml_eda import (
+    detect, export_dataset, load_data, load_dataset, model_inputs, prepare,
+    profile, read_audio
+)
 from ml_eda.audio import clip_level
+from ml_eda.audioprep import fix_length, mix_channels, resample
 
 
 def write_wave(
@@ -192,12 +196,10 @@ def test_audio_folder(tmp_path: Path) -> None:
     assert {"unreadable_items", "mixed_sizes", "mixed_lengths",
             "silent_items"} <= codes
 
-    # 1 つのファイルも読め, 前処理と書き出しはまだ誤り
+    # 1 つのファイルも読める
     single = load_data(root / "cat" / "c0.wav")
     assert single.kind == "audio" and len(single.frame) == 1
     assert "label" not in single.frame.columns
-    with pytest.raises(ValueError, match="音声は"):
-        prepare(data, {"split": {"method": "none"}})
 
 
 def test_audio_edge_cases(tmp_path: Path) -> None:
@@ -325,3 +327,226 @@ def test_clip_level_bounds() -> None:
     assert np.float32(1.0) >= level
     assert np.float32(1.5) >= level
     assert np.float32(0.9999) < level
+
+
+def sine(frequency: float, seconds: float, rate: int) -> np.ndarray:
+    """
+    決まった周波数の正弦波を (標本の数, 1) で作る関数
+
+    Parameters
+    ----------
+    frequency: float
+        周波数 (Hz)
+    seconds: float
+        長さ (秒)
+    rate: int
+        標本化の周波数
+
+    Returns
+    ----------
+    samples: np.ndarray
+        (標本の数, 1) の float32 (振幅 0.5)
+    """
+    # 時刻ごとの値
+    times = np.arange(int(round(seconds * rate))) / rate
+    samples = (0.5 * np.sin(2 * np.pi * frequency * times))[:, None]
+    samples = samples.astype(np.float32)
+
+    return samples
+
+
+def test_resample() -> None:
+    """
+    多相のフィルタと線形補間で周波数を変え, 長さ, 値, 折り返しを確かめる
+    関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 48000 から 16000: 長さは ceil, 440 Hz の波は先の周波数の波と同じ
+    # (端の外は 0 なので両端を除く)
+    audio = {"samples": sine(440, 1.0, 48000), "sample_rate": 48000}
+    for method in ("sinc", "linear"):
+        done = resample(audio, {"rate": 16000, "method": method}, {})
+        assert done["sample_rate"] == 16000
+        assert done["samples"].shape == (16000, 1)
+        assert done["samples"].dtype == np.float32
+        expected = sine(440, 1.0, 16000)
+        gap = np.abs(done["samples"] - expected)[200:-200].max()
+        assert gap < 2e-3
+
+    # 割り切れない比 (44100 から 16000) と, 上げる向き (8000 から 22050)
+    odd = {"samples": sine(440, 0.5, 44100), "sample_rate": 44100}
+    done = resample(odd, {"rate": 16000}, {})
+    assert done["samples"].shape == (-(-22050 * 160 // 441), 1)
+    gap = np.abs(done["samples"][:8000] - sine(440, 0.5, 16000))[200:-200]
+    assert gap.max() < 2e-3
+    low = {"samples": sine(440, 0.5, 8000), "sample_rate": 8000}
+    done = resample(low, {"rate": 22050}, {})
+    assert done["samples"].shape == (11025, 1)
+    gap = np.abs(done["samples"] - sine(440, 0.5, 22050))[400:-400]
+    assert gap.max() < 2e-3
+
+    # 先の周波数の半分より高い音 (7 kHz を 8 kHz に) は落ち, 線形補間は
+    # 折り返して残る
+    high = {"samples": sine(7000, 0.5, 48000), "sample_rate": 48000}
+    sinc = resample(high, {"rate": 8000}, {})["samples"][200:-200]
+    linear = resample(
+        high, {"rate": 8000, "method": "linear"}, {}
+    )["samples"][200:-200]
+    assert np.sqrt(np.mean(sinc ** 2)) < 0.01
+    assert np.sqrt(np.mean(linear ** 2)) > 0.1
+
+    # 直流はそのまま, 同じ周波数と空の音声はそのまま, ステレオも
+    flat = {"samples": np.full((3000, 2), 0.25, np.float32),
+            "sample_rate": 44100}
+    done = resample(flat, {"rate": 16000}, {})["samples"]
+    assert done.shape[1] == 2
+    assert np.allclose(done[100:-100], 0.25, atol=1e-5)
+    same = resample(audio, {"rate": 48000}, {})
+    assert np.array_equal(same["samples"], audio["samples"])
+    empty = {"samples": np.zeros((0, 1), np.float32), "sample_rate": 8000}
+    assert resample(empty, {"rate": 16000}, {})["samples"].shape == (0, 1)
+
+    # 引数の誤り
+    for params in ({"rate": 0}, {"rate": 1.5}, {"rate": True},
+                   {"rate": 16000, "method": "cubic"}):
+        with pytest.raises(ValueError, match="resample"):
+            resample(audio, params, {})
+
+
+def test_mix_and_fix_length() -> None:
+    """
+    チャンネルと長さをそろえる手順の値と誤りを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # チャンネル: 平均, 並べる, 同じ数はそのまま, 決まらない組は誤り
+    stereo = np.stack([np.ones(4), np.zeros(4)], axis=1).astype(np.float32)
+    audio = {"samples": stereo, "sample_rate": 8000}
+    mono = mix_channels(audio, {"channels": 1}, {})["samples"]
+    assert mono.shape == (4, 1) and np.allclose(mono, 0.5)
+    wide = mix_channels(
+        {"samples": mono, "sample_rate": 8000}, {"channels": 2}, {}
+    )["samples"]
+    assert wide.shape == (4, 2) and np.allclose(wide, 0.5)
+    assert mix_channels(audio, {"channels": 2}, {})["samples"] is not None
+    with pytest.raises(ValueError, match="混ぜ方"):
+        mix_channels(audio, {"channels": 3}, {})
+    with pytest.raises(ValueError, match="channels"):
+        mix_channels(audio, {"channels": 0}, {})
+
+    # 長さ: 先頭を残して切る, 後ろを 0 で埋める, 真ん中を残す
+    ramp = np.arange(10, dtype=np.float32)[:, None]
+    audio = {"samples": ramp, "sample_rate": 10}
+    cut = fix_length(audio, {"seconds": 0.4}, {})["samples"]
+    assert cut[:, 0].tolist() == [0, 1, 2, 3]
+    padded = fix_length(audio, {"seconds": 1.3}, {})["samples"]
+    assert padded.shape == (13, 1) and padded[10:, 0].tolist() == [0] * 3
+    middle = fix_length(audio, {"seconds": 0.5, "align": "center"}, {})
+    assert middle["samples"][:, 0].tolist() == [2, 3, 4, 5, 6]
+    around = fix_length(audio, {"seconds": 1.3, "align": "center"}, {})
+    assert around["samples"][:, 0].tolist() == [0, *range(10), 0, 0]
+    for params in ({"seconds": 0}, {"seconds": "1"},
+                   {"seconds": 1.0, "align": "end"}):
+        with pytest.raises(ValueError, match="fix_length"):
+            fix_length(audio, params, {})
+
+
+def test_audio_export(tmp_path: Path) -> None:
+    """
+    周波数, チャンネル, 長さの混ざった音声を, レシピで prepare と
+    export_dataset に通し, 書き出したデータセットを読めることを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 2 クラス. 周波数, チャンネル, 長さが混ざり, 読めないファイルも 1 つ
+    root = tmp_path / "sounds"
+    for index in range(5):
+        write_wave(root / "dog" / f"d{index}.wav", tone(0.5, 16000))
+        write_wave(root / "cat" / f"c{index}.wav", tone(0.8, 44100, 2),
+                   44100)
+    write_wave(root / "cat" / "low.wav", tone(1.5, 8000), 8000, bits=8)
+    (root / "dog" / "broken.wav").write_bytes(b"RIFF....WAVEjunk")
+    data = load_data(root)
+    steps = [
+        {"op": "resample", "rate": 16000},
+        {"op": "mix_channels", "channels": 1},
+        {"op": "fix_length", "seconds": 1.0},
+    ]
+    recipe = {
+        "target": "label", "task": "classification", "item_steps": steps,
+        "split": {"method": "stratified", "valid": 0.3, "seed": 0},
+    }
+
+    # 中身を読まない確かめ: 読めない件と, そろえる手順の無いもの
+    notes = prepare(
+        data, {**recipe, "item_steps": []}, read_items=False
+    ).notes
+    assert any("読めない件が 1 件" in note for note in notes)
+    for op in ("resample", "mix_channels", "fix_length"):
+        assert any(op in note for note in notes)
+    with pytest.raises(ValueError, match="method"):
+        prepare(data, {**recipe, "item_steps": [
+            {"op": "resample", "rate": 16000, "method": "cubic"}
+        ]}, read_items=False)
+    with pytest.raises(ValueError, match="audio に使えない"):
+        prepare(data, {**recipe, "item_steps": [{"op": "resize"}]},
+                read_items=False)
+
+    # 読めない件があれば, 除き方を添えて止まる
+    with pytest.raises(ValueError, match="error がある"):
+        export_dataset(data, recipe, tmp_path / "bad")
+
+    # 読めない件を除いて書き出す
+    recipe["steps"] = [
+        {"op": "filter_rows", "column": "error", "compare": "isna"}
+    ]
+    info = export_dataset(data, recipe, tmp_path / "ds")
+    assert info["format_version"] == 1 and info["kind"] == "audio"
+    assert info["classes"] == ["cat", "dog"] and info["features"] == []
+    assert info["splits"]["train"]["shape"][1:] == [1, 16000]
+    total = sum(split["rows"] for split in info["splits"].values())
+    assert total == 11
+
+    # 読み込み: 配列とテンソルの形, 書き出した手順
+    dataset = load_dataset(tmp_path / "ds")
+    x, y = dataset.arrays("train")
+    assert x.shape[1:] == (1, 16000) and x.dtype == np.float32
+    assert len(x) == len(y) and set(y.tolist()) <= {0, 1}
+    assert [s["op"] for s in dataset.recipe["item_steps"]] == [
+        "resample", "mix_channels", "fix_length"
+    ]
+    shapes = model_inputs(tmp_path / "ds")
+    assert shapes["inputs"][0]["shape"] == [None, 1, 16000]
+    assert shapes["outputs"] == 2
+
+    # 推論: ファイルの場所でも read_audio の辞書でも, 学習と同じ配列
+    frame = dataset.frames["train"]
+    first = root / frame["path"].iloc[0]
+    from_path = dataset.transform_item(first)
+    assert np.array_equal(from_path, x[0])
+    assert np.array_equal(dataset.transform_item(read_audio(first)), x[0])
+    torch = pytest.importorskip("torch")
+    tensors = dataset.tensors("train")
+    assert tensors[0].dtype == torch.float32
+    assert tuple(tensors[0].shape[1:]) == (1, 16000)

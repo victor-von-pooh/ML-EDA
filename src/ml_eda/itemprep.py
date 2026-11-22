@@ -6,6 +6,11 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
+from ml_eda.audioprep import (
+    ALIGNS, RESAMPLE_METHODS, audio_array, fix_length, mix_channels,
+    resample
+)
+
 # 当てはめに使う学習用の件数の上限 (画像の平均など)
 FIT_SAMPLE = 500
 
@@ -612,11 +617,14 @@ def to_array(item: Any, kind: str) -> np.ndarray:
     ----------
     array: np.ndarray
         画像は (チャンネル, 高さ, 幅) の float32 (0 から 1, 正規化した
-        場合はその値), 点群は (点の数, 3) の float32, 文は番号の並び
+        場合はその値), 点群は (点の数, 3) の float32, 文は番号の並び,
+        音声は (チャンネル, 標本の数) の float32
     """
     # 種類ごとの形にそろえる
     if kind == "pointcloud" and isinstance(item, dict):
         return np.asarray(item["points"], dtype=np.float32)
+    if kind == "audio":
+        return audio_array(item)
     if kind == "image":
         image = np.asarray(item)
         if image.dtype == np.bool_:
@@ -681,6 +689,18 @@ def check_item_steps(steps: Any, kind: str) -> None:
                         "(pip install tokenizers)"
                     )
 
+        # 音声の選び方の引数 (中身を読む前に止める)
+        choices = {"resample": ("method", RESAMPLE_METHODS),
+                   "fix_length": ("align", ALIGNS)}
+        if op in choices:
+            name, allowed = choices[op]
+            value = spec.get(name, allowed[0])
+            if value not in allowed:
+                raise ValueError(
+                    f"{op} の {name} は {', '.join(allowed)} のどれかにして"
+                    f"ください: {value}"
+                )
+
     # 文は語彙で番号にしないと学習に渡せない
     if kind == "text" and not any(s["op"] == "vocabulary" for s in steps):
         raise ValueError("文は vocabulary の手順で番号の並びにしてください")
@@ -741,6 +761,41 @@ def item_notes(frame: pd.DataFrame, steps: list, kind: str) -> list[str]:
         notes.append(
             "点の数がそろっていません. sample_points を足してください"
         )
+    if kind == "audio":
+        notes.extend(audio_notes(readable, ops))
+
+    return notes
+
+
+def audio_notes(frame: pd.DataFrame, ops: set) -> list[str]:
+    """
+    読み込みの表から, 音声の形がそろわないことを挙げる関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        書き出す件の, 読み込みの表の行
+    ops: set
+        item_steps の手順の名前
+
+    Returns
+    ----------
+    notes: list[str]
+        注意
+    """
+    # 周波数, チャンネル, 長さのうち, そろえる手順の無いもの
+    checks = (
+        ("sample_rate", "resample", "標本化の周波数"),
+        ("channels", "mix_channels", "チャンネルの数"),
+        ("frames", "fix_length", "長さ"),
+    )
+    notes = []
+    for column, op, label in checks:
+        if op in ops or column not in frame.columns:
+            continue
+        if frame[column].dropna().nunique() > 1:
+            notes.append(f"音声の{label}がそろっていません. {op} を足して"
+                         "ください")
 
     return notes
 
@@ -888,7 +943,8 @@ def stack_items(
             raise ValueError(
                 f"中身の形がそろいません ({stacked.shape[1:]} と "
                 f"{value.shape}). 画像は resize (と grayscale か rgb), "
-                "点群は sample_points で形をそろえてください"
+                "点群は sample_points, 音声は resample, mix_channels, "
+                "fix_length で形をそろえてください"
             )
         stacked[number] = value
     if stacked is None:
@@ -1084,6 +1140,26 @@ def register_builtin_item_steps() -> None:
     register_item_step(ItemStep(
         "normalize_cloud", "pointcloud", None, normalize_cloud, {},
         "中心を原点にし, 最も遠い点までを 1 にする"
+    ))
+
+    # 音声
+    register_item_step(ItemStep(
+        "resample", "audio", None, resample,
+        {"rate": "そろえる標本化の周波数",
+         "method": "sinc (多相のフィルタ. 既定) か linear (線形補間)"},
+        "標本化の周波数をそろえる", required=("rate",)
+    ))
+    register_item_step(ItemStep(
+        "mix_channels", "audio", None, mix_channels,
+        {"channels": "そろえるチャンネルの数"},
+        "チャンネルの数をそろえる (1 は平均, 1 チャンネルからは同じ音を並べる)",
+        required=("channels",)
+    ))
+    register_item_step(ItemStep(
+        "fix_length", "audio", None, fix_length,
+        {"seconds": "そろえる長さ (秒)",
+         "align": "start (先頭を残す. 既定) か center (真ん中を残す)"},
+        "決まった長さに切るか, 0 (無音) で埋める", required=("seconds",)
     ))
 
 
