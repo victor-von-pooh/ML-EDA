@@ -1,5 +1,7 @@
 from ml_eda import media  # noqa: F401 (画像, 文, 点群の読み込みを登録)
 from ml_eda import capture  # noqa: F401 (多視点の撮影の読み込みを登録)
+from ml_eda import audio  # noqa: F401 (音声の読み込みを登録)
+from ml_eda.audio import read_audio
 from ml_eda.capture import capture_layout
 from ml_eda.data import KINDS, Data
 from ml_eda.itemprep import ITEM_STEPS, describe_item_steps
@@ -35,7 +37,7 @@ __all__ = [
     "load_dataset", "load_items", "load_recipe", "model_inputs",
     "normalize_capture",
     "prepare", "preview",
-    "preview_items", "read_capture", "read_cloud",
+    "preview_items", "read_audio", "read_capture", "read_cloud",
     "profile",
     "register_loader", "register_step", "transform_entry", "__version__",
 ]

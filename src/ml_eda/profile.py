@@ -112,12 +112,16 @@ def profile(
     }
     result["findings"] = find_issues(result, target)
     if data.item_loader is not None:
+        from ml_eda.audio import describe_audio
         from ml_eda.capture import describe_captures
         from ml_eda.media import describe_items
 
-        result["items"] = describe_captures(data) if (
-            data.kind == "capture"
-        ) else describe_items(data, seed)
+        if data.kind == "capture":
+            result["items"] = describe_captures(data)
+        elif data.kind == "audio":
+            result["items"] = describe_audio(data, seed)
+        else:
+            result["items"] = describe_items(data, seed)
         # 読み込みの表の列 (場所, 幅, 点の範囲など) は学習に使わない (中身を
         # 配列にする) ので, 列の気付きは目的の列についてのものだけを残す
         kept = {"class_imbalance", "target_missing"}
