@@ -82,6 +82,9 @@ SOURCE_NOTE = (
 # 版 1 の書き出しの source から除く, 手元の場所の欄
 LOCAL_PLACES = ("path", "root")
 
+# 版 1 の書き出しの source に列の名前の並びを残す種類
+TABLE_KINDS = ("table", "timeseries")
+
 
 @dataclass
 class Prepared:
@@ -1597,25 +1600,27 @@ def source_name(place: Union[str, Path]) -> str:
     return name
 
 
-def shared_source(source: dict) -> dict:
+def shared_source(data: Data) -> dict:
     """
     版 1 の書き出しの source に書く, 手元の場所を除いた写しを返す関数
 
     データセットは人に渡すことがあるので, 読み込んだ場所 (path) と 1 件の
-    場所の基 (root) は名前 (name) だけにする
+    場所の基 (root) は名前 (name) だけにする. 表と時系列は, 読み込んだ表の
+    列の名前の並び (columns) を添える
 
     Parameters
     ----------
-    source: dict
-        読み込んだデータの source
+    data: Data
+        読み込んだデータ
 
     Returns
     ----------
     shared: dict
-        path と root を除き, 場所があれば name, paths (name_only), note を
-        添えた写し
+        path と root を除き, 場所があれば name, paths (name_only), note を,
+        表と時系列なら columns を添えた写し
     """
     # 場所の名前は読み込んだ場所 (無ければ 1 件の場所の基) の最後の部分
+    source = data.source
     shared = {
         key: value for key, value in source.items()
         if key not in LOCAL_PLACES
@@ -1628,6 +1633,10 @@ def shared_source(source: dict) -> dict:
             "name": source_name(place), **shared,
             "paths": "name_only", "note": SOURCE_NOTE,
         }
+
+    # 読む側が元のデータの列を知るための, 列の名前だけ (値は残さない)
+    if data.kind in TABLE_KINDS:
+        shared["columns"] = [str(name) for name in data.frame.columns]
 
     return shared
 
@@ -1703,7 +1712,7 @@ def export_dataset(
         "classes": prepared.classes,
         "text_column": data.roles.get("text") if data.kind == "text" else None,
         "splits": splits,
-        "source": to_plain(shared_source(data.source)),
+        "source": to_plain(shared_source(data)),
         "recipe": "recipe.yaml",
         "notes": prepared.notes,
     }

@@ -294,6 +294,10 @@ def test_export_names_only(
         assert source["loader"] == data.source["loader"]
         assert source["options"] == data.source["options"]
         assert source["size"] == data.source["size"]
+        if name == "shop.csv":
+            assert source["columns"] == ["x", "label"]
+        else:
+            assert "columns" not in source
 
         # 書いた説明のどこにも一時ディレクトリの場所は無い
         text = (tmp_path / "out" / name / "dataset.yaml").read_text(
@@ -304,9 +308,9 @@ def test_export_names_only(
         assert load_dataset(tmp_path / "out" / name).info["source"] == source
     assert settings["shop.csv"][0].source["options"] == {"sep": ","}
 
-    # 場所の無い source (手元で作ったデータ) は写すだけ
+    # 場所の無い source (手元で作ったデータ) は列の名前だけ
     frame = pd.DataFrame({"x": range(20), "label": ["a", "b"] * 10})
     made = Data(kind="table", frame=frame, roles={"target": "label"})
     info = export_dataset(made, {"target": "label", "split": split},
                           tmp_path / "out" / "made")
-    assert info["source"] == {}
+    assert info["source"] == {"columns": ["x", "label"]}
