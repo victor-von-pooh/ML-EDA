@@ -15,7 +15,10 @@ FORMAT_VERSION = 1
 TASKS = ("classification", "regression", "forecasting", "none")
 
 # 分割のしかた
-SPLIT_METHODS = ("random", "stratified", "time", "group", "none")
+SPLIT_METHODS = (
+    "random", "stratified", "time", "group", "group_time",
+    "stratified_group", "none"
+)
 
 # 目的の列の欠けた行の扱い (落とすか, unlabeled の分割に残すか)
 UNLABELED_MODES = ("drop", "keep")

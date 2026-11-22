@@ -10,6 +10,7 @@ from ml_eda import (
     Data, export_dataset, load_data, load_dataset, load_recipe, prepare,
     preview, profile
 )
+from ml_eda.pipeline import assign_splits
 
 
 def table(frame: pd.DataFrame) -> Data:
@@ -347,6 +348,134 @@ def test_big_regular_timeseries() -> None:
     data = Data(kind="timeseries", frame=frame, roles={"time": "t"})
     series = profile(data)["timeseries"]
     assert series["gaps"] == 0 and series["interval_seconds"] == 60
+
+
+def test_group_time_split(tmp_path: Path) -> None:
+    """
+    グループと時刻の組の分割が, 同じ人を 1 つの分割にまとめ, 現れた時刻の
+    遅い人を検証用とテスト用にすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 20 人が 1 日ずつずれて現れ, 各人が 5 日分の行を持つ (行の順は混ぜる)
+    rng = np.random.default_rng(0)
+    customer = np.repeat(np.arange(20), 5)
+    days = customer + np.tile(np.arange(5), 20)
+    frame = pd.DataFrame({
+        "t": pd.Timestamp("2024-01-01") + pd.to_timedelta(days, unit="D"),
+        "customer": customer, "x": np.arange(100.0), "y": [0, 1] * 50,
+    }).iloc[rng.permutation(100)].reset_index(drop=True)
+    series = Data(kind="timeseries", frame=frame, roles={"time": "t"})
+    recipe = {
+        "target": "y", "task": "classification",
+        "steps": [{"op": "drop_columns", "columns": ["customer"]}],
+        "split": {"method": "group_time", "column": "customer",
+                  "valid": 0.2, "test": 0.1},
+    }
+    prepared = prepare(series, recipe)
+    assert prepared.findings == []
+    people = {
+        name: set(frame.set_index("x").loc[part["x"], "customer"])
+        for name, part in prepared.frames.items()
+    }
+    assert people == {
+        "train": set(range(14)), "valid": set(range(14, 18)),
+        "test": {18, 19},
+    }
+
+    # 境目をまたぐ人は後ろの分割 (6 行の人を挟むとテスト用が増える)
+    labels = assign_splits(
+        pd.DataFrame({"t": pd.date_range("2024-01-01", periods=10),
+                      "g": [0, 0, 1, 1, 1, 1, 1, 1, 2, 3]}),
+        {"method": "group_time", "column": "g", "valid": 0.0,
+         "test": 0.3},
+        {"time": "t"}
+    )
+    assert labels.tolist() == ["train"] * 2 + ["test"] * 8
+
+    # 日時の列とグループの列が要る
+    with pytest.raises(ValueError, match="日時の列"):
+        prepare(table(frame.drop(columns=["t"])), recipe)
+    recipe["split"].pop("column")
+    with pytest.raises(ValueError, match="split.column"):
+        prepare(series, recipe)
+
+    # 時刻の順の分割の重なりの気付きは group_time を勧める
+    recipe["split"] = {"method": "time", "column": "customer", "valid": 0.3}
+    message = prepare(series, recipe).findings[0]["message"]
+    assert "group_time (column: customer)" in message
+
+    # 書き出したレシピに分け方が残り, 約束の版は変わらない
+    recipe["split"]["method"] = "group_time"
+    export_dataset(series, recipe, tmp_path / "ds")
+    described = yaml.safe_load(
+        (tmp_path / "ds" / "dataset.yaml").read_text(encoding="utf-8")
+    )
+    written = load_recipe(tmp_path / "ds" / described["recipe"])
+    assert described["format_version"] == 1
+    assert written["split"]["method"] == "group_time"
+
+
+def test_stratified_group_split() -> None:
+    """
+    グループの層化の分割が, 同じ人を 1 つの分割にまとめ, 目的の値の割合を
+    分割の間で近くすることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 40 人 × 3 行. 8 人だけが正解 1 (少ないクラス)
+    customer = np.repeat(np.arange(40), 3)
+    frame = pd.DataFrame({
+        "customer": customer, "x": np.arange(120.0),
+        "y": (customer < 8).astype(int),
+    })
+    recipe = {
+        "target": "y", "task": "classification",
+        "split": {"method": "stratified_group", "column": "customer",
+                  "valid": 0.25, "seed": 3},
+    }
+    prepared = prepare(table(frame), recipe)
+    assert prepared.findings == []
+    train, valid = prepared.frames["train"], prepared.frames["valid"]
+    assert not set(train["x"] // 3) & set(valid["x"] // 3)
+    assert len(valid) == 30 and valid["y"].sum() == 6
+
+    # 同じ種と表なら同じ分割
+    again = prepare(table(frame), recipe).frames["valid"]
+    assert again["x"].tolist() == valid["x"].tolist()
+
+    # 混ざった人は多い値の層 (同じ数なら文字の小さい値)
+    small = pd.DataFrame({
+        "g": list("aabbccdd"), "y": [1, 0, 1, 1, 0, 0, 1, 1],
+    })
+    for seed in range(5):
+        labels = assign_splits(
+            small, {"method": "stratified_group", "column": "g",
+                    "valid": 0.5, "seed": seed},
+            {"target": "y"}
+        )
+        chosen = set(small["g"][labels == "valid"])
+        assert len(chosen & {"a", "c"}) == 1
+        assert len(chosen & {"b", "d"}) == 1
+
+    # 目的の列が要り, 知らない分け方は読んだ時点で誤り
+    with pytest.raises(ValueError, match="目的の列"):
+        prepare(table(frame), {"split": recipe["split"]})
+    with pytest.raises(ValueError, match="知らない分割"):
+        load_recipe({"split": {"method": "group_stratified"}})
 
 
 def test_transform_needs_columns(tmp_path: Path) -> None:
