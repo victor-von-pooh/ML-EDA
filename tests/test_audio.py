@@ -197,3 +197,61 @@ def test_audio_folder(tmp_path: Path) -> None:
     assert "label" not in single.frame.columns
     with pytest.raises(ValueError, match="音声は"):
         prepare(data, {"split": {"method": "none"}})
+
+
+def test_audio_edge_cases(tmp_path: Path) -> None:
+    """
+    拡張の形式, 書きかけ, 壊れた欄, 足りない block align, 先頭だけの読み
+    込みと, 割れと長さ 0 の気付きを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 拡張の形式 (中の形式は PCM) の 16 bit
+    samples = tone(0.1, 8000)
+    write_wave(tmp_path / "plain.wav", samples, 8000)
+    plain = (tmp_path / "plain.wav").read_bytes()
+    data = plain[plain.index(b"data"):]
+    fmt = struct.pack("<HHIIHHHHI", 0xFFFE, 1, 8000, 16000, 2, 16, 22, 16,
+                      4) + struct.pack("<H", 1) + bytes(14)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + data
+    (tmp_path / "ext.wav").write_bytes(
+        b"RIFF" + struct.pack("<I", len(body)) + body
+    )
+    np.testing.assert_allclose(
+        read_audio(tmp_path / "ext.wav")["samples"],
+        read_audio(tmp_path / "plain.wav")["samples"]
+    )
+
+    # 書きかけ (data の大きさより短い) はある分だけ, 先頭だけも読める
+    (tmp_path / "cut.wav").write_bytes(plain[:-401])
+    assert read_audio(tmp_path / "cut.wav")["samples"].shape == (599, 1)
+    head = read_audio(tmp_path / "plain.wav", seconds=0.05)
+    assert head["samples"].shape == (400, 1)
+
+    # data の欄の無いファイルと, 足りない block align は誤り
+    (tmp_path / "nodata.wav").write_bytes(plain[:plain.index(b"data")])
+    with pytest.raises(ValueError, match="data の欄"):
+        read_audio(tmp_path / "nodata.wav")
+    start = plain.index(b"fmt ") + 8
+    short = plain[:start + 12] + struct.pack("<H", 1) + plain[start + 14:]
+    (tmp_path / "align.wav").write_bytes(short)
+    with pytest.raises(ValueError, match="block align"):
+        read_audio(tmp_path / "align.wav")
+
+    # 割れた音 (8 bit の正の端も) と長さ 0 の音の気付き
+    root = tmp_path / "set"
+    loud = np.clip(tone(0.5, 8000) * 4, -1, 1)
+    write_wave(root / "loud8.wav", loud, 8000, bits=8)
+    write_wave(root / "loud16.wav", loud, 8000)
+    write_wave(root / "empty.wav", np.zeros((0, 1)), 8000)
+    result = profile(load_data(root))
+    assert result["items"]["clipped"] == 2
+    codes = {item["code"] for item in result["findings"]}
+    assert {"clipped_items", "mixed_lengths"} <= codes

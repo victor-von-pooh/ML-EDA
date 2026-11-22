@@ -1,6 +1,6 @@
 import struct
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -20,12 +20,17 @@ EXTENSIBLE = 0xFFFE
 # 無音とする RMS (満点を 1 とした値. 約 -60 dBFS)
 SILENT_RMS = 1e-3
 
-# 音の割れとする振幅 (満点を 1 とした値) と, 割れた標本の割合
-CLIPPED_LEVEL = 0.999
+# 音の割れとする振幅 (満点を 1 とした値. 8 bit の正の端 127 / 128 も
+# 割れと数える) と, 割れた標本の割合
+CLIPPED_LEVEL = 127 / 128
 CLIPPED_SHARE = 0.01
 
 # 長さのばらつきを気付きにする, 最も長いものと最も短いものの比
 LENGTH_RATIO = 2.0
+
+# 分析で 1 つの音声から読む長さ (秒. 先頭から. 長い録音で記憶を使い
+# すぎないように)
+ANALYSIS_SECONDS = 30.0
 
 
 def wave_chunks(path: Path) -> dict:
@@ -46,7 +51,8 @@ def wave_chunks(path: Path) -> dict:
     Raises
     ----------
     ValueError
-        WAVE でない場合, fmt か data の欄が無い場合, 読めない形式の場合
+        WAVE でない場合, fmt か data の欄が無い場合, 読めない形式の場合,
+        1 つの標本の組のバイト数 (block align) が足りない場合
     """
     # RIFF の頭と, 欄を順にたどる (data の中身は読まない)
     with open(path, "rb") as stream:
@@ -84,6 +90,11 @@ def wave_chunks(path: Path) -> dict:
         raise ValueError(f"{path.name} の fmt の値が正しくありません")
     if kinds[tag] == "float" and bits != 32:
         raise ValueError(f"{path.name} の浮動小数は 32 bit だけ読めます")
+    if align < channels * (bits // 8):
+        raise ValueError(
+            f"{path.name} の block align ({align}) が, チャンネル × バイト数 "
+            f"({channels * (bits // 8)}) より小さいです"
+        )
 
     # 書かれた大きさがファイルより長い場合 (書きかけ) は, ある分だけ
     offset, size = data
@@ -98,7 +109,9 @@ def wave_chunks(path: Path) -> dict:
     return chunks
 
 
-def read_audio(path: Union[str, Path]) -> dict:
+def read_audio(
+    path: Union[str, Path], seconds: Optional[float] = None
+) -> dict:
     """
     WAVE のファイルの音を読む関数
 
@@ -106,6 +119,8 @@ def read_audio(path: Union[str, Path]) -> dict:
     ----------
     path: Union[str, Path]
         WAVE のファイル (PCM の 8, 16, 24, 32 bit と, 32 bit の浮動小数)
+    seconds: Optional[float] = None
+        先頭から読む長さ (秒. None は全て)
 
     Returns
     ----------
@@ -119,35 +134,52 @@ def read_audio(path: Union[str, Path]) -> dict:
     ValueError
         読めない形式の場合
     """
-    # data の欄のバイトを型ごとに数にする
+    # 読む標本の組の数だけのバイト
     place = Path(path)
     chunks = wave_chunks(place)
+    count = chunks["frames"]
+    if seconds is not None:
+        count = min(count, max(int(seconds * chunks["sample_rate"]), 0))
+    align = chunks["align"]
     with open(place, "rb") as stream:
         stream.seek(chunks["offset"])
-        raw = stream.read(chunks["size"])
+        raw = stream.read(count * align)
+    count = len(raw) // align
     width = chunks["bits"] // 8
     channels = chunks["channels"]
-    frames = np.frombuffer(raw, dtype=np.uint8).reshape(
-        chunks["frames"], chunks["align"]
-    )[:, :width * channels]
+
+    # 組の後ろの埋め草を除く (多くのファイルは埋め草が無いので写さない)
+    packed = width * channels
+    if align == packed:
+        data = memoryview(raw)[:count * align]
+    else:
+        data = np.frombuffer(raw, dtype=np.uint8)[:count * align].reshape(
+            count, align
+        )[:, :packed].tobytes()
+
+    # 型ごとに float32 の数にする (float64 を挟まない)
     if chunks["format"] == "float":
-        values = frames.copy().view("<f4").astype(np.float32)
+        values = np.frombuffer(data, dtype="<f4").astype(np.float32)
     elif width == 1:
         # 8 bit は符号なし (128 が 0)
-        values = (frames.astype(np.float32) - 128.0) / 128.0
+        values = np.frombuffer(data, dtype=np.uint8).astype(np.float32)
+        values -= np.float32(128.0)
+        values /= np.float32(128.0)
     elif width == 3:
         # 24 bit は 3 バイトの符号付きを 4 バイトに広げる
-        triple = frames.reshape(-1, 3).astype(np.int32)
-        number = triple[:, 0] | (triple[:, 1] << 8) | (triple[:, 2] << 16)
-        number = np.where(number >= 1 << 23, number - (1 << 24), number)
-        values = (number / float(1 << 23)).astype(np.float32)
+        triple = np.frombuffer(data, dtype=np.uint8).reshape(-1, 3)
+        number = triple[:, 0].astype(np.int32)
+        number |= triple[:, 1].astype(np.int32) << 8
+        number |= triple[:, 2].astype(np.int32) << 16
+        number[number >= 1 << 23] -= 1 << 24
+        values = number.astype(np.float32)
+        values /= np.float32(1 << 23)
     else:
         kind = {2: "<i2", 4: "<i4"}[width]
-        scale = float(1 << (8 * width - 1))
-        values = (frames.copy().view(kind).astype(np.float64) / scale)
-        values = values.astype(np.float32)
+        values = np.frombuffer(data, dtype=kind).astype(np.float32)
+        values /= np.float32(1 << (8 * width - 1))
     audio = {
-        "samples": values.reshape(chunks["frames"], channels),
+        "samples": values.reshape(count, channels),
         "sample_rate": chunks["sample_rate"],
     }
 
@@ -265,13 +297,13 @@ def loudness(samples: np.ndarray) -> dict:
     level: dict
         rms, peak, clipped (振幅が CLIPPED_LEVEL 以上の標本の割合)
     """
-    # 空の音は全て 0
+    # 空の音は全て 0. float32 のまま求め, 和だけを float64 で足す
     if samples.size == 0:
         level = {"rms": 0.0, "peak": 0.0, "clipped": 0.0}
         return level
-    values = np.abs(samples.astype(np.float64))
+    values = np.abs(samples.astype(np.float32, copy=False))
     level = {
-        "rms": float(np.sqrt(np.mean(values ** 2))),
+        "rms": float(np.sqrt(np.mean(np.square(values), dtype=np.float64))),
         "peak": float(values.max()),
         "clipped": float(np.mean(values >= CLIPPED_LEVEL)),
     }
@@ -290,7 +322,7 @@ def describe_audio(data: Data, seed: int = 0, sample: int = 200) -> dict:
     seed: int = 0
         見本を選ぶ乱数のシード
     sample: int = 200
-        中身を読む見本の件数 (音の大きさ)
+        中身を読む見本の件数 (音の大きさ. 1 件は先頭の ANALYSIS_SECONDS 秒)
 
     Returns
     ----------
@@ -320,15 +352,19 @@ def describe_audio(data: Data, seed: int = 0, sample: int = 200) -> dict:
         } if len(durations) else None,
     }
 
-    # 見本の音の大きさ (無音と割れ)
+    # 見本の音の大きさ (無音と割れ. 1 つの音声の先頭の決まった長さだけ)
     rng = np.random.default_rng(seed)
     chosen = rng.choice(
         valid.index.to_numpy(), min(sample, len(valid)), replace=False
     ) if len(valid) else []
     levels = []
     for index in sorted(int(k) for k in chosen):
+        place = frame["path"].iloc[int(frame.index.get_loc(index))]
         try:
-            audio = data.load_item(int(frame.index.get_loc(index)))
+            audio = read_audio(
+                Path(str(data.source.get("root", "."))) / str(place),
+                ANALYSIS_SECONDS
+            )
         except (ValueError, OSError, struct.error):
             continue
         levels.append(loudness(audio["samples"]))
@@ -399,8 +435,9 @@ def audio_findings(data: Data, result: dict) -> list[dict]:
 
     # 長さのばらつき, 無音と割れ (見本で)
     duration = result["duration"]
-    if duration and duration["min"] > 0 and (
-        duration["max"] / duration["min"] >= LENGTH_RATIO
+    if duration and duration["max"] > 0 and (
+        duration["min"] == 0
+        or duration["max"] / duration["min"] >= LENGTH_RATIO
     ):
         findings.append({
             "severity": "info", "code": "mixed_lengths",
