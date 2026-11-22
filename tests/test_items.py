@@ -579,3 +579,122 @@ def test_profile_shape_captures(tmp_path: Path) -> None:
     result = profile(load_data(made["captures"], loader="capture"))
     histogram = result["columns"]["view_gap"]["histogram"]
     assert sum(histogram["counts"]) == 4
+
+
+def test_unlabeled_items(tmp_path: Path) -> None:
+    """
+    split.unlabeled: keep で, 正解の無い件を unlabeled の分割に書き, 正解の
+    付いた件の分割と中身は drop と同じことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 領域の無い画像 2 枚 (大きさの違う 1 枚を含む) と, 画像の無い領域
+    made = write_image_masks(tmp_path / "raw", count=8)
+    shutil.copyfile(
+        made["images"] / "sample_000.png", made["images"] / "lonely.png"
+    )
+    write_png(
+        made["images"] / "wide.png", np.zeros((24, 40, 3), dtype=np.uint8)
+    )
+    shutil.copyfile(
+        made["masks"] / "sample_001.png", made["masks"] / "stray.png"
+    )
+    split = {"valid": 0.25, "test": 0.25}
+    dropped = export_image_masks(
+        made["images"], made["masks"], tmp_path / "drop", split=split,
+        groups={name: name[-1] for name in made["names"]}
+    )
+    kept = export_image_masks(
+        made["images"], made["masks"], tmp_path / "keep",
+        split={**split, "unlabeled": "keep"},
+        groups={name: name[-1] for name in made["names"]}
+    )
+
+    # 正解の付いた件の分割は同じで, unlabeled が足される
+    assert kept["format_version"] == 2
+    assert kept["split"]["unlabeled"] == "keep"
+    assert kept["splits"] == {**dropped["splits"], "unlabeled": {"items": 2}}
+    assert kept["entries"]["image"]["shape"] == [24, None, 3]
+    assert kept["entries"]["mask"] == dropped["entries"]["mask"]
+    assert any("unlabeled の分割に書きました" in n for n in kept["notes"])
+    assert any("stray" in n and "除きました" in n for n in kept["notes"])
+    one, other = load_items(tmp_path / "drop"), load_items(tmp_path / "keep")
+    for name in dropped["splits"]:
+        assert [item["id"] for item in one.split(name, read=False)] == [
+            item["id"] for item in other.split(name, read=False)
+        ]
+
+    # 読み込みは正解を None で返し, グループの無い件も読める
+    assert other.splits == ["train", "valid", "test", "unlabeled"]
+    lone = list(other.split("unlabeled"))
+    assert [item["id"] for item in lone] == ["lonely", "wide"]
+    assert all(item["mask"] is None for item in lone)
+    assert all(item["group"] is None for item in lone)
+    assert lone[0]["image"].shape == (24, 32, 3)
+    assert other.split("unlabeled", read=False)[1]["mask"] is None
+
+    # 中身の手順は正解の無い画像にもかける (版 3)
+    resized = export_image_masks(
+        made["images"], made["masks"], tmp_path / "steps",
+        split={"unlabeled": "keep"},
+        item_steps={"image": [{"op": "resize", "width": 16, "height": 8}]}
+    )
+    assert resized["format_version"] == 3
+    assert resized["entries"]["image"]["shape"] == [8, 16, 3]
+    item = load_items(tmp_path / "steps").split("unlabeled")[1]
+    assert item["image"].shape == (8, 16, 3) and item["mask"] is None
+
+    # 正解の付いた分割の正解が空なら誤り, 知らない unlabeled も誤り
+    frame = pd.read_parquet(tmp_path / "keep" / "items.parquet")
+    frame.loc[frame["split"] == "train", "mask"] = None
+    frame.to_parquet(tmp_path / "keep" / "items.parquet")
+    with pytest.raises(ValueError, match="場所がありません"):
+        load_items(tmp_path / "keep").split("train")[0]
+    with pytest.raises(ValueError, match="drop か keep"):
+        export_image_masks(
+            made["images"], made["masks"], tmp_path / "bad",
+            split={"unlabeled": "yes"}
+        )
+
+
+def test_unlabeled_captures(tmp_path: Path) -> None:
+    """
+    split.unlabeled: keep で, 点群の無い撮影を正規化して unlabeled の
+    分割に書くことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 4 つの撮影のうち 1 つの点群を除く
+    made = write_shape_captures(tmp_path / "raw", views=8, points=500)
+    (made["clouds"] / "box_b.ply").unlink()
+    info = export_capture_clouds(
+        made["captures"], made["clouds"], tmp_path / "ds",
+        groups=SHAPE_GROUPS, split={"valid": 0.5, "unlabeled": "keep"}
+    )
+    assert info["splits"]["unlabeled"] == {"items": 1}
+    assert sum(part["items"] for part in info["splits"].values()) == 4
+    assert info["entries"]["cloud"]["shape"] == [500, 3]
+    dataset = load_items(tmp_path / "ds")
+    item = dataset.split("unlabeled")[0]
+    assert item["id"] == "box_b" and item["cloud"] is None
+    assert item["group"] == "box"
+    shift = dataset.items.set_index("id").loc[
+        "box_b", ["shift_x", "shift_y", "shift_z"]
+    ].to_numpy(dtype=float)
+    np.testing.assert_allclose(
+        shift, capture_shift(made["captures"] / "box_b"), atol=1e-6
+    )

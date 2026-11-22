@@ -23,8 +23,8 @@ from ml_eda.media import (
 )
 from ml_eda.pipeline import (
     DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS,
-    ITEMS_STEPS_FORMAT_VERSION, SPLITS, assign_splits, count_overlap,
-    finish_writing, start_writing, write_frame
+    ITEMS_STEPS_FORMAT_VERSION, SPLITS, UNLABELED, assign_splits,
+    count_overlap, finish_writing, start_writing, write_frame
 )
 
 # 正解の出どころの種類
@@ -38,6 +38,9 @@ PLACEMENTS = ("file", "directory", "column")
 
 # 版 2 の書き出しで使える分割のしかた
 SPLIT_METHODS = ("random", "group", "none")
+
+# 正解の無い件の扱い (除くか, unlabeled の分割に書くか)
+UNLABELED_MODES = ("drop", "keep")
 
 # 1 件のファイルを置くディレクトリ
 ITEMS_DIR = "items"
@@ -191,6 +194,36 @@ def value_of(entry: dict) -> int:
     return value
 
 
+def unlabeled_mode(split: Optional[dict]) -> bool:
+    """
+    分割のしかたから, 正解の無い件を unlabeled の分割に書くかを返す関数
+
+    Parameters
+    ----------
+    split: Optional[dict]
+        分割のしかた (unlabeled は drop か keep. 既定は drop)
+
+    Returns
+    ----------
+    keep: bool
+        正解の無い件を書くか
+
+    Raises
+    ----------
+    ValueError
+        unlabeled が drop と keep のどちらでもない場合
+    """
+    # 書かなければ今までと同じく除く
+    mode = (split or {}).get("unlabeled", "drop")
+    if mode not in UNLABELED_MODES:
+        raise ValueError(
+            f"split.unlabeled は drop か keep にしてください: {mode}"
+        )
+    keep = mode == "keep"
+
+    return keep
+
+
 def split_items(
     ids: list[str], groups: Optional[dict], split: Optional[dict]
 ) -> tuple[list[str], dict, list[str]]:
@@ -204,7 +237,7 @@ def split_items(
     groups: Optional[dict]
         件の id からグループ (同じ人や物, 現場). None なら無し
     split: Optional[dict]
-        method (random, group, none), valid, test, seed
+        method (random, group, none), valid, test, seed, unlabeled
 
     Returns
     ----------
@@ -214,7 +247,8 @@ def split_items(
     Raises
     ----------
     ValueError
-        知らない分け方, グループの無い group, groups に無い id の場合
+        知らない分け方, グループの無い group, groups に無い id, 知らない
+        unlabeled の場合
     """
     # 分割のしかたの既定 (グループがあればグループごと)
     conf = {
@@ -222,6 +256,7 @@ def split_items(
         "test": 0.0, "seed": 0,
     }
     conf.update(split or {})
+    unlabeled_mode(conf)
     method = conf["method"]
     if method == "none":
         conf.update(valid=0.0, test=0.0)
@@ -311,8 +346,9 @@ def index_by_stem(
 
 
 def pair_files(
-    left: dict[str, Path], right: dict[str, Path], labels: tuple[str, str]
-) -> tuple[list[tuple[str, Path, Path]], list[str]]:
+    left: dict[str, Path], right: dict[str, Path], labels: tuple[str, str],
+    keep: bool = False
+) -> tuple[list[tuple[str, Path, Optional[Path]]], list[str]]:
     """
     2 つの stem の索引を組にする関数
 
@@ -324,26 +360,35 @@ def pair_files(
         正解の stem からファイル
     labels: tuple[str, str]
         入力と正解の呼び名
+    keep: bool = False
+        正解の無い入力を, 正解を None にして組の後ろに足すか
 
     Returns
     ----------
-    result: tuple[list[tuple[str, Path, Path]], list[str]]
-        stem の順の組 (stem, 入力, 正解) と, 片方にしか無いものの注意
+    result: tuple[list[tuple[str, Path, Optional[Path]]], list[str]]
+        stem の順の組 (stem, 入力, 正解. keep なら正解の無い入力が
+        stem の順で後ろに続く) と, 片方にしか無いものの注意
     """
-    # 両方にある stem だけ. 片方だけのものは数と例を注意に
-    pairs = [(stem, left[stem], right[stem])
-             for stem in sorted(left) if stem in right]
+    # 両方にある stem の組. 片方だけのものは数と例を注意に
+    pairs: list = [(stem, left[stem], right[stem])
+                   for stem in sorted(left) if stem in right]
     notes = []
     for own, other, label, partner in (
         (left, right, labels[0], labels[1]),
         (right, left, labels[1], labels[0]),
     ):
         alone = sorted(stem for stem in own if stem not in other)
-        if alone:
-            notes.append(
-                f"{partner}の無い{label}が {len(alone)} 件あり, 除きました "
-                f"(例: {', '.join(alone[:EXAMPLES])})"
-            )
+        if not alone:
+            continue
+        if keep and own is left:
+            pairs += [(stem, left[stem], None) for stem in alone]
+            done = f"{UNLABELED} の分割に書きました"
+        else:
+            done = "除きました"
+        notes.append(
+            f"{partner}の無い{label}が {len(alone)} 件あり, {done} "
+            f"(例: {', '.join(alone[:EXAMPLES])})"
+        )
     result = (pairs, notes)
 
     return result
@@ -442,6 +487,47 @@ def orientation_of(path: Path) -> int:
     return turn
 
 
+def check_image(stem: str, image: Path) -> tuple[int, int, Optional[int]]:
+    """
+    画像を読めるかと向きを確かめ, 形を返す関数
+
+    Parameters
+    ----------
+    stem: str
+        件の名前
+    image: Path
+        画像
+
+    Returns
+    ----------
+    shape: tuple[int, int, Optional[int]]
+        (高さ, 幅, チャンネル) (チャンネルは read_image と同じ決まり)
+
+    Raises
+    ----------
+    ValueError
+        画像が読めない場合と, EXIF の向きの付いた画像の場合
+    """
+    # ヘッダーだけを読む
+    header = image_header(image)
+    if header["width"] is None:
+        raise ValueError(f"{image.name} は画像として読めません")
+    turn = orientation_of(image)
+    if turn != 1:
+        raise ValueError(
+            f"{stem} の画像に EXIF の向き ({turn}) があります. 画像は読む"
+            "ときに向きを直しますが, 領域は直さないので画素がずれます. "
+            "向きを直して保存した画像 (EXIF の向きが 1 か無いもの) と, "
+            "それに合わせた領域を渡してください"
+        )
+    shape = (
+        int(header["height"]), int(header["width"]),
+        image_channels(header["mode"])
+    )
+
+    return shape
+
+
 def check_pair(stem: str, image: Path, mask: Path) -> dict:
     """
     画像と領域の組の大きさと, 領域の値を確かめる関数
@@ -468,18 +554,8 @@ def check_pair(stem: str, image: Path, mask: Path) -> dict:
         大きさが違う場合
     """
     # 画像はヘッダーだけ, 領域は値まで読む
-    header = image_header(image)
-    if header["width"] is None:
-        raise ValueError(f"{image.name} は画像として読めません")
-    turn = orientation_of(image)
-    if turn != 1:
-        raise ValueError(
-            f"{stem} の画像に EXIF の向き ({turn}) があります. 画像は読む"
-            "ときに向きを直しますが, 領域は直さないので画素がずれます. "
-            "向きを直して保存した画像 (EXIF の向きが 1 か無いもの) と, "
-            "それに合わせた領域を渡してください"
-        )
-    size = (int(header["height"]), int(header["width"]))
+    shape = check_image(stem, image)
+    size = shape[:2]
     array = read_mask(mask)
     if array.shape != size:
         raise ValueError(
@@ -487,8 +563,7 @@ def check_pair(stem: str, image: Path, mask: Path) -> dict:
             f"{' x '.join(str(n) for n in array.shape)}) の大きさが違います"
         )
     check = {
-        "image": (*size, image_channels(header["mode"])),
-        "mask": array.shape,
+        "image": shape, "mask": array.shape,
         "values": np.unique(array), "dtype": array.dtype,
     }
 
@@ -644,7 +719,7 @@ def write_items(
     counts = frame["split"].value_counts()
     info["splits"] = {
         name: {"items": int(counts[name])}
-        for name in SPLITS if counts.get(name, 0)
+        for name in (*SPLITS, UNLABELED) if counts.get(name, 0)
     }
     finish_writing(target, final, info)
 
@@ -774,7 +849,8 @@ def export_image_masks(
         書き出すディレクトリ
     split: Optional[dict] = None
         分割のしかた (method, valid, test, seed. 既定は random で検証用
-        2 割. groups があれば group)
+        2 割. groups があれば group). unlabeled: keep で, 領域の無い画像を
+        unlabeled の分割に書く (既定 drop は除く)
     groups: Optional[dict] = None
         件の id (stem) からグループ
     classes: Any = None
@@ -827,8 +903,10 @@ def export_image_masks(
         index_by_stem(
             list_files(mask_dir, IMAGE_EXTENSIONS), "領域", mask_suffix
         ),
-        ("画像", "領域")
+        ("画像", "領域"), unlabeled_mode(split)
     )
+    alone = [(stem, image) for stem, image, mask in pairs if mask is None]
+    pairs = [pair for pair in pairs if pair[2] is not None]
     if not pairs:
         raise ValueError(
             "画像と領域の組がありません (ファイルの名前の stem で組にします)"
@@ -839,8 +917,9 @@ def export_image_masks(
     labels, split_info, split_notes = split_items(ids, groups, split)
     notes += split_notes
 
-    # 書く前に全ての組の大きさと領域の値を確かめる
+    # 書く前に全ての組の大きさと領域の値, 正解の無い画像を確かめる
     checks = [check_pair(stem, image, mask) for stem, image, mask in pairs]
+    lone_shapes = [check_image(stem, image) for stem, image in alone]
     values = np.unique(np.concatenate([check["values"] for check in checks]))
     listed: Optional[list[int]] = [int(value) for value in values]
     if len(values) > MAX_VALUES:
@@ -882,6 +961,28 @@ def export_image_masks(
                     shutil.copyfile(source, target / row[key])
             rows.append(row)
 
+        # 正解の無い画像は, 正解の付いた件の後ろに unlabeled で書く
+        for index, (stem, image) in enumerate(alone, len(pairs)):
+            place = item_dir(index)
+            (target / place).mkdir(parents=True)
+            row = {"id": stem, "split": UNLABELED}
+            if groups:
+                row["group"] = lone_group(groups, stem)
+            if steps:
+                row["image"] = f"{place}/image.png"
+                write_image(
+                    target / row["image"],
+                    apply_steps(read_image(image), steps["image"])
+                )
+                lone_shapes[index - len(pairs)] = with_channels(
+                    read_image(target / row["image"])
+                ).shape
+            else:
+                row["image"] = f"{place}/image{image.suffix.lower()}"
+                shutil.copyfile(image, target / row["image"])
+            row["mask"] = None
+            rows.append(row)
+
         # 手順をかけた場合は, 書いたファイルの形と値
         if steps:
             checks = written
@@ -892,7 +993,8 @@ def export_image_masks(
                 len(values) <= MAX_VALUES
             ) else None
         image_formats = ["png"] if steps else sorted({
-            image.suffix.lower().lstrip(".") for _, image, _ in pairs
+            image.suffix.lower().lstrip(".")
+            for image in [pair[1] for pair in pairs] + [i for _, i in alone]
         })
         mask_formats = ["png"] if steps else sorted({
             mask.suffix.lower().lstrip(".") for _, _, mask in pairs
@@ -912,7 +1014,9 @@ def export_image_masks(
                     "kind": "image", "role": "input", "placement": "file",
                     "pattern": f"{ITEMS_DIR}/{{index:06d}}/image{{suffix}}",
                     "formats": image_formats,
-                    "shape": common_shape([c["image"] for c in checks]),
+                    "shape": common_shape(
+                        [c["image"] for c in checks] + lone_shapes
+                    ),
                     "dtype": "uint8", "units": "pixel",
                     "convention": {
                         "origin": "top_left", "axes": ["row", "column"],
@@ -952,6 +1056,29 @@ def export_image_masks(
         raise
 
     return info
+
+
+def lone_group(groups: dict, stem: str) -> Optional[str]:
+    """
+    正解の無い件のグループを返す関数
+
+    Parameters
+    ----------
+    groups: dict
+        件の id からグループ
+    stem: str
+        件の id
+
+    Returns
+    ----------
+    group: Optional[str]
+        グループ (groups に無ければ None. 正解の無い件は分割に使わない
+        ので, groups に無くてもよい)
+    """
+    # 正解の付いた件と同じく文字にそろえる
+    group = str(groups[stem]) if stem in groups else None
+
+    return group
 
 
 def write_pair(
@@ -1486,8 +1613,8 @@ def find_clouds(path: Path) -> dict[str, Path]:
 
 
 def capture_pairs(
-    captures: Union[str, Path], clouds: Union[str, Path]
-) -> tuple[Any, list[tuple[str, int, Path]], list[str]]:
+    captures: Union[str, Path], clouds: Union[str, Path], keep: bool = False
+) -> tuple[Any, list[tuple[str, int, Optional[Path]]], list[str]]:
     """
     撮影と点群を, 撮影のディレクトリの名前と点群の stem で組にする関数
 
@@ -1497,10 +1624,12 @@ def capture_pairs(
         撮影のディレクトリか, それを並べたディレクトリ
     clouds: Union[str, Path]
         点群のディレクトリ
+    keep: bool = False
+        点群の無い撮影を, 点群を None にして組の後ろに足すか
 
     Returns
     ----------
-    result: tuple[Any, list[tuple[str, int, Path]], list[str]]
+    result: tuple[Any, list[tuple[str, int, Optional[Path]]], list[str]]
         読み込んだ撮影のデータ, 組 (名前, 撮影の行の位置, 点群), 注意
 
     Raises
@@ -1523,7 +1652,8 @@ def capture_pairs(
         named[stem] = Path(str(place))
         positions[stem] = position
     pairs, notes = pair_files(
-        named, find_clouds(Path(clouds).expanduser()), ("撮影", "点群")
+        named, find_clouds(Path(clouds).expanduser()), ("撮影", "点群"),
+        keep
     )
     if data.source.get("capped"):
         notes.insert(0, "撮影が上限を超えたので, 先頭だけを読みました")
@@ -1563,7 +1693,8 @@ def export_capture_clouds(
         書き出すディレクトリ
     split: Optional[dict] = None
         分割のしかた (method, valid, test, seed. 既定は random で検証用
-        2 割. groups があれば group)
+        2 割. groups があれば group). unlabeled: keep で, 点群の無い撮影を
+        unlabeled の分割に書く (既定 drop は除く)
     groups: Optional[dict] = None
         件の id (撮影のディレクトリの名前) からグループ (物や現場)
     origin: Optional[dict] = None
@@ -1598,7 +1729,11 @@ def export_capture_clouds(
             f"cloud_units は {', '.join(CLOUD_UNITS)} のどれかにしてください"
         )
     scale = CLOUD_UNITS[cloud_units]
-    data, pairs, notes = capture_pairs(captures, clouds)
+    data, pairs, notes = capture_pairs(
+        captures, clouds, unlabeled_mode(split)
+    )
+    alone = [pair for pair in pairs if pair[2] is None]
+    pairs = [pair for pair in pairs if pair[2] is not None]
     if not pairs:
         raise ValueError(
             "撮影と点群の組がありません (撮影のディレクトリの名前と点群の"
@@ -1613,7 +1748,8 @@ def export_capture_clouds(
     final, target = start_writing(path, overwrite)
     try:
         rows, frame_shapes, cloud_shapes, conventions = [], [], [], []
-        for index, (stem, position, cloud_path) in enumerate(pairs):
+        # 正解の無い撮影は, 正解の付いた件の後ろに unlabeled で書く
+        for index, (stem, position, cloud_path) in enumerate(pairs + alone):
             place = item_dir(index)
             summary = normalize_capture(
                 data.load_item(position)["path"], target / place / "capture",
@@ -1621,15 +1757,21 @@ def export_capture_clouds(
             )
             shift = summary["shift"]
             notes += summary["notes"]
-            cloud = read_cloud(cloud_path)
-            cloud["points"] = cloud["points"] * scale + shift
-            cloud = apply_steps(cloud, steps.get("cloud", []))
-            write_ply(target / place / "cloud.ply", cloud)
-            row = {"id": stem, "split": labels[index]}
+            lone = cloud_path is None
+            row = {"id": stem, "split": UNLABELED if lone else labels[index]}
             if groups:
-                row["group"] = str(groups[stem])
+                row["group"] = (
+                    lone_group(groups, stem) if lone else str(groups[stem])
+                )
+            row.update({"capture": f"{place}/capture", "cloud": None})
+            if not lone:
+                cloud = read_cloud(cloud_path)
+                cloud["points"] = cloud["points"] * scale + shift
+                cloud = apply_steps(cloud, steps.get("cloud", []))
+                write_ply(target / place / "cloud.ply", cloud)
+                row["cloud"] = f"{place}/cloud.ply"
+                cloud_shapes.append((len(cloud["points"]), 3))
             row.update({
-                "capture": f"{place}/capture", "cloud": f"{place}/cloud.ply",
                 "shift_x": float(shift[0]), "shift_y": float(shift[1]),
                 "shift_z": float(shift[2]),
             })
@@ -1637,7 +1779,6 @@ def export_capture_clouds(
             frame_shapes.append((
                 summary["frames"], summary["height"], summary["width"]
             ))
-            cloud_shapes.append((len(cloud["points"]), 3))
             conventions.append(summary["convention"])
 
         # 座標の決まり (深度の既定を足してから比べ, 撮影ごとに違えば先頭
@@ -1650,7 +1791,7 @@ def export_capture_clouds(
                 "説明には先頭の撮影のものを書きました"
             )
         lacking = [
-            stem for (stem, _, _), other in zip(pairs, conventions)
+            stem for (stem, _, _), other in zip(pairs + alone, conventions)
             if any(other.get(key) is None for key in DEFAULT_DEPTH)
         ]
         if lacking:
@@ -1994,6 +2135,32 @@ def read_capture(path: Union[str, Path]) -> dict:
     return capture
 
 
+def missing_place(spec: dict, value: Any) -> bool:
+    """
+    ファイルかディレクトリの項目の, 表の場所が空かを返す関数
+
+    Parameters
+    ----------
+    spec: dict
+        項目の説明 (placement)
+    value: Any
+        表の値 (parquet では None, csv では空の文字)
+
+    Returns
+    ----------
+    missing: bool
+        場所が空か (表の列の値の項目は常に False)
+    """
+    # 表の列の値は, 空でもその値
+    if spec.get("placement") == "column":
+        return False
+    missing = value is None or value == "" or (
+        isinstance(value, float) and np.isnan(value)
+    )
+
+    return missing
+
+
 def read_entry(root: Path, spec: dict, value: Any, read: bool) -> Any:
     """
     1 件の 1 つの項目を読む関数
@@ -2100,7 +2267,15 @@ class ItemSplit:
             else str(group),
         }
         for name, spec in self.entries.items():
-            item[name] = read_entry(self.root, spec, row[name], self.read)
+            if not missing_place(spec, row[name]):
+                item[name] = read_entry(self.root, spec, row[name], self.read)
+            elif item["split"] == UNLABELED and spec.get("role") == "target":
+                item[name] = None
+            else:
+                raise ValueError(
+                    f"件 {item['id']} の項目 {name} の場所がありません ("
+                    f"空にできるのは {UNLABELED} の分割の正解だけ)"
+                )
 
         return item
 

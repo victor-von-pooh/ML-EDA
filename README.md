@@ -136,6 +136,8 @@ item = dataset.split("train")[0]     # {"id", "image", "mask", ...} の配列
 paths = dataset.split("train", read=False)[0]   # 配列の代わりに場所
 ```
 
+正解のファイルの無い入力 (領域の無い画像など) は既定で除く. `split={"unlabeled": "keep"}` を渡すと `unlabeled` の分割に書き, `load_items` はその件の正解を None で返す.
+
 撮影と点群の対 (`export_capture_clouds`) は, 姿勢と点群に同じ平行移動 (姿勢から求めた物の中心を原点に) をかけ, 実寸 (メートル) を残す. 深度の測り方 (`depth: z`) と画素の中心 (`pixel_center: 0.5`) は説明の `entries.capture.convention` に書く. 推論のときは, 新しい撮影に `normalize_capture` で同じ正規化をかけ, `read_capture` で `load_items` と同じ形に読む (点群は `read_cloud`). 確かめ用の見本は `ml_eda.synthetic` (`write_image_masks`, `write_shape_captures`. `count` と `seed` で形の数をばらつかせる) で作れる.
 
 ```python
