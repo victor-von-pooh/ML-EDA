@@ -4,7 +4,9 @@ from typing import Any, Callable, Optional
 import pandas as pd
 
 # データの種類
-KINDS = ("table", "timeseries", "image", "text", "pointcloud", "capture")
+KINDS = (
+    "table", "timeseries", "image", "text", "pointcloud", "capture", "audio"
+)
 
 # 列の役割
 ROLES = ("target", "time", "id", "text", "path", "label")
