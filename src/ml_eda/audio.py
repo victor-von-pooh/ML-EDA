@@ -17,10 +17,10 @@ PCM = 1
 IEEE_FLOAT = 3
 EXTENSIBLE = 0xFFFE
 
-# 無音とする RMS (最大の振幅を 1 とした値. 約 -60 dBFS)
+# 無音とする RMS (満点を 1 とした値. 約 -60 dBFS)
 SILENT_RMS = 1e-3
 
-# 音の割れとする振幅 (最大の振幅を 1 とした値) と, 割れた標本の割合
+# 音の割れとする振幅 (満点を 1 とした値) と, 割れた標本の割合
 CLIPPED_LEVEL = 0.999
 CLIPPED_SHARE = 0.01
 
@@ -110,8 +110,9 @@ def read_audio(path: Union[str, Path]) -> dict:
     Returns
     ----------
     audio: dict
-        samples ((標本の数, チャンネル) の float32. 最大の振幅を 1 に
-        そろえた値) と sample_rate (1 秒の標本の数)
+        samples ((標本の数, チャンネル) の float32. 整数の形式は満点を 1
+        にそろえた値, 浮動小数はそのままの値) と sample_rate (1 秒の標本の
+        数)
 
     Raises
     ----------
