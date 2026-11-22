@@ -15,7 +15,10 @@ FORMAT_VERSION = 1
 TASKS = ("classification", "regression", "forecasting", "none")
 
 # 分割のしかた
-SPLIT_METHODS = ("random", "stratified", "time", "group", "none")
+SPLIT_METHODS = (
+    "random", "stratified", "time", "group", "group_time",
+    "stratified_group", "none"
+)
 
 # 目的の列の欠けた行の扱い (落とすか, unlabeled の分割に残すか)
 UNLABELED_MODES = ("drop", "keep")
@@ -1353,6 +1356,11 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     method = loaded["split"].get("method", "random")
     if method not in SPLIT_METHODS:
         raise ValueError(f"知らない分割のしかたです: {method}")
+    if method == "stratified_group" and task in ("regression", "forecasting"):
+        raise ValueError(
+            "グループの層化 (stratified_group) は目的の値で層を作るので, "
+            f"{task} では使えません (group にしてください)"
+        )
     unlabeled = loaded["split"].get("unlabeled", "drop")
     if unlabeled not in UNLABELED_MODES:
         raise ValueError(

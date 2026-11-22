@@ -71,7 +71,7 @@ export_dataset(data, "recipe.yaml", "datasets/titanic")
 
 使える手順は `describe_steps()` で一覧にできる (列を落とす, 行を絞る, 型を変える, 欠損の補完と行の削除, 重複の削除, 外れ値の切り詰め, 対数, 標準化, 最小と最大の正規化, ワンホット, 番号付け, 日時の分解, 時系列の過去の値と移動平均). `columns: auto` は目的の列などを除く, 手順に合う型 (数値かカテゴリ) の列.
 
-分割は `random`, `stratified` (目的の列の割合を保つ), `time` (時刻の順. 最後の部分を検証用とテスト用に), `group` (`column` の値ごとに同じ分割), `none`.
+分割は `random`, `stratified` (目的の列の割合を保つ), `time` (時刻の順. 最後の部分を検証用とテスト用に), `group` (`column` の値ごとに同じ分割), `group_time` (`column` の値ごとに同じ分割にし, 後から現れた値を検証用とテスト用に), `stratified_group` (`column` の値ごとに同じ分割にし, 目的の列の割合も近くする), `none`.
 
 目的の列の欠けた行は既定 (`unlabeled: drop`) で落とす. 分割に `unlabeled: keep` を書くと, 落とさずに `unlabeled` の分割 (`unlabeled.parquet`) に残す (半教師あり学習や異常の検知のため). 前処理の値は学習用だけで当てはめ, 正解の無い行には推論のときと同じようにかける. `tensors("unlabeled")` は特徴量だけを返す.
 
