@@ -79,7 +79,7 @@ export_dataset(data, "recipe.yaml", "datasets/titanic")
 
 画像のディレクトリ (`<クラス>/<画像>` ならラベル付き), 1 行 1 文の `.txt` か `<クラス>/<文>.txt`, 点群 (`.ply`, `.pcd`, `.xyz`, `.npy`. 1 つか `<クラス>/<点群>`) も `load_data` で読める. 表 (`data.frame`) は 1 行 1 件の様子 (画像なら幅, 高さ, ラベル) で, 中身は `data.load_item(i)` で読む. 分析には大きさのばらつきなどの気付きが加わる.
 
-音声 (`.wav` の PCM と 32 bit の浮動小数. 1 つか `<クラス>/<音声>`) も `load_data` で読める (種類 `audio`). FLAC, MP3, Ogg (Vorbis, Opus), AIFF は soundfile が要る (`[all]` か `[audio]` で入る). 表は標本化の周波数, チャンネル数, 長さなどで, `data.load_item(i)` か `read_audio(ファイル)` が `samples` ((標本の数, チャンネル) の float32) と `sample_rate` を返す. 分析には周波数のばらつき, 長さ, 無音と音の割れの気付きが加わる.
+音声 (`.wav` の PCM と 32 bit の浮動小数. 1 つか `<クラス>/<音声>`) も `load_data` で読める (種類 `audio`). FLAC, MP3, Ogg (Vorbis, Opus), AIFF は soundfile が要る (`[all]` か `[audio]` で入る). 表は標本化の周波数, チャンネル数, 長さなどで, `data.load_item(i)` か `read_audio(ファイル)` が `samples` ((標本の数, チャンネル) の float32) と `sample_rate` を返す. 先頭の秒だけは `data.load_item(i, seconds)` で読める. 分析には周波数のばらつき, 長さ, 無音と音の割れの気付きが加わる.
 
 学習用にするには, レシピに中身の手順 (`item_steps`) を書く.
 
