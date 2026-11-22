@@ -1,10 +1,12 @@
+import importlib.util
 import wave
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from ml_eda import load_data
+from ml_eda import Data, export_dataset, load_data, load_dataset
 from ml_eda.synthetic import write_shape_captures
 
 # 種類ごとの読み込みの名前と拡張子
@@ -240,3 +242,75 @@ def test_size_and_modified(tmp_path: Path, place: str) -> None:
     assert data.source["modified"] == stat.st_mtime
     assert data.source["loader"] in ("csv", "audio_folder")
     assert isinstance(data.source["options"], dict)
+
+
+def test_export_names_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    版 1 の書き出しの source に手元の場所が残らず, 名前だけになることを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    monkeypatch: pytest.MonkeyPatch
+        今のディレクトリの変更
+
+    Returns
+    ----------
+    None
+    """
+    # 表のファイル (絶対パス) と, 文と画像のディレクトリ (相対の場所)
+    table = tmp_path / "shop.csv"
+    rows = "\n".join(f"{i},{'ab'[i % 2]}" for i in range(20))
+    table.write_text("x,label\n" + rows + "\n", encoding="utf-8")
+    for label in "ab":
+        (tmp_path / "reviews" / label).mkdir(parents=True)
+        for index in range(4):
+            (tmp_path / "reviews" / label / f"{index}.txt").write_text(
+                f"{label} {index}", encoding="utf-8"
+            )
+    monkeypatch.chdir(tmp_path)
+    split = {"method": "random", "valid": 0.25}
+    settings = {
+        "shop.csv": (load_data(table, sep=","), []),
+        "reviews": (load_data("reviews"),
+                    [{"op": "vocabulary", "length": 4}]),
+    }
+    if importlib.util.find_spec("PIL") is not None:
+        write_folder(tmp_path / "pets", "image")
+        settings["pets"] = (load_data(Path("pets") / ".." / "pets"),
+                            [{"op": "resize", "width": 2, "height": 2}])
+    for name, (data, item_steps) in settings.items():
+        recipe = {"target": "label", "task": "classification",
+                  "item_steps": item_steps, "split": split}
+        info = export_dataset(data, recipe, tmp_path / "out" / name)
+        source = info["source"]
+        assert source["name"] == name
+        assert "path" not in source and "root" not in source
+        assert source["paths"] == "name_only" and source["note"]
+        assert source["loader"] == data.source["loader"]
+        assert source["options"] == data.source["options"]
+        assert source["size"] == data.source["size"]
+        if name == "shop.csv":
+            assert source["columns"] == ["x", "label"]
+        else:
+            assert "columns" not in source
+
+        # 書いた説明のどこにも一時ディレクトリの場所は無い
+        text = (tmp_path / "out" / name / "dataset.yaml").read_text(
+            encoding="utf-8"
+        )
+        assert str(tmp_path.resolve()) not in text
+        assert str(tmp_path) not in text
+        assert load_dataset(tmp_path / "out" / name).info["source"] == source
+    assert settings["shop.csv"][0].source["options"] == {"sep": ","}
+
+    # 場所の無い source (手元で作ったデータ) は列の名前だけ
+    frame = pd.DataFrame({"x": range(20), "label": ["a", "b"] * 10})
+    made = Data(kind="table", frame=frame, roles={"target": "label"})
+    info = export_dataset(made, {"target": "label", "split": split},
+                          tmp_path / "out" / "made")
+    assert info["source"] == {"columns": ["x", "label"]}

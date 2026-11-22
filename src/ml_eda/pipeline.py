@@ -1,4 +1,5 @@
 import datetime as dt
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -72,6 +73,17 @@ ITEM_TARGET_POINTS = 1024
 
 # 目的の列の欠けた行を残す分割の名前 (split.unlabeled: keep の場合)
 UNLABELED = "unlabeled"
+
+# 書き出しの source に添える, 元の場所の書き方
+SOURCE_NOTE = (
+    "元の場所は名前だけを残す (手元のディレクトリの構成を渡さないため)"
+)
+
+# 版 1 の書き出しの source から除く, 手元の場所の欄
+LOCAL_PLACES = ("path", "root")
+
+# 版 1 の書き出しの source に列の名前の並びを残す種類
+TABLE_KINDS = ("table", "timeseries")
 
 
 @dataclass
@@ -1561,6 +1573,74 @@ def finish_writing(target: Path, final: Path, info: dict) -> None:
     target.rename(final)
 
 
+def source_name(place: Union[str, Path]) -> str:
+    """
+    説明の source に書く, 元の場所の名前を返す関数
+
+    手元のディレクトリの構成を残さないため, 最後の部分だけにする
+
+    Parameters
+    ----------
+    place: Union[str, Path]
+        元の場所 (ディレクトリかファイル)
+
+    Returns
+    ----------
+    name: str
+        場所の名前 (. や .. は畳んだ先の名前. ~ だけと根は空)
+    """
+    # . と .. だけを畳んで最後の部分 (シンボリックリンクはたどらず, 渡した
+    # 名前のまま. ~ だけや根は手元の名前になるので空)
+    text = str(place)
+    if text.strip().rstrip("/\\") in ("~", ""):
+        name = ""
+        return name
+    name = Path(os.path.abspath(os.path.expanduser(text))).name
+
+    return name
+
+
+def shared_source(data: Data) -> dict:
+    """
+    版 1 の書き出しの source に書く, 手元の場所を除いた写しを返す関数
+
+    データセットは人に渡すことがあるので, 読み込んだ場所 (path) と 1 件の
+    場所の基 (root) は名前 (name) だけにする. 表と時系列は, 読み込んだ表の
+    列の名前の並び (columns) を添える
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+
+    Returns
+    ----------
+    shared: dict
+        path と root を除き, 場所があれば name, paths (name_only), note を,
+        表と時系列なら columns を添えた写し
+    """
+    # 場所の名前は読み込んだ場所 (無ければ 1 件の場所の基) の最後の部分
+    source = data.source
+    shared = {
+        key: value for key, value in source.items()
+        if key not in LOCAL_PLACES
+    }
+    place = next(
+        (source[key] for key in LOCAL_PLACES if source.get(key)), None
+    )
+    if place is not None:
+        shared = {
+            "name": source_name(place), **shared,
+            "paths": "name_only", "note": SOURCE_NOTE,
+        }
+
+    # 読む側が元のデータの列を知るための, 列の名前だけ (値は残さない)
+    if data.kind in TABLE_KINDS:
+        shared["columns"] = [str(name) for name in data.frame.columns]
+
+    return shared
+
+
 def export_dataset(
     data: Data, recipe: Union[str, Path, dict], path: Union[str, Path],
     name: Optional[str] = None, overwrite: bool = False
@@ -1632,7 +1712,7 @@ def export_dataset(
         "classes": prepared.classes,
         "text_column": data.roles.get("text") if data.kind == "text" else None,
         "splits": splits,
-        "source": to_plain(data.source),
+        "source": to_plain(shared_source(data)),
         "recipe": "recipe.yaml",
         "notes": prepared.notes,
     }
