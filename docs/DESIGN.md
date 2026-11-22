@@ -84,7 +84,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | `text_lines` | text | 1 行 1 文の `.txt`, `<クラス>/<文>.txt` のディレクトリ. 表には文, 文字数, 語の数 |
 | `pointcloud` | pointcloud | `.ply` (ASCII とバイナリ), `.pcd` (ASCII), `.xyz` / `.pts`, `(点の数, 3 以上)` の `.npy`. 1 つのファイルか, `<クラス>/<点群>` のディレクトリ. 表には点の数, 各軸の範囲, 中心, 色と法線の有無 |
 | `capture` | capture | 多視点の撮影 (`transforms.json` を持つディレクトリか, それを並べたディレクトリ). 下の「多視点の撮影」 |
-| `audio_folder` | audio | 音声の `.wav` 1 つか, `<クラス>/<音声>` のディレクトリ. 下の「音声」 |
+| `audio_folder` | audio | 音声の 1 つのファイルか, `<クラス>/<音声>` のディレクトリ. `.wav` は標準ライブラリと numpy で, FLAC, MP3, Ogg, AIFF は soundfile で読む (soundfile が要る). 下の「音声」 |
 
 表の中の列が日時で, 日時の順に並ぶ (か並べられる) 場合は `timeseries` と推定する. 表の中に長い文の列があり, 他に列が少ない場合は `text` の候補にもする.
 
@@ -107,15 +107,18 @@ AR の端末などで物体の周りを撮った 1 回の撮影を 1 件とす�
 
 音の分類や認識の学習の入力を, 中身を確かめてから使うために読む.
 
-- 形式: WAVE (`.wav`, `.wave`) の PCM (8, 16, 24, 32 bit) と 32 bit の浮動小数 (拡張の形式 `WAVE_FORMAT_EXTENSIBLE` の中の形式も). 標準ライブラリと numpy だけで読む (他の形式 (FLAC, MP3 など) は読むライブラリが要るので, 今は対象外). 他の形式の番号 (A-law など), `data` か `fmt` の欄の無いファイル, 1 つの標本の組のバイト数 (block align) がチャンネル × バイト数より小さいファイルは, 読めない理由をその行の `error` に書く
-- 列: `path`, `label` (`<クラス>/<音声>` の形の場合), `sample_rate` (1 秒の標本の数), `channels`, `bits`, `format` (`pcm` か `float`), `frames` (標本の数), `duration` (秒), `bytes`, `error` (読めない理由). 読み込みではヘッダーだけを読む (中身の欄 `data` は読まない. 書かれた大きさがファイルより長い書きかけのファイルは, ある分だけ)
-- `load_item(i)` と `read_audio(ファイル)` は `samples` ((標本の数, チャンネル) の float32. 整数の形式は満点 (16 bit なら 32768) を 1 にそろえる (-1 から 1 未満). 浮動小数はそのままの値. 8 bit は符号なしなので 128 を 0 にする) と `sample_rate` の辞書を返す. `read_audio(ファイル, seconds)` は先頭の `seconds` 秒だけを読む. 値は float32 のまま求める (16 bit のステレオで, ファイルの約 3 倍の記憶)
+- WAVE: `.wav`, `.wave` の PCM (8, 16, 24, 32 bit) と 32 bit の浮動小数 (拡張の形式 `WAVE_FORMAT_EXTENSIBLE` の中の形式も). 標準ライブラリと numpy だけで読む (よく使う形式を任意の依存なしで読むため). 他の形式の番号 (A-law など), `data` か `fmt` の欄の無いファイル, 1 つの標本の組のバイト数 (block align) がチャンネル × バイト数より小さいファイルは, 読めない理由をその行の `error` に書く
+- 他の形式: FLAC (`.flac`), MP3 (`.mp3`), Ogg の Vorbis と Opus (`.ogg`, `.opus`), AIFF (`.aif`, `.aiff`) は soundfile (libsndfile を包む. 任意の依存 `[audio]`) で読む. soundfile は BSD, libsndfile と MP3 の復号 (mpg123) は LGPL で, 商用でも使える. MP3 は libsndfile 1.1 以上で読める (`soundfile>=0.12` の wheel が持つ libsndfile は 1.1 以上). MP3 を読めない古い libsndfile の場合は, MP3 の行の `error` に libsndfile の版と理由を書く
+    - bit 数と形式は libsndfile の中身の形式 (subtype) から決める. `PCM_S8`, `PCM_U8`, `PCM_16`, `PCM_24`, `PCM_32` は `pcm` と 8, 16, 24, 32 bit, `FLOAT` と `DOUBLE` は `float` と 32, 64 bit. 他 (MP3, Vorbis, Opus, μ-law, ADPCM など) は `compressed` とし, bit 数は欠損 (圧縮した形式は復号の後の bit 数を持たないため)
+    - soundfile が無い場合: その形式の行の `error` に soundfile が要ることを書き (表の手順 `filter_rows` で除ける), 気付き `missing_reader` (info) を出す. 1 つのファイルか, ディレクトリの全ての音声がその形式の場合は, 読める件が無いので導入の仕方を添えた誤り (`ImportError`)
+- 列: `path`, `label` (`<クラス>/<音声>` の形の場合), `sample_rate` (1 秒の標本の数), `channels`, `bits` (`compressed` では欠損), `format` (`pcm`, `float`, `compressed`), `frames` (標本の数), `duration` (秒), `bytes`, `error` (読めない理由). 読み込みではヘッダーだけを読む (中身の欄 `data` は読まない. 書かれた大きさがファイルより長い書きかけのファイルは, ある分だけ)
+- `load_item(i)` と `read_audio(ファイル)` は `samples` ((標本の数, チャンネル) の float32. 整数の形式は満点 (16 bit なら 32768) を 1 にそろえる (-1 から 1 未満). 浮動小数はそのままの値. 8 bit は符号なしなので 128 を 0 にする) と `sample_rate` の辞書を返す (soundfile で読む形式も同じ形. libsndfile も整数の形式を満点で割る). `read_audio(ファイル, seconds)` は先頭の `seconds` 秒だけを読む. 値は float32 のまま求める (16 bit のステレオで, ファイルの約 3 倍の記憶)
 - 分析 (`items`): 件数, 読めない数, 標本化の周波数とチャンネル数の分布, 長さ (秒の最小, 中央値, 最大, 合計), 見本 (無作為な最大 200 件. 1 件は先頭の 30 秒だけを読む. 長い録音で記憶を使いすぎないため. 長さなどの表の値はヘッダーから全体で求める) の音の大きさ (RMS と最大の振幅の中央値), ほぼ無音の数 (RMS が 0.001 (約 -60 dBFS) 未満), 割れた数 (下の「音の割れ」)
     - 音の割れ: 標本の 1 % 以上が, 形式の満点の端に張り付いた音声を数える
-    - 端の値: 整数の形式は正の最大の値 (2^(b-1) - 1) / 2^(b-1) 以上の振幅 (8 bit は 127 / 128, 16 bit は 32767 / 32768. 負の端 -1 も含む). 32 bit の浮動小数は 1 以上の振幅 (1 を超える値は, 整数の形式に直すか再生すると割れるため)
+    - 端の値: 整数の形式は正の最大の値 (2^(b-1) - 1) / 2^(b-1) 以上の振幅 (8 bit は 127 / 128, 16 bit は 32767 / 32768. 負の端 -1 も含む). 浮動小数と `compressed` は 1 以上の振幅 (1 を超える値は, 整数の形式に直すか再生すると割れるため. 割れた音を圧縮すると, 復号した波は割れた所で 1 を超える)
     - 端を bit 数ごとに決めるのは, 全ての bit 数で 127 / 128 にすると, 16 bit 以上の割れていない大きな音 (最大 0.995 の正弦波など) も割れと数えるため
     - 端に張り付いた標本の割合だけで見る. 音量を下げた後の割れ (端より低い所で平らな波形) と, 標本の 1 % に満たない短い割れは見ない
-- 気付き: 読めないファイル (`unreadable_items`), 標本化の周波数かチャンネル数がそろわない (`mixed_sizes`), 長さが 2 倍以上ばらつくか, 長さ 0 の音声と長さのある音声が混ざる (`mixed_lengths`. info), ほぼ無音 (`silent_items`), 音が割れている (`clipped_items`. info), ファイルが上限を超えた (`too_many_files`)
+- 気付き: 読めないファイル (`unreadable_items`. soundfile が無くて読めない件は除く), soundfile が無くて読めない形式がある (`missing_reader`. info), 標本化の周波数かチャンネル数がそろわない (`mixed_sizes`), 長さが 2 倍以上ばらつくか, 長さ 0 の音声と長さのある音声が混ざる (`mixed_lengths`. info), ほぼ無音 (`silent_items`), 音が割れている (`clipped_items`. info), ファイルが上限を超えた (`too_many_files`)
 - 前処理と書き出し: 画像, 文, 点群と同じく, 表の手順で件を絞ってから中身の手順 (`item_steps`. 下の「前処理のレシピ」の音声の手順) で 1 件ずつ (チャンネル, 標本の数) の float32 の配列にし, `export_dataset` が版 1 で書く (`kind: audio`, `train_items.npy` は (件数, チャンネル, 標本の数)). 全ての件の形をそろえるには, 標本化の周波数 (`resample`), チャンネル (`mix_channels`), 長さ (`fix_length`) の 3 つをそろえる. 読めない件は表の手順 `filter_rows` (`error` が `isna`) で除く. `prepare(read_items=False)` は読み込みの表から, そろえる手順の無いまま周波数, チャンネル数, 長さがそろわないことを注意 (`notes`) にする (`resample` があれば長さは秒で比べる). 推論のときは `transform_item` に音声のファイルの場所か `read_audio` の辞書を渡すと, 学習のときと同じ (チャンネル, 標本の数) の配列を返す
 
 ## 6. 分析
@@ -160,7 +163,7 @@ AR の端末などで物体の周りを撮った 1 回の撮影を 1 件とす�
 | `view_gap` | 多視点の撮影で, 物の周りを回った方位に 90 度以上の隙間がある |
 | `no_orbit` | 多視点の撮影が, 物の周りを回った撮影と見なせない (方位の隙間を求めない) |
 | `too_many_files` | ファイル (や撮影) が上限を超え, 先頭だけを読んだ |
-| `missing_reader` | 読むのに要るライブラリ (Pillow など) が無く, 一部の列を求めていない |
+| `missing_reader` | 読むのに要るライブラリ (Pillow, soundfile など) が無く, 一部の列か件を読んでいない |
 | `mixed_lengths` | 音声の長さが 2 倍以上ばらつく |
 | `silent_items` | ほぼ無音の音声がある (見本で) |
 | `clipped_items` | 音が割れている音声がある (見本で) |
