@@ -994,18 +994,23 @@ def test_public_names_for_screen_and_inference() -> None:
     """
     import ml_eda
     from ml_eda import (
-        DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS, frame_view, read_image
+        DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS, PLACEMENTS, frame_view,
+        read_image
     )
-    from ml_eda import media, pipeline
+    from ml_eda import items, media, pipeline
 
     # 公開の名前と, 元のモジュールの名前が同じもの
     for name in ("frame_view", "DATASET_FORMAT_VERSION",
-                 "ITEMS_FORMAT_VERSIONS", "read_image"):
+                 "ITEMS_FORMAT_VERSIONS", "PLACEMENTS", "read_image"):
         assert name in ml_eda.__all__
     assert frame_view is pipeline.frame_view
     assert read_image is media.read_image
     assert DATASET_FORMAT_VERSION == pipeline.DATASET_FORMAT_VERSION == 1
     assert ITEMS_FORMAT_VERSIONS == pipeline.ITEMS_FORMAT_VERSIONS == (2, 3)
+
+    # 項目の置き方は名前の組
+    assert PLACEMENTS is items.PLACEMENTS
+    assert PLACEMENTS == ("file", "directory", "column")
 
     # 鍵は rows, columns (name, dtype), head の 3 つ
     frame = pd.DataFrame({

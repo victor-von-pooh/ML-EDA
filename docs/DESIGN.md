@@ -26,6 +26,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 表の 1 ページ (`frame_view`) | 持つ | 版を持たない (下の形) | ML-Fathom (表の中身). 下の「公開の名前」 |
 | 書き出しの版の定数 (`DATASET_FORMAT_VERSION`, `ITEMS_FORMAT_VERSIONS`) | 持つ | データセットの版そのもの | ML-Fathom (書き出したデータセットの版の見分け), ML-Inference (一式の版の確かめ). 下の「公開の名前」 |
 | 画像 1 枚の読み方 (`read_image`) | 持つ | 版を持たない | ML-Fathom (撮影の 1 枚). 下の「公開の名前」 |
+| 項目の置き方の組 (`PLACEMENTS`) | 持つ | データセットの版 2 と 3 に含む | ML-Inference (一式の項目の置き方の確かめ). 下の「公開の名前」 |
 
 ### 公開の名前
 
@@ -37,6 +38,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
     - `head`: 先頭の行の並び. 1 行は列の順の値の並び. 値は `int`, 有限の `float`, `bool`, `str`, `None` のどれか. 欠損と無限大は `None`, リストと辞書と配列と日時とカテゴリなど数と真偽でないものは文字 (`str()`)
 - `DATASET_FORMAT_VERSION`: `load_dataset` が読む列の正解のデータセットの版 (`int`. 今は 1)
 - `ITEMS_FORMAT_VERSIONS`: `load_items` が読むファイルの組のデータセットの版の組 (`tuple[int, ...]`. 今は `(2, 3)`)
+- `PLACEMENTS`: `load_items` が読める項目の置き方 (`dataset.yaml` の `entries.<名前>.placement`) の名前の組 (`tuple[str, ...]`. 今は `("file", "directory", "column")`. 意味は「書き出しの版 2」の `placement`). これに無い置き方の項目を持つデータセットは `load_items` が誤りで止まる
 - `read_image(path)`: ファイル 1 つの画像を numpy の配列にする低い層. 形は (高さ, 幅) か (高さ, 幅, チャンネル), 型は `uint8`, 書き込める写し. EXIF の向きを直し, パレットなどは RGB (透明があれば RGBA), 16 ビットと浮動小数は 0 から 255 に縮めた 1 チャンネル, 2 値は 0 と 255 にそろえる. 版 2 の書き出しと `load_item` の画像と同じ読み方
 
 ## 3. 用語

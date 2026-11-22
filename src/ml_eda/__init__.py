@@ -6,7 +6,7 @@ from ml_eda.capture import capture_layout
 from ml_eda.data import KINDS, Data
 from ml_eda.itemprep import ITEM_STEPS, describe_item_steps
 from ml_eda.items import (
-    ItemDataset, ItemSplit, capture_shift, export_capture_clouds,
+    PLACEMENTS, ItemDataset, ItemSplit, capture_shift, export_capture_clouds,
     export_image_masks, load_items, normalize_capture, read_capture,
     transform_entry
 )
@@ -29,7 +29,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DATASET_FORMAT_VERSION", "ITEMS_FORMAT_VERSIONS", "ITEM_STEPS",
-    "KINDS", "LOADERS", "STEPS", "Data", "Dataset",
+    "KINDS", "LOADERS", "PLACEMENTS", "STEPS", "Data", "Dataset",
     "ItemDataset", "ItemSplit", "Loader",
     "Prepared", "Step", "capture_layout", "capture_shift",
     "compare_tokenizers",
