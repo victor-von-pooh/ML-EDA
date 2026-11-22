@@ -29,8 +29,11 @@ image = [
 text = [
     "tokenizers>=0.20"
 ]
+audio = [
+    "soundfile>=0.12"
+]
 all = [
-    "ml-eda[parquet,excel,image,text]"
+    "ml-eda[parquet,excel,image,text,audio]"
 ]
 dev = [
     "pytest"

@@ -9,8 +9,24 @@ from ml_eda.data import Data
 from ml_eda.loaders import Loader, register_loader
 from ml_eda.media import MAX_FILES, labels_of, list_files
 
+# 標準ライブラリと numpy で読む拡張子 (WAVE)
+WAVE_EXTENSIONS = (".wav", ".wave")
+
+# soundfile (libsndfile) で読む拡張子 (FLAC, MP3, Ogg, AIFF)
+LIBRARY_EXTENSIONS = (".flac", ".mp3", ".ogg", ".opus", ".aif", ".aiff")
+
 # 音声の拡張子
-AUDIO_EXTENSIONS = (".wav", ".wave")
+AUDIO_EXTENSIONS = WAVE_EXTENSIONS + LIBRARY_EXTENSIONS
+
+# libsndfile の中身の形式 (subtype) ごとの形式と bit 数 (他は compressed)
+SUBTYPES = {
+    "PCM_S8": ("pcm", 8), "PCM_U8": ("pcm", 8), "PCM_16": ("pcm", 16),
+    "PCM_24": ("pcm", 24), "PCM_32": ("pcm", 32), "FLOAT": ("float", 32),
+    "DOUBLE": ("float", 64),
+}
+
+# MP3 を読める libsndfile の版
+MP3_LIBSNDFILE = (1, 1)
 
 # 形式の番号 (WAVE の fmt の欄)
 PCM = 1
@@ -107,16 +123,174 @@ def wave_chunks(path: Path) -> dict:
     return chunks
 
 
+def soundfile_module() -> Any:
+    """
+    soundfile を読み込む関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    module: Any
+        soundfile のモジュール
+
+    Raises
+    ----------
+    ImportError
+        soundfile が無い場合
+    """
+    # 任意の依存 (WAVE の他の形式だけに要る)
+    try:
+        import soundfile as module
+    except ImportError as error:
+        raise ImportError(
+            "WAVE の他の音声 (FLAC, MP3, Ogg, AIFF) を読むには soundfile が"
+            "要ります (pip install soundfile か ml-eda[audio])"
+        ) from error
+
+    return module
+
+
+def library_chunks(path: Path) -> dict:
+    """
+    soundfile で読む音声のヘッダー (形式, 周波数, チャンネル, 長さ) を
+    読む関数
+
+    Parameters
+    ----------
+    path: Path
+        音声のファイル (FLAC, MP3, Ogg, AIFF)
+
+    Returns
+    ----------
+    chunks: dict
+        format (pcm, float, compressed), sample_rate, channels, bits
+        (compressed は None), frames
+
+    Raises
+    ----------
+    ImportError
+        soundfile が無い場合
+    ValueError
+        読めないファイルの場合, MP3 を読めない古い libsndfile の場合
+    """
+    # libsndfile の版 (MP3 は 1.1 から)
+    module = soundfile_module()
+    if path.suffix.lower() == ".mp3":
+        version = str(module.__libsndfile_version__)
+        numbers = tuple(
+            int(part) for part in version.split(".")[:2] if part.isdigit()
+        )
+        if numbers < MP3_LIBSNDFILE or "MP3" not in (
+            module.available_formats()
+        ):
+            raise ValueError(
+                f"{path.name} の MP3 は, この libsndfile ({version}) では"
+                "読めません (1.1 以上が要ります)"
+            )
+
+    # ヘッダーと中身の形式
+    try:
+        info = module.info(str(path))
+    except RuntimeError as error:
+        raise ValueError(f"{path.name} を読めません ({error})") from error
+    if info.samplerate < 1 or info.channels < 1:
+        raise ValueError(f"{path.name} の周波数かチャンネルが正しくありません")
+    form, bits = SUBTYPES.get(str(info.subtype), ("compressed", None))
+    chunks = {
+        "format": form, "sample_rate": int(info.samplerate),
+        "channels": int(info.channels), "bits": bits,
+        "frames": max(int(info.frames), 0),
+    }
+
+    return chunks
+
+
+def audio_chunks(path: Path) -> dict:
+    """
+    音声のファイルのヘッダーを, 拡張子に合う読み方で読む関数
+
+    Parameters
+    ----------
+    path: Path
+        音声のファイル
+
+    Returns
+    ----------
+    chunks: dict
+        format, sample_rate, channels, bits, frames (と WAVE の欄の位置)
+
+    Raises
+    ----------
+    ImportError
+        soundfile で読む形式で, soundfile が無い場合
+    ValueError
+        読めないファイルの場合
+    """
+    # WAVE は標準ライブラリと numpy, 他は soundfile
+    if path.suffix.lower() in LIBRARY_EXTENSIONS:
+        chunks = library_chunks(path)
+        return chunks
+    chunks = wave_chunks(path)
+
+    return chunks
+
+
+def read_library(path: Path, seconds: Optional[float] = None) -> dict:
+    """
+    soundfile で読む音声 (FLAC, MP3, Ogg, AIFF) の音を読む関数
+
+    Parameters
+    ----------
+    path: Path
+        音声のファイル
+    seconds: Optional[float] = None
+        先頭から読む長さ (秒. None は全て)
+
+    Returns
+    ----------
+    audio: dict
+        samples ((標本の数, チャンネル) の float32) と sample_rate
+
+    Raises
+    ----------
+    ImportError
+        soundfile が無い場合
+    ValueError
+        読めないファイルの場合
+    """
+    # 形式の確かめ (MP3 の版も) と, 先頭からの標本の組
+    chunks = library_chunks(path)
+    module = soundfile_module()
+    try:
+        with module.SoundFile(str(path)) as stream:
+            count = -1
+            if seconds is not None:
+                count = max(int(seconds * chunks["sample_rate"]), 0)
+            samples = stream.read(count, dtype="float32", always_2d=True)
+    except RuntimeError as error:
+        raise ValueError(f"{path.name} を読めません ({error})") from error
+    audio = {
+        "samples": np.ascontiguousarray(samples, dtype=np.float32),
+        "sample_rate": chunks["sample_rate"],
+    }
+
+    return audio
+
+
 def read_audio(
     path: Union[str, Path], seconds: Optional[float] = None
 ) -> dict:
     """
-    WAVE のファイルの音を読む関数
+    音声のファイルの音を読む関数
 
     Parameters
     ----------
     path: Union[str, Path]
-        WAVE のファイル (PCM の 8, 16, 24, 32 bit と, 32 bit の浮動小数)
+        音声のファイル (WAVE の PCM の 8, 16, 24, 32 bit と, 32 bit の
+        浮動小数. FLAC, MP3, Ogg, AIFF は soundfile で)
     seconds: Optional[float] = None
         先頭から読む長さ (秒. None は全て)
 
@@ -129,11 +303,18 @@ def read_audio(
 
     Raises
     ----------
+    ImportError
+        soundfile で読む形式で, soundfile が無い場合
     ValueError
         読めない形式の場合
     """
-    # 読む標本の組の数だけのバイト
+    # WAVE の他の形式は soundfile
     place = Path(path)
+    if place.suffix.lower() in LIBRARY_EXTENSIONS:
+        audio = read_library(place, seconds)
+        return audio
+
+    # 読む標本の組の数だけのバイト
     chunks = wave_chunks(place)
     count = chunks["frames"]
     if seconds is not None:
@@ -199,12 +380,15 @@ def sniff_audio(path: Path) -> float:
     score: float
         確からしさ
     """
-    # 1 つの WAVE か, WAVE が多いディレクトリ
+    # 1 つの音声か, 音声が多いディレクトリ (soundfile が無くても, 拡張子
+    # が合えば読み込みで理由を返す)
     if path.is_file():
         if path.suffix.lower() not in AUDIO_EXTENSIONS:
             return 0.0
         try:
-            wave_chunks(path)
+            audio_chunks(path)
+        except ImportError:
+            return 0.6
         except (ValueError, OSError, struct.error):
             return 0.2
         return 0.8
@@ -239,22 +423,25 @@ def load_audio(path: Path, **options: Any) -> Data:
     ----------
     ValueError
         音声のファイルが無い場合
+    ImportError
+        全てのファイルが soundfile で読む形式で, soundfile が無い場合
     """
     # ファイルの一覧とラベル
     root = path if path.is_dir() else path.parent
     files = list_files(path, AUDIO_EXTENSIONS) if path.is_dir() else [path]
     if not files:
-        raise ValueError(f"{path.name} に音声 (.wav) のファイルがありません")
+        raise ValueError(f"{path.name} に音声のファイルがありません")
     labels = labels_of(root, files) if path.is_dir() else None
 
-    # ファイルごとのヘッダー
+    # ファイルごとのヘッダー (soundfile が無くて読めない件は数える)
     rows = []
+    missing = 0
     for index, file in enumerate(files):
         row: dict = {"path": file.relative_to(root).as_posix()}
         if labels:
             row["label"] = labels[index]
         try:
-            chunks = wave_chunks(file)
+            chunks = audio_chunks(file)
             row.update({
                 "sample_rate": chunks["sample_rate"],
                 "channels": chunks["channels"], "bits": chunks["bits"],
@@ -262,9 +449,14 @@ def load_audio(path: Path, **options: Any) -> Data:
                 "duration": chunks["frames"] / chunks["sample_rate"],
                 "bytes": file.stat().st_size,
             })
+        except ImportError as error:
+            row["error"] = str(error)
+            missing += 1
         except (ValueError, OSError, struct.error) as error:
             row["error"] = str(error) or type(error).__name__
         rows.append(row)
+    if missing == len(files):
+        soundfile_module()
     frame = pd.DataFrame(rows)
     for name in ("sample_rate", "duration", "error"):
         if name not in frame.columns:
@@ -276,31 +468,36 @@ def load_audio(path: Path, **options: Any) -> Data:
         kind="audio", frame=frame, roles=roles,
         item_loader=lambda i: read_audio(root / frame["path"].iloc[i])
     )
-    data.source = {"root": str(root), "capped": len(files) >= MAX_FILES}
+    data.source = {
+        "root": str(root), "capped": len(files) >= MAX_FILES,
+        "missing_reader": missing,
+    }
 
     return data
 
 
-def clip_level(bits: int, form: str) -> np.float32:
+def clip_level(bits: Optional[int], form: str) -> np.float32:
     """
     音の割れとする振幅 (満点を 1 とした端の値) を, 形式と bit 数から
     求める関数
 
     Parameters
     ----------
-    bits: int
-        量子化の bit 数
+    bits: Optional[int]
+        量子化の bit 数 (compressed は None)
     form: str
-        pcm か float
+        pcm, float, compressed
 
     Returns
     ----------
     level: np.float32
         整数の形式は正の最大の値 ((2^(bits-1) - 1) / 2^(bits-1). 8 bit は
-        127 / 128), 浮動小数は 1 (1 を超える値も割れと数える)
+        127 / 128), 浮動小数と compressed は 1 (1 を超える値も割れと
+        数える)
     """
-    # 読んだ振幅と同じ float32 で比べる (32 bit の PCM の端は 1 に丸まる)
-    if form == "float":
+    # 読んだ振幅と同じ float32 で比べる (32 bit の PCM の端は 1 に丸まる).
+    # 圧縮した形式は, 割れた所の復号した波が 1 を超える
+    if form != "pcm" or bits is None or pd.isna(bits):
         level = np.float32(1.0)
         return level
     full = float(1 << (int(bits) - 1))
@@ -357,7 +554,8 @@ def describe_audio(data: Data, seed: int = 0, sample: int = 200) -> dict:
     result: dict
         count, unreadable, sample_rates, channels, duration (秒の最小,
         中央値, 最大, 合計), level (見本の RMS と最大の振幅の中央値),
-        silent, clipped (見本の数) と気付き (findings)
+        silent, clipped (見本の数), missing_reader (soundfile が無くて
+        読めない数) と気付き (findings)
     """
     # 読めた音声の長さ, 標本化の周波数, チャンネル
     frame = data.frame
@@ -394,9 +592,10 @@ def describe_audio(data: Data, seed: int = 0, sample: int = 200) -> dict:
                 Path(str(data.source.get("root", "."))) / str(place),
                 ANALYSIS_SECONDS
             )
-        except (ValueError, OSError, struct.error):
+        except (ValueError, ImportError, OSError, struct.error):
             continue
-        limit = clip_level(int(row["bits"]), str(row["format"]))
+        bits = None if pd.isna(row["bits"]) else int(row["bits"])
+        limit = clip_level(bits, str(row["format"]))
         levels.append(loudness(audio["samples"], limit))
     result["sampled"] = len(levels)
     result["level"] = {
@@ -407,6 +606,7 @@ def describe_audio(data: Data, seed: int = 0, sample: int = 200) -> dict:
     result["clipped"] = sum(
         item["clipped"] >= CLIPPED_SHARE for item in levels
     )
+    result["missing_reader"] = int(data.source.get("missing_reader", 0))
     result["findings"] = audio_findings(data, result)
 
     return result
@@ -426,11 +626,13 @@ def audio_findings(data: Data, result: dict) -> list[dict]:
     Returns
     ----------
     findings: list[dict]
-        too_many_files, unreadable_items, mixed_sizes, mixed_lengths,
-        silent_items, clipped_items の気付き
+        too_many_files, unreadable_items, missing_reader, mixed_sizes,
+        mixed_lengths, silent_items, clipped_items の気付き
     """
-    # ファイルの上限と読めないファイル
+    # ファイルの上限と読めないファイル (soundfile が無くて読めない件は別)
     findings = []
+    missing = result.get("missing_reader", 0)
+    unreadable = result["unreadable"] - missing
     if data.source.get("capped"):
         findings.append({
             "severity": "warning", "code": "too_many_files",
@@ -440,12 +642,22 @@ def audio_findings(data: Data, result: dict) -> list[dict]:
             ),
             "columns": [],
         })
-    if result["unreadable"]:
+    if unreadable:
         findings.append({
             "severity": "warning", "code": "unreadable_items",
             "message": (
-                f"読めないファイルが {result['unreadable']} 件あります "
-                "(PCM と 32 bit の浮動小数の WAVE だけを読みます)"
+                f"読めないファイルが {unreadable} 件あります (理由は error "
+                "の列. WAVE は PCM と 32 bit の浮動小数だけを読みます)"
+            ),
+            "columns": ["error"],
+        })
+    if missing:
+        findings.append({
+            "severity": "info", "code": "missing_reader",
+            "message": (
+                f"soundfile が無いので, {missing} 件の音声 (FLAC, MP3, Ogg, "
+                "AIFF) を読んでいません (pip install soundfile か "
+                "ml-eda[audio])"
             ),
             "columns": ["error"],
         })
@@ -515,11 +727,12 @@ def register_audio() -> None:
     ----------
     None
     """
-    # WAVE だけ (標準ライブラリと numpy で読む)
+    # WAVE は標準ライブラリと numpy, 他の形式は soundfile で読む
     register_loader(Loader(
         "audio_folder", "audio", AUDIO_EXTENSIONS, sniff_audio, load_audio,
         {},
-        "音声 (.wav. PCM と 32 bit の浮動小数. 1 つか, <クラス>/<音声> の"
+        "音声 (.wav の PCM と 32 bit の浮動小数. .flac, .mp3, .ogg, .opus, "
+        ".aif, .aiff は soundfile が要る. 1 つか, <クラス>/<音声> の"
         "ディレクトリ)"
     ))
 
