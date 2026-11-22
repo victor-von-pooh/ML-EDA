@@ -16,8 +16,8 @@ from ml_eda.itemprep import (
 )
 from ml_eda.profile import finding, to_json
 from ml_eda.recipe import (
-    HIDDEN, STEPS, WANT, category_key, load_recipe, resolve_columns,
-    to_plain
+    HIDDEN, STEPS, WANT, category_key, check_recipe_steps, load_recipe,
+    resolve_columns, to_plain
 )
 
 # データセットの説明の形式の版 (load_dataset が読む, 1 件 = 1 行の約束.
@@ -2099,7 +2099,8 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
     ----------
     ValueError
         版 2 と 3 (ファイルの組. load_items で読む) と, 新しい版
-        の場合
+        の場合と, レシピに知らない手順, 手順と中身の手順の知らない引数が
+        ある場合
     """
     # 説明と版の確認
     root = Path(path).expanduser()
@@ -2127,6 +2128,16 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
         )
     recipe = yaml.safe_load(
         (root / info.get("recipe", "recipe.yaml")).read_text(encoding="utf-8")
+    )
+
+    # 当てはめたレシピの手順と引数 (知らない引数を黙って無視しない. 空の
+    # 引数は書き出した時の当てはめと同じ読まれ方をするので確かめない)
+    if not isinstance(recipe, dict):
+        raise ValueError(
+            "データセットのレシピが辞書 (YAML のマップ) ではありません"
+        )
+    check_recipe_steps(
+        recipe.get("steps") or [], recipe.get("item_steps") or [], False
     )
     dataset = Dataset(path=root, info=info, frames=frames, recipe=recipe)
 

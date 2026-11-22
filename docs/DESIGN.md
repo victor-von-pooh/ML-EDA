@@ -281,6 +281,8 @@ split:
 
 `load_dataset(path)` は分割ごとの `DataFrame` を返す. `unlabeled` の分割の `arrays` と `tensors` は目的の値を返さない (`arrays` は y が None, `tensors` は特徴量だけ). 画像, 文, 点群では `arrays` と `tensors` が中身の配列を返し, `transform_item` で新しい 1 件に同じ中身の手順をかける. `arrays` で numpy の配列, `tensors` で PyTorch のテンソルにもできる (PyTorch が入っている場合). `transform` は新しいデータに当てはめた前処理をかける.
 
+`load_dataset` は `recipe.yaml` も `load_recipe` と同じく確かめ, 表の手順の知らない手順と, 表の手順と中身の手順の知らない引数があれば, 手順の位置と名前, 引数の名前を挙げて止める (より新しい版の ML-EDA で書いたデータセットを読む場合に, `transform` と `transform_item` が, この版の知らない引数を黙って無視して別の値を作らないため). 空 (None) の引数は確かめない. 空の引数は, 書き出した時の当てはめと同じ読まれ方をする (`params.get(鍵, 既定)` で読む `datetime_parts` の `drop` や `vocabulary` の `lowercase` のように, 省いた場合と違う値になる引数も, 書き出した時と同じ値になる) ので, 読み込みで挙動は変わらない. 空の引数のある古い書き出しも読めるようにするため.
+
 書き出しは, 前処理を済ませてから隣の一時ディレクトリに書き, 最後に入れ替える. 既にある場所を置き換えられるのは, 前に書き出したデータセット (`dataset.yaml` を持つもの) だけ.
 
 版の決まりは ML-ModelControl と同じ. 項目を足す, 消す, 変える場合は版を上げ, 読む側は知っている版より新しいものを「この版は読めない」とする.
