@@ -940,7 +940,7 @@ def test_dataset_recipe_params(tmp_path: Path) -> None:
     written = yaml.safe_load(place.read_text(encoding="utf-8"))
     assert len(load_dataset(tmp_path / "ds").recipe["steps"]) == 1
 
-    # 空の引数は, 空を誤りにする前に書き出したデータセットのために通る
+    # 空の引数のある古い書き出しも読める
     # (columns の空は auto と同じに当てはめ, 列は当てはめた値に残る)
     written["steps"][0]["columns"] = None
     place.write_text(yaml.safe_dump(written), encoding="utf-8")
@@ -959,8 +959,16 @@ def test_dataset_recipe_params(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="rescale"):
         load_dataset(tmp_path / "ds")
 
-    # 中身の手順の知らない引数も止まる
+    # 中身の手順の空の引数も通る
     written["steps"] = []
+    written["item_steps"] = [
+        {"op": "vocabulary", "length": 8, "lowercase": None}
+    ]
+    place.write_text(yaml.safe_dump(written), encoding="utf-8")
+    dataset = load_dataset(tmp_path / "ds")
+    assert dataset.recipe["item_steps"][0]["lowercase"] is None
+
+    # 中身の手順の知らない引数も止まる
     written["item_steps"] = [{"op": "vocabulary", "length": 8, "lang": "ja"}]
     place.write_text(yaml.safe_dump(written), encoding="utf-8")
     with pytest.raises(ValueError, match=r"中身の手順 1 \(vocabulary\).*"

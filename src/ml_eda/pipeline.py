@@ -2131,7 +2131,7 @@ def load_dataset(path: Union[str, Path]) -> Dataset:
     )
 
     # 当てはめたレシピの手順と引数 (知らない引数を黙って無視しない. 空の
-    # 引数は, 書き出せたなら当てはめで使えた値なので確かめない)
+    # 引数は書き出した時の当てはめと同じ読まれ方をするので確かめない)
     if not isinstance(recipe, dict):
         raise ValueError(
             "データセットのレシピが辞書 (YAML のマップ) ではありません"
