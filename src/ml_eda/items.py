@@ -17,7 +17,7 @@ from ml_eda.itemprep import (
     apply_steps, check_entry_steps, mask_steps, nearest
 )
 from ml_eda.loaders import (
-    ARGUMENT_HINT, load_data, outside_message, points_outside
+    ARGUMENT_HINT, load_data, option_flag, outside_message, points_outside
 )
 from ml_eda.media import (
     IMAGE_EXTENSIONS, POINT_EXTENSIONS, image_header, list_files,
@@ -305,6 +305,33 @@ def split_items(
     return result
 
 
+def links_followed(follow_links: Any) -> bool:
+    """
+    引数 follow_links を真偽にする関数
+
+    Parameters
+    ----------
+    follow_links: Any
+        引数の値 (画面からの文字の "false" や "0" も読む)
+
+    Returns
+    ----------
+    followed: bool
+        外を指すリンクの先も読むか
+
+    Raises
+    ----------
+    ValueError
+        知らない文字の場合
+    """
+    # 読み込みの設定と同じ読み方 (文字の "false" を真にしない)
+    followed = option_flag(
+        {"follow_links": follow_links}, "follow_links", False
+    )
+
+    return followed
+
+
 def drop_outside(
     files: list[Path], base: Path, label: str, follow_links: bool
 ) -> tuple[list[Path], list[str]]:
@@ -329,7 +356,7 @@ def drop_outside(
     """
     # たどった後の場所で比べる. 除いた件は数と例と, 読む案内を注意に
     notes: list[str] = []
-    if follow_links:
+    if links_followed(follow_links):
         result = (files, notes)
         return result
     outside = [file for file in files if points_outside(base, file)]
@@ -1337,7 +1364,9 @@ def link_limit(
         比べるディレクトリ (たどるなら None)
     """
     # read_capture と同じ決まり
-    limit = None if follow_links else (source if base is None else base)
+    limit = None if links_followed(follow_links) else (
+        source if base is None else base
+    )
 
     return limit
 

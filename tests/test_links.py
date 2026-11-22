@@ -546,6 +546,14 @@ def test_export_image_masks_links(tmp_path: Path) -> None:
     assert "follow_links=True にしてください" in notes
     assert len(load_items(tmp_path / "ds").items) == 2
 
+    # 文字の "false" と "0" は読まない側
+    for flag in ("false", "0"):
+        info = export_image_masks(
+            made["images"], made["masks"], tmp_path / f"text_{flag}",
+            split={"method": "none"}, follow_links=flag
+        )
+        assert len(load_items(tmp_path / f"text_{flag}").items) == 2
+
     # たどる設定では全てを写す
     info = export_image_masks(
         made["images"], made["masks"], tmp_path / "all",
@@ -589,6 +597,13 @@ def test_export_capture_links(tmp_path: Path) -> None:
     assert "外を指すリンクの) 1 枚を除きました" in notes
     dataset = load_items(tmp_path / "ds")
     assert sorted(dataset.items["id"]) == ["box_a", "sphere_b"]
+    export_capture_clouds(
+        captures, clouds, tmp_path / "text", split={"method": "none"},
+        follow_links="false"
+    )
+    assert sorted(load_items(tmp_path / "text").items["id"]) == [
+        "box_a", "sphere_b"
+    ]
     frames = {
         item["id"]: len(item["capture"]["poses"])
         for item in dataset.split("train")
@@ -632,6 +647,12 @@ def test_normalize_capture_links(tmp_path: Path) -> None:
     assert summary["frames"] == 3
     assert np.allclose(summary["shift"], capture_shift(capture))
     assert not (tmp_path / "new" / "images" / "002.png").exists()
+    summary = normalize_capture(
+        capture, tmp_path / "text", follow_links="false"
+    )
+    assert summary["frames"] == 3
+    with pytest.raises(ValueError, match="follow_links"):
+        capture_shift(capture, follow_links="maybe")
 
     # たどる設定では全ての枚
     summary = normalize_capture(capture, tmp_path / "all", follow_links=True)
