@@ -30,6 +30,14 @@ FOLLOW_LINKS_HELP = (
     "自体がリンクの場合は, その先の中を読む)"
 )
 
+# 真偽の設定で受け付ける文字 (小文字にして比べる)
+TRUE_WORDS = ("true", "1", "yes", "on")
+FALSE_WORDS = ("false", "0", "no", "off", "")
+
+# 外を指すリンクを読む案内 (読み込みの設定と, 関数の引数)
+OPTION_HINT = "読み込みの設定 follow_links を true"
+ARGUMENT_HINT = "引数 follow_links=True"
+
 # 試す文字コード (日本語の csv によくあるものを含む)
 ENCODINGS = ("utf-8-sig", "utf-8", "cp932", "euc-jp", "latin-1")
 
@@ -116,12 +124,24 @@ def option_flag(options: dict, name: str, default: bool) -> bool:
     Returns
     ----------
     flag: bool
-        設定の値 (文字の false, 0, no と空は False)
+        設定の値 (文字の true, 1, yes, on は True, false, 0, no, off と
+        空は False. 大文字と小文字と前後の空白は区別しない)
+
+    Raises
+    ----------
+    ValueError
+        知らない文字の場合
     """
-    # 画面からの設定は文字で来る
+    # 画面からの設定は文字で来る. 知らない文字は取り違えないよう誤り
     flag = options.get(name, default)
     if isinstance(flag, str):
-        flag = flag.strip().lower() not in ("false", "0", "no", "")
+        word = flag.strip().lower()
+        if word not in TRUE_WORDS + FALSE_WORDS:
+            raise ValueError(
+                f"設定 {name} の値 {flag!r} は読めません (true, 1, yes, on "
+                "か false, 0, no, off, 空)"
+            )
+        flag = word in TRUE_WORDS
     flag = bool(flag)
 
     return flag
@@ -153,7 +173,7 @@ def points_outside(base: Path, path: Path) -> bool:
     return outside
 
 
-def outside_message(name: str) -> str:
+def outside_message(name: str, hint: str = OPTION_HINT) -> str:
     """
     外を指すリンクを読まない理由の文を返す関数
 
@@ -161,22 +181,26 @@ def outside_message(name: str) -> str:
     ----------
     name: str
         件の場所 (読み込んだディレクトリからの相対)
+    hint: str = OPTION_HINT
+        読む場合の案内 (読み込みの設定か, 関数の引数)
 
     Returns
     ----------
     message: str
         理由と, 読む場合の設定の案内
     """
-    # 設定 follow_links で読めることを添える
+    # follow_links で読めることを添える
     message = (
         f"{name} は読み込んだディレクトリの外を指すリンクなので読みません "
-        "(読むには読み込みの設定 follow_links を true にしてください)"
+        f"(読むには{hint}にしてください)"
     )
 
     return message
 
 
-def check_inside(base: Optional[Path], path: Path, name: str) -> Path:
+def check_inside(
+    base: Optional[Path], path: Path, name: str, hint: str = OPTION_HINT
+) -> Path:
     """
     読み込んだディレクトリの外を指すリンクを誤りにする関数
 
@@ -188,6 +212,8 @@ def check_inside(base: Optional[Path], path: Path, name: str) -> Path:
         読む場所
     name: str
         誤りに書く件の場所
+    hint: str = OPTION_HINT
+        読む場合の案内
 
     Returns
     ----------
@@ -201,7 +227,7 @@ def check_inside(base: Optional[Path], path: Path, name: str) -> Path:
     """
     # たどる設定でなければ, たどった後の場所で比べる
     if base is not None and points_outside(base, path):
-        raise ValueError(outside_message(name))
+        raise ValueError(outside_message(name, hint))
 
     return path
 

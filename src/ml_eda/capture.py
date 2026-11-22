@@ -10,8 +10,8 @@ import pandas as pd
 
 from ml_eda.data import Data
 from ml_eda.loaders import (
-    FOLLOW_LINKS_HELP, Loader, check_inside, option_flag, points_outside,
-    register_loader
+    FOLLOW_LINKS_HELP, OPTION_HINT, Loader, check_inside, option_flag,
+    points_outside, register_loader
 )
 
 # 撮影の決まりのファイルの名前
@@ -94,7 +94,7 @@ def sniff_capture(path: Path) -> float:
     score = 0.0
     for capture in find_captures(path)[:SNIFF_CAPTURES]:
         try:
-            transforms = read_transforms(capture)
+            transforms = read_transforms(capture, path)
         except (OSError, ValueError):
             continue
         if transforms["frames"]:
@@ -104,7 +104,9 @@ def sniff_capture(path: Path) -> float:
     return score
 
 
-def read_transforms(capture: Path) -> dict:
+def read_transforms(
+    capture: Path, base: Optional[Path] = None, hint: str = OPTION_HINT
+) -> dict:
     """
     撮影の transforms.json を読み, 形を確かめる関数
 
@@ -112,6 +114,11 @@ def read_transforms(capture: Path) -> dict:
     ----------
     capture: Path
         撮影のディレクトリ
+    base: Optional[Path] = None
+        読み込んだディレクトリ (リンクをたどった後にこの外を指す
+        transforms.json は読まない. None ならリンクの先をたどる)
+    hint: str = OPTION_HINT
+        外を指す場合の, 読む案内
 
     Returns
     ----------
@@ -121,9 +128,13 @@ def read_transforms(capture: Path) -> dict:
     Raises
     ----------
     ValueError
-        JSON でない場合と, frames の並びが無い場合
+        JSON でない場合, frames の並びが無い場合と, リンクをたどった後に
+        base の外を指す場合
     """
-    # frames は辞書の並び
+    # 外を指すリンクでないことを確かめてから読む. frames は辞書の並び
+    check_inside(
+        base, capture / TRANSFORMS, f"{capture.name}/{TRANSFORMS}", hint
+    )
     with open(capture / TRANSFORMS, encoding="utf-8") as file:
         transforms = json.load(file)
     if not isinstance(transforms, dict) or not isinstance(
@@ -653,7 +664,7 @@ def describe_capture(
         追跡できた枚だけで求める
     """
     # 枚数, 追跡, 画像の大きさ, 内部パラメータ, 端末, 無い画像
-    transforms = read_transforms(capture)
+    transforms = read_transforms(capture, base)
     frames = transforms["frames"]
     tracked = [frame for frame in frames if is_tracked(frame)]
     row: dict = {
@@ -723,7 +734,7 @@ def capture_item(
     # 場所は撮影のディレクトリの中に限った絶対パス
     name = str(frame["path"].iloc[index])
     capture = check_inside(base, root / name, name).resolve()
-    transforms = read_transforms(capture)
+    transforms = read_transforms(capture, base)
     frames = []
     for entry in transforms["frames"]:
         places = {

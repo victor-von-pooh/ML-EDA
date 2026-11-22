@@ -16,7 +16,9 @@ from ml_eda.capture import (
 from ml_eda.itemprep import (
     apply_steps, check_entry_steps, mask_steps, nearest
 )
-from ml_eda.loaders import load_data, outside_message, points_outside
+from ml_eda.loaders import (
+    ARGUMENT_HINT, load_data, outside_message, points_outside
+)
 from ml_eda.media import (
     IMAGE_EXTENSIONS, POINT_EXTENSIONS, image_header, list_files,
     read_cloud, read_image
@@ -1912,7 +1914,7 @@ def within(
     if not found:
         raise ValueError(f"データセットに {text} がありません")
     if not follow_links and points_outside(root, path):
-        raise ValueError(outside_message(text))
+        raise ValueError(outside_message(text, ARGUMENT_HINT))
 
     return path
 
@@ -2108,8 +2110,8 @@ def read_capture(
     """
     # 撮影の説明と, 外かを比べるディレクトリ
     path = Path(path).expanduser()
-    transforms = read_transforms(path)
     limit = None if follow_links else (path if base is None else base)
+    transforms = read_transforms(path, limit, ARGUMENT_HINT)
 
     # 深度は生の深度を優先 (信頼度と組)
     depth_info = transforms.get("depth") or {}
@@ -2420,7 +2422,11 @@ def load_items(
     """
     # 説明と版の確認
     root = Path(path).expanduser().absolute()
-    info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
+    info = yaml.safe_load(
+        within(root, "dataset.yaml", False, follow_links).read_text(
+            encoding="utf-8"
+        )
+    )
     version = info.get("format_version") if isinstance(info, dict) else None
     if version == DATASET_FORMAT_VERSION:
         raise ValueError(

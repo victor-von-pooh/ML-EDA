@@ -596,13 +596,10 @@ def describe_audio(data: Data, seed: int = 0, sample: int = 200) -> dict:
     ) if len(valid) else []
     levels = []
     for index in sorted(int(k) for k in chosen):
-        row = frame.iloc[int(frame.index.get_loc(index))]
-        place = row["path"]
+        position = int(frame.index.get_loc(index))
+        row = frame.iloc[position]
         try:
-            audio = read_audio(
-                Path(str(data.source.get("root", "."))) / str(place),
-                ANALYSIS_SECONDS
-            )
+            audio = data.load_item(position, ANALYSIS_SECONDS)
         except (ValueError, ImportError, OSError, struct.error):
             continue
         bits = None if pd.isna(row["bits"]) else int(row["bits"])

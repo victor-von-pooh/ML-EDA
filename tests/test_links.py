@@ -9,6 +9,7 @@ from ml_eda import (
     describe_loaders, export_image_masks, load_data, load_items, profile,
     read_capture
 )
+from ml_eda.loaders import option_flag
 from ml_eda.synthetic import write_image_masks, write_png
 
 
@@ -294,8 +295,8 @@ def test_item_links(tmp_path: Path) -> None:
     place.unlink()
     place.symlink_to(copy)
 
-    # 既定は誤り, たどる設定では同じ中身
-    with pytest.raises(ValueError, match="外を指すリンク"):
+    # 既定は誤り (引数の案内付き), たどる設定では同じ中身
+    with pytest.raises(ValueError, match="follow_links=True"):
         load_items(tmp_path / "ds").split("train")[0]
     again = load_items(tmp_path / "ds", follow_links=True).split("train")[0]
     assert np.array_equal(again["image"], first["image"])
@@ -329,3 +330,117 @@ def test_read_capture_links(tmp_path: Path) -> None:
     assert read_capture(capture, follow_links=True)["images"].shape == (
         2, 4, 4, 3
     )
+
+
+def test_transforms_link(tmp_path: Path) -> None:
+    """
+    撮影の transforms.json 自体が外を指すリンクの扱いを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 撮影の中の transforms.json だけを外の同じ中身へのリンクにする
+    folder = tmp_path / "captures"
+    capture = write_small_capture(folder / "one")
+    write_small_capture(folder / "two")
+    outside = tmp_path / "outside.json"
+    outside.write_bytes((capture / "transforms.json").read_bytes())
+    (capture / "transforms.json").unlink()
+    (capture / "transforms.json").symlink_to(outside)
+
+    # 撮影を並べたディレクトリ: 既定は理由付き, たどる設定では読む
+    data = load_data(folder, loader="capture")
+    frame = data.frame.set_index("path")
+    assert "外を指すリンク" in frame.loc["one", "error"]
+    assert frame.loc["two", "frames"] == 2
+    with pytest.raises(ValueError, match="外を指すリンク"):
+        data.load_item(list(data.frame["path"]).index("one"))
+    data = load_data(folder, loader="capture", follow_links=True)
+    assert data.frame["error"].isna().all()
+    assert data.frame.set_index("path").loc["one", "frames"] == 2
+
+    # 1 回の撮影を渡した場合も, その撮影と比べる
+    data = load_data(capture, loader="capture")
+    assert "外を指すリンク" in data.frame.loc[0, "error"]
+
+    # read_capture は引数の案内付きの誤り
+    pytest.importorskip("PIL.Image")
+    with pytest.raises(ValueError, match="follow_links=True"):
+        read_capture(capture)
+    assert read_capture(capture, follow_links=True)["images"].shape[0] == 2
+
+
+def test_dataset_yaml_link(tmp_path: Path) -> None:
+    """
+    版 2 のデータセットの dataset.yaml が外を指すリンクの扱いを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # dataset.yaml を外の同じ中身へのリンクにする
+    pytest.importorskip("PIL.Image")
+    made = write_image_masks(tmp_path / "raw", count=4)
+    export_image_masks(made["images"], made["masks"], tmp_path / "ds")
+    outside = tmp_path / "outside.yaml"
+    outside.write_bytes((tmp_path / "ds" / "dataset.yaml").read_bytes())
+    (tmp_path / "ds" / "dataset.yaml").unlink()
+    (tmp_path / "ds" / "dataset.yaml").symlink_to(outside)
+
+    # 既定は誤り, たどる設定では読む
+    with pytest.raises(ValueError, match="follow_links=True"):
+        load_items(tmp_path / "ds")
+    dataset = load_items(tmp_path / "ds", follow_links=True)
+    assert dataset.info["format_version"] == 2
+
+
+def test_option_flag(tmp_path: Path) -> None:
+    """
+    真偽の設定の文字の読み方を確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 受け付ける文字 (大文字と前後の空白は区別しない) と既定
+    for word in ("true", "1", "yes", "on", " TRUE ", "On"):
+        assert option_flag({"follow_links": word}, "follow_links", False)
+    for word in ("false", "0", "no", "off", "", " Off "):
+        assert not option_flag({"follow_links": word}, "follow_links", True)
+    assert option_flag({}, "digest", True)
+    assert not option_flag({"digest": False}, "digest", True)
+
+    # 知らない文字は設定の名前と受け付ける値を挙げて誤り
+    with pytest.raises(ValueError, match="follow_links.*true, 1, yes, on"):
+        option_flag({"follow_links": "n"}, "follow_links", False)
+    folder = tmp_path / "sounds"
+    write_tone(folder / "a.wav")
+    with pytest.raises(ValueError, match="follow_links"):
+        load_data(folder, follow_links="maybe")
+
+    # 画像の digest も同じ読み方 (off で hash を求めない)
+    pytest.importorskip("PIL.Image")
+    images = tmp_path / "images"
+    images.mkdir()
+    write_png(images / "a.png", np.zeros((2, 2, 3), dtype=np.uint8))
+    assert "digest" not in load_data(images, digest="off").frame.columns
+    assert "digest" in load_data(images).frame.columns
+    with pytest.raises(ValueError, match="digest"):
+        load_data(images, digest="n")
