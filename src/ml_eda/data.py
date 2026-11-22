@@ -3,6 +3,8 @@ from typing import Any, Callable, Optional
 
 import pandas as pd
 
+from ml_eda.audioprep import positive_number
+
 # データの種類
 KINDS = (
     "table", "timeseries", "image", "text", "pointcloud", "capture", "audio"
@@ -24,8 +26,10 @@ class Data:
     roles: dict = field(default_factory=dict)
     # 画像や点群の 1 件の中身を読む関数 (表には無い)
     item_loader: Optional[Callable[[int], Any]] = None
+    # 1 件の先頭の秒だけを読む関数 (音声だけ)
+    head_loader: Optional[Callable[[int, float], Any]] = None
 
-    def load_item(self, index: int) -> Any:
+    def load_item(self, index: int, seconds: Optional[float] = None) -> Any:
         """
         画像や点群など, 1 件の中身を読む関数
 
@@ -33,6 +37,9 @@ class Data:
         ----------
         index: int
             frame の行の位置
+        seconds: Optional[float] = None
+            先頭から読む長さ (秒. 音声だけ. None は全て. ファイルより長い
+            場合も全て)
 
         Returns
         ----------
@@ -42,12 +49,24 @@ class Data:
         Raises
         ----------
         ValueError
-            中身を別に持たない種類 (表など) の場合
+            中身を別に持たない種類 (表など) の場合, 音声の他の種類に
+            seconds を渡した場合と, seconds が 0 より大きい数でない場合
         """
         # 中身を別に持つ種類だけ読む
         if self.item_loader is None:
             raise ValueError(f"{self.kind} のデータは 1 件ずつの中身を持ちません")
-        item = self.item_loader(index)
+        if seconds is None:
+            item = self.item_loader(index)
+            return item
+
+        # 先頭の秒は音声だけ
+        if self.head_loader is None:
+            raise ValueError(
+                f"{self.kind} のデータは seconds で先頭だけを読めません "
+                "(seconds は音声の 1 件だけが受け取ります)"
+            )
+        length = positive_number("load_item", "seconds", seconds)
+        item = self.head_loader(index, length)
 
         return item
 

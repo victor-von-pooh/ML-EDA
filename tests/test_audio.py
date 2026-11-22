@@ -4,11 +4,12 @@ import wave
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from ml_eda import (
-    detect, export_dataset, load_data, load_dataset, model_inputs, prepare,
-    profile, read_audio
+    Data, detect, export_dataset, load_data, load_dataset, model_inputs,
+    prepare, profile, read_audio
 )
 from ml_eda.audio import clip_level
 from ml_eda.audioprep import fix_length, mix_channels, resample
@@ -200,6 +201,52 @@ def test_audio_folder(tmp_path: Path) -> None:
     single = load_data(root / "cat" / "c0.wav")
     assert single.kind == "audio" and len(single.frame) == 1
     assert "label" not in single.frame.columns
+
+
+def test_load_item_seconds(tmp_path: Path) -> None:
+    """
+    load_item の seconds で音声の先頭の秒だけを読み, 音声の他の種類と 0 以下
+    の秒が誤りになることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 2 チャンネルの 0.5 秒の音
+    root = tmp_path / "sounds"
+    write_wave(root / "a.wav", tone(0.5, 16000, 2))
+    data = load_data(root)
+    whole = read_audio(root / "a.wav")
+
+    # None は全て, 秒は先頭だけ, ファイルより長い秒は全てで, 辞書は同じ形
+    assert data.load_item(0)["samples"].shape == (8000, 2)
+    head = data.load_item(0, seconds=0.1)
+    assert set(head) == {"samples", "sample_rate"}
+    assert head["sample_rate"] == 16000
+    assert head["samples"].dtype == np.float32
+    np.testing.assert_array_equal(head["samples"], whole["samples"][:1600])
+    for seconds in (1, 10.0):
+        longer = data.load_item(0, seconds=seconds)
+        np.testing.assert_array_equal(longer["samples"], whole["samples"])
+
+    # 0, 負, 無限, 数でない秒は誤り
+    for seconds in (0, -1.0, float("inf"), float("nan"), "1", True):
+        with pytest.raises(ValueError, match="0 より大きい数"):
+            data.load_item(0, seconds=seconds)
+
+    # 音声の他の種類は理由付きの誤り, 表は中身を持たない誤り
+    image = Data(kind="image", frame=pd.DataFrame({"path": ["a.png"]}),
+                 item_loader=lambda i: np.zeros((2, 2, 3)))
+    with pytest.raises(ValueError, match="seconds は音声"):
+        image.load_item(0, seconds=1.0)
+    table = Data(kind="table", frame=pd.DataFrame({"x": [1]}))
+    with pytest.raises(ValueError, match="中身を持ちません"):
+        table.load_item(0, seconds=1.0)
 
 
 def test_audio_edge_cases(tmp_path: Path) -> None:

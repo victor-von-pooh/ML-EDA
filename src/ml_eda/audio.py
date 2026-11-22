@@ -466,7 +466,10 @@ def load_audio(path: Path, **options: Any) -> Data:
         roles["label"] = "label"
     data = Data(
         kind="audio", frame=frame, roles=roles,
-        item_loader=lambda i: read_audio(root / frame["path"].iloc[i])
+        item_loader=lambda i: read_audio(root / frame["path"].iloc[i]),
+        head_loader=lambda i, seconds: read_audio(
+            root / frame["path"].iloc[i], seconds
+        )
     )
     data.source = {
         "root": str(root), "capped": len(files) >= MAX_FILES,
