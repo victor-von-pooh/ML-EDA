@@ -20,9 +20,7 @@ EXTENSIBLE = 0xFFFE
 # 無音とする RMS (満点を 1 とした値. 約 -60 dBFS)
 SILENT_RMS = 1e-3
 
-# 音の割れとする振幅 (満点を 1 とした値. 8 bit の正の端 127 / 128 も
-# 割れと数える) と, 割れた標本の割合
-CLIPPED_LEVEL = 127 / 128
+# 音の割れとする標本の割合 (振幅の端は clip_level で形式ごとに決める)
 CLIPPED_SHARE = 0.01
 
 # 長さのばらつきを気付きにする, 最も長いものと最も短いものの比
@@ -283,7 +281,35 @@ def load_audio(path: Path, **options: Any) -> Data:
     return data
 
 
-def loudness(samples: np.ndarray) -> dict:
+def clip_level(bits: int, form: str) -> np.float32:
+    """
+    音の割れとする振幅 (満点を 1 とした端の値) を, 形式と bit 数から
+    求める関数
+
+    Parameters
+    ----------
+    bits: int
+        量子化の bit 数
+    form: str
+        pcm か float
+
+    Returns
+    ----------
+    level: np.float32
+        整数の形式は正の最大の値 ((2^(bits-1) - 1) / 2^(bits-1). 8 bit は
+        127 / 128), 浮動小数は 1 (1 を超える値も割れと数える)
+    """
+    # 読んだ振幅と同じ float32 で比べる (32 bit の PCM の端は 1 に丸まる)
+    if form == "float":
+        level = np.float32(1.0)
+        return level
+    full = float(1 << (int(bits) - 1))
+    level = np.float32((full - 1.0) / full)
+
+    return level
+
+
+def loudness(samples: np.ndarray, limit: np.float32) -> dict:
     """
     1 つの音の大きさ (RMS, 最大の振幅, 割れた標本の割合) を求める関数
 
@@ -291,11 +317,13 @@ def loudness(samples: np.ndarray) -> dict:
     ----------
     samples: np.ndarray
         (標本の数, チャンネル) の振幅
+    limit: np.float32
+        音の割れとする振幅 (clip_level)
 
     Returns
     ----------
     level: dict
-        rms, peak, clipped (振幅が CLIPPED_LEVEL 以上の標本の割合)
+        rms, peak, clipped (振幅が limit 以上の標本の割合)
     """
     # 空の音は全て 0. float32 のまま求め, 和だけを float64 で足す
     if samples.size == 0:
@@ -305,7 +333,7 @@ def loudness(samples: np.ndarray) -> dict:
     level = {
         "rms": float(np.sqrt(np.mean(np.square(values), dtype=np.float64))),
         "peak": float(values.max()),
-        "clipped": float(np.mean(values >= CLIPPED_LEVEL)),
+        "clipped": float(np.mean(values >= limit)),
     }
 
     return level
@@ -359,7 +387,8 @@ def describe_audio(data: Data, seed: int = 0, sample: int = 200) -> dict:
     ) if len(valid) else []
     levels = []
     for index in sorted(int(k) for k in chosen):
-        place = frame["path"].iloc[int(frame.index.get_loc(index))]
+        row = frame.iloc[int(frame.index.get_loc(index))]
+        place = row["path"]
         try:
             audio = read_audio(
                 Path(str(data.source.get("root", "."))) / str(place),
@@ -367,7 +396,8 @@ def describe_audio(data: Data, seed: int = 0, sample: int = 200) -> dict:
             )
         except (ValueError, OSError, struct.error):
             continue
-        levels.append(loudness(audio["samples"]))
+        limit = clip_level(int(row["bits"]), str(row["format"]))
+        levels.append(loudness(audio["samples"], limit))
     result["sampled"] = len(levels)
     result["level"] = {
         "rms": float(np.median([item["rms"] for item in levels])),
@@ -463,7 +493,7 @@ def audio_findings(data: Data, result: dict) -> list[dict]:
             "severity": "info", "code": "clipped_items",
             "message": (
                 f"見本の {result['sampled']} 件のうち {result['clipped']} 件で"
-                f", 標本の {CLIPPED_SHARE:.0%} 以上が最大の振幅に張り付いて"
+                f", 標本の {CLIPPED_SHARE:.0%} 以上が満点の端に張り付いて"
                 "います (音が割れている). 録音の大きさを確かめてください"
             ),
             "columns": [],
