@@ -25,8 +25,9 @@ from ml_eda.media import (
 )
 from ml_eda.pipeline import (
     DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS,
-    ITEMS_STEPS_FORMAT_VERSION, SPLITS, UNLABELED, assign_splits,
-    count_overlap, finish_writing, start_writing, write_frame
+    ITEMS_STEPS_FORMAT_VERSION, SOURCE_NOTE, SPLITS, UNLABELED,
+    assign_splits, count_overlap, finish_writing, source_name,
+    start_writing, write_frame
 )
 
 # 正解の出どころの種類
@@ -86,12 +87,6 @@ INTRINSICS = ("fl_x", "fl_y", "cx", "cy", "w", "h")
 
 # 16 bit の領域の値の上限
 MASK_MAX = 65535
-
-# 版 2 の source に添える, 元の場所の書き方
-SOURCE_NOTE = (
-    "元の場所はディレクトリの名前だけを残す (手元のディレクトリの構成を"
-    "渡さないため)"
-)
 
 
 def check_origin(origin: Optional[dict]) -> dict:
@@ -2109,33 +2104,6 @@ def stack_or_none(arrays: list, count: int, label: str) -> Optional[Any]:
     stacked = np.stack(arrays)
 
     return stacked
-
-
-def source_name(place: Union[str, Path]) -> str:
-    """
-    説明の source に書く, 元のディレクトリの名前を返す関数
-
-    手元のディレクトリの構成を残さないため, 最後の部分だけにする
-
-    Parameters
-    ----------
-    place: Union[str, Path]
-        元のディレクトリ
-
-    Returns
-    ----------
-    name: str
-        ディレクトリの名前 (. や .. は畳んだ先の名前. ~ だけと根は空)
-    """
-    # . と .. だけを畳んで最後の部分 (シンボリックリンクはたどらず, 渡した
-    # 名前のまま. ~ だけや根は手元の名前になるので空)
-    text = str(place)
-    if text.strip().rstrip("/\\") in ("~", ""):
-        name = ""
-        return name
-    name = Path(os.path.abspath(os.path.expanduser(text))).name
-
-    return name
 
 
 def with_depth_convention(convention: dict) -> dict:
