@@ -16,7 +16,9 @@ from ml_eda.capture import (
 from ml_eda.itemprep import (
     apply_steps, check_entry_steps, mask_steps, nearest
 )
-from ml_eda.loaders import load_data
+from ml_eda.loaders import (
+    ARGUMENT_HINT, load_data, outside_message, points_outside
+)
 from ml_eda.media import (
     IMAGE_EXTENSIONS, POINT_EXTENSIONS, image_header, list_files,
     read_cloud, read_image
@@ -1870,7 +1872,9 @@ def export_capture_clouds(
     return info
 
 
-def within(root: Path, name: Any, directory: bool) -> Path:
+def within(
+    root: Path, name: Any, directory: bool, follow_links: bool = False
+) -> Path:
     """
     表に書かれた場所を, データセットのディレクトリの中に限って返す関数
 
@@ -1882,6 +1886,8 @@ def within(root: Path, name: Any, directory: bool) -> Path:
         書かれた場所 (root からの相対)
     directory: bool
         ディレクトリを指すか (False ならファイル)
+    follow_links: bool = False
+        リンクをたどった後に root の外を指す場所も読むか
 
     Returns
     ----------
@@ -1891,9 +1897,11 @@ def within(root: Path, name: Any, directory: bool) -> Path:
     Raises
     ----------
     ValueError
-        文字でない, 外を指す (絶対パスや ..), 無い場合
+        文字でない, 外を指す (絶対パスや .., follow_links が False で
+        リンクの先が外), 無い場合
     """
-    # 書かれた場所の文字の上で中にあるものだけ
+    # 書かれた場所の文字の上で中にあり, リンクをたどった後も中にあるもの
+    # だけ (root 自体のリンクはたどって比べる)
     text = name if isinstance(name, str) else ""
     normal = os.path.normpath(text) if text else ""
     outside = not text or os.path.isabs(text) or normal == ".." or (
@@ -1905,6 +1913,8 @@ def within(root: Path, name: Any, directory: bool) -> Path:
     found = path.is_dir() if directory else path.is_file()
     if not found:
         raise ValueError(f"データセットに {text} がありません")
+    if not follow_links and points_outside(root, path):
+        raise ValueError(outside_message(text, ARGUMENT_HINT))
 
     return path
 
@@ -2063,7 +2073,10 @@ def with_depth_convention(convention: dict) -> dict:
     return full
 
 
-def read_capture(path: Union[str, Path]) -> dict:
+def read_capture(
+    path: Union[str, Path], follow_links: bool = False,
+    base: Optional[Path] = None
+) -> dict:
     """
     撮影のディレクトリの各枚を配列として読む関数
 
@@ -2074,6 +2087,12 @@ def read_capture(path: Union[str, Path]) -> dict:
     ----------
     path: Union[str, Path]
         撮影のディレクトリ (transforms.json を持つ)
+    follow_links: bool = False
+        リンクをたどった後に外を指すファイルも読むか (False では無い
+        ものとする)
+    base: Optional[Path] = None
+        外かを比べるディレクトリ (既定は撮影のディレクトリ. load_items は
+        データセットのディレクトリを渡す)
 
     Returns
     ----------
@@ -2089,9 +2108,10 @@ def read_capture(path: Union[str, Path]) -> dict:
     ValueError
         画像の無い枚がある場合と, 大きさがそろわない場合
     """
-    # 撮影の説明
+    # 撮影の説明と, 外かを比べるディレクトリ
     path = Path(path).expanduser()
-    transforms = read_transforms(path)
+    limit = None if follow_links else (path if base is None else base)
+    transforms = read_transforms(path, limit, ARGUMENT_HINT)
 
     # 深度は生の深度を優先 (信頼度と組)
     depth_info = transforms.get("depth") or {}
@@ -2100,16 +2120,16 @@ def read_capture(path: Union[str, Path]) -> dict:
     invalid = invalid if isinstance(invalid, (int, float)) else 0
     images, depths, confidences, poses, tracking = [], [], [], [], []
     for entry in transforms["frames"]:
-        image = inside(path, entry.get("file_path"))
+        image = inside(path, entry.get("file_path"), limit)
         if image is None:
             raise ValueError(f"{path.name} の撮影に画像の無い枚があります")
         images.append(with_channels(read_image(image)))
-        depth = inside(path, entry.get("raw_depth_file_path")) or inside(
-            path, entry.get("depth_file_path")
-        )
+        depth = inside(
+            path, entry.get("raw_depth_file_path"), limit
+        ) or inside(path, entry.get("depth_file_path"), limit)
         if depth is not None:
             depths.append(read_depth(depth, scale, invalid))
-        confidence = inside(path, entry.get("confidence_file_path"))
+        confidence = inside(path, entry.get("confidence_file_path"), limit)
         if confidence is not None:
             from PIL import Image
 
@@ -2161,7 +2181,9 @@ def missing_place(spec: dict, value: Any) -> bool:
     return missing
 
 
-def read_entry(root: Path, spec: dict, value: Any, read: bool) -> Any:
+def read_entry(
+    root: Path, spec: dict, value: Any, read: bool, follow_links: bool
+) -> Any:
     """
     1 件の 1 つの項目を読む関数
 
@@ -2175,6 +2197,8 @@ def read_entry(root: Path, spec: dict, value: Any, read: bool) -> Any:
         表の値 (場所か値)
     read: bool
         中身を配列として読むか (False なら場所)
+    follow_links: bool
+        リンクをたどった後にデータセットの外を指す場所も読むか
 
     Returns
     ----------
@@ -2185,7 +2209,9 @@ def read_entry(root: Path, spec: dict, value: Any, read: bool) -> Any:
     content: Any = value
     if spec["placement"] == "column":
         return content
-    path = within(root, value, spec["placement"] == "directory")
+    path = within(
+        root, value, spec["placement"] == "directory", follow_links
+    )
     kind = spec.get("kind")
     content = str(path)
     if not read:
@@ -2199,7 +2225,7 @@ def read_entry(root: Path, spec: dict, value: Any, read: bool) -> Any:
     elif kind == "point_cloud":
         content = read_cloud(path)["points"].astype(np.float32)
     elif kind == "capture":
-        content = read_capture(path)
+        content = read_capture(path, follow_links, root)
     else:
         content = str(path)
 
@@ -2216,6 +2242,8 @@ class ItemSplit:
     rows: pd.DataFrame
     # 中身を配列として読むか (False なら場所)
     read: bool = True
+    # リンクをたどった後にデータセットの外を指す場所も読むか
+    follow_links: bool = False
 
     def __len__(self) -> int:
         """
@@ -2268,7 +2296,9 @@ class ItemSplit:
         }
         for name, spec in self.entries.items():
             if not missing_place(spec, row[name]):
-                item[name] = read_entry(self.root, spec, row[name], self.read)
+                item[name] = read_entry(
+                    self.root, spec, row[name], self.read, self.follow_links
+                )
             elif item["split"] == UNLABELED and spec.get("role") == "target":
                 item[name] = None
             else:
@@ -2288,6 +2318,8 @@ class ItemDataset:
     info: dict
     # 1 行 1 件の表
     items: pd.DataFrame
+    # リンクをたどった後にデータセットの外を指す場所も読むか
+    follow_links: bool = False
 
     @property
     def entries(self) -> dict:
@@ -2356,13 +2388,16 @@ class ItemDataset:
             )
         rows = self.items[self.items["split"] == name].reset_index(drop=True)
         items = ItemSplit(
-            root=self.path, entries=self.entries, rows=rows, read=read
+            root=self.path, entries=self.entries, rows=rows, read=read,
+            follow_links=self.follow_links
         )
 
         return items
 
 
-def load_items(path: Union[str, Path]) -> ItemDataset:
+def load_items(
+    path: Union[str, Path], follow_links: bool = False
+) -> ItemDataset:
     """
     版 2 と 3 (入力と正解がファイルの組) のデータセットを読み込む関数
 
@@ -2370,6 +2405,9 @@ def load_items(path: Union[str, Path]) -> ItemDataset:
     ----------
     path: Union[str, Path]
         export_image_masks などで書き出したディレクトリ
+    follow_links: bool = False
+        表の場所のうち, リンクをたどった後にデータセットの外を指すものも
+        読むか (False では 1 件を読むときに理由付きの誤り)
 
     Returns
     ----------
@@ -2384,7 +2422,11 @@ def load_items(path: Union[str, Path]) -> ItemDataset:
     """
     # 説明と版の確認
     root = Path(path).expanduser().absolute()
-    info = yaml.safe_load((root / "dataset.yaml").read_text(encoding="utf-8"))
+    info = yaml.safe_load(
+        within(root, "dataset.yaml", False, follow_links).read_text(
+            encoding="utf-8"
+        )
+    )
     version = info.get("format_version") if isinstance(info, dict) else None
     if version == DATASET_FORMAT_VERSION:
         raise ValueError(
@@ -2413,7 +2455,7 @@ def load_items(path: Union[str, Path]) -> ItemDataset:
             )
 
     # 1 行 1 件の表 (id とグループは文字のまま)
-    file = within(root, str(info.get("items", "")), False)
+    file = within(root, str(info.get("items", "")), False, follow_links)
     if file.suffix == ".parquet":
         items = pd.read_parquet(file)
     else:
@@ -2427,7 +2469,9 @@ def load_items(path: Union[str, Path]) -> ItemDataset:
         raise ValueError(
             f"{file.name} に列がありません: {', '.join(lacking)}"
         )
-    dataset = ItemDataset(path=root, info=info, items=items)
+    dataset = ItemDataset(
+        path=root, info=info, items=items, follow_links=follow_links
+    )
 
     return dataset
 
