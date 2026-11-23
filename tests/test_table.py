@@ -4,6 +4,7 @@ import json
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,7 @@ from ml_eda import (
     load_dataset, load_recipe, prepare, preview, profile
 )
 from ml_eda.loaders import (
-    LOADERS, option_flag, table_kind, to_datetime, to_numbers
+    LOADERS, finish_table, option_flag, table_kind, to_datetime, to_numbers
 )
 from ml_eda.pipeline import assign_splits
 from ml_eda.recipe import apply_lag
@@ -1090,6 +1091,12 @@ def read_option_names(function: object, seen: set) -> set:
     ----------
     names: set
         options.get, options[...], option_flag で読む設定の名前
+
+    Raises
+    ----------
+    AssertionError
+        options を, 引数 options を持つ ml_eda の関数と option_flag の
+        他に渡す場合 (読む名前を見逃さないため)
     """
     # 調べ終えた関数は飛ばす
     names = set()
@@ -1115,20 +1122,33 @@ def read_option_names(function: object, seen: set) -> set:
             names.add(node.args[0].value)
             continue
 
-        # options を渡す先の関数 (option_flag は 2 つ目の引数が名前)
+        # options を渡す先の関数 (位置, options=options, **options.
+        # option_flag は 2 つ目の引数が名前)
         given = [
             index for index, arg in enumerate(node.args)
             if isinstance(arg, ast.Name) and arg.id == "options"
         ]
-        if not given or not isinstance(call, ast.Name):
+        keyword = any(
+            isinstance(item.value, ast.Name) and item.value.id == "options"
+            for item in node.keywords
+        )
+        if not given and not keyword:
             continue
-        callee = function.__globals__.get(call.id)
-        if callee is option_flag:
+        callee = function.__globals__.get(call.id) if isinstance(
+            call, ast.Name
+        ) else None
+        if callee is option_flag and given:
             names.add(node.args[given[0] + 1].value)
         elif inspect.isfunction(callee) and (
             callee.__module__.startswith("ml_eda")
-        ):
+        ) and "options" in inspect.signature(callee).parameters:
             names |= read_option_names(callee, seen)
+        else:
+            # 辿れない先に渡すと, 読む名前を見逃すので誤り
+            raise AssertionError(
+                f"{function.__name__} が options を辿れない先に渡して"
+                f"います: {ast.unparse(node)}"
+            )
 
     return names
 
@@ -1157,3 +1177,64 @@ def test_loader_options_listed() -> None:
     for name in ("csv", "json", "parquet", "excel"):
         assert "text_column" in listed[name]
     assert "encoding" in listed["json"]
+
+
+def keyword_reader(path: Path, **options: Any) -> None:
+    """
+    設定を名前付きの引数で表の仕上げに渡す, 確かめ用の読み込みの関数
+
+    Parameters
+    ----------
+    path: Path
+        使わない
+    **options: Any
+        読み込みの設定
+
+    Returns
+    ----------
+    None
+    """
+    # 名前付きの引数で渡す
+    finish_table(pd.DataFrame(), options=options)
+
+
+def unknown_reader(path: Path, **options: Any) -> None:
+    """
+    設定を辿れない先に渡す, 確かめ用の読み込みの関数
+
+    Parameters
+    ----------
+    path: Path
+        使わない
+    **options: Any
+        読み込みの設定
+
+    Returns
+    ----------
+    None
+    """
+    # ml_eda の外の関数に広げて渡す
+    keyword_reader(path, **options)
+
+
+def test_option_names_follow_keywords() -> None:
+    """
+    設定の名前を集める関数が, 名前付きの引数で渡す先も辿り, 辿れない先
+    に渡すと誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # options=options で渡す先の表の仕上げが読む名前
+    assert read_option_names(keyword_reader, set()) == {
+        "text_column", "time_column", "kind"
+    }
+
+    # **options で ml_eda の外の関数に渡すと誤り
+    with pytest.raises(AssertionError, match="辿れない"):
+        read_option_names(unknown_reader, set())
