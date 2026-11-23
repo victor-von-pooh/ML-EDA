@@ -24,20 +24,25 @@ from ml_eda.recipe import (
     STEPS, Step, describe_steps, load_recipe, register_step
 )
 from ml_eda.textunits import compare_tokenizers
+from ml_eda.trajectory import (
+    TRAJECTORY_FORMAT_VERSION, Trajectory, describe_trajectory,
+    load_trajectory
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
     "DATASET_FORMAT_VERSION", "ITEMS_FORMAT_VERSIONS", "ITEM_STEPS",
-    "KINDS", "LOADERS", "PLACEMENTS", "STEPS", "Data", "Dataset",
-    "ItemDataset", "ItemSplit", "Loader",
-    "Prepared", "Step", "capture_layout", "capture_shift",
+    "KINDS", "LOADERS", "PLACEMENTS", "STEPS", "TRAJECTORY_FORMAT_VERSION",
+    "Data", "Dataset", "ItemDataset", "ItemSplit", "Loader",
+    "Prepared", "Step", "Trajectory", "capture_layout", "capture_shift",
     "compare_tokenizers",
     "describe_item_steps", "export_capture_clouds", "export_image_masks",
     "describe_loaders",
-    "describe_steps", "detect", "export_dataset", "frame_view", "load_data",
-    "load_dataset", "load_items", "load_recipe", "model_inputs",
-    "normalize_capture",
+    "describe_steps", "describe_trajectory", "detect", "export_dataset",
+    "frame_view", "load_data",
+    "load_dataset", "load_items", "load_recipe", "load_trajectory",
+    "model_inputs", "normalize_capture",
     "prepare", "preview",
     "preview_items", "read_audio", "read_capture", "read_cloud",
     "read_image",

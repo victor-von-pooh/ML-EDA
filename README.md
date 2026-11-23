@@ -13,6 +13,7 @@
 - **ファイルの組**: 画像と領域, 多視点の撮影と点群のように正解がファイルのデータを, データセットの版 2 で書き出して読む. 項目ごとの中身の手順 (大きさをそろえるなど) をかけると版 3
 - **モデルに要るもの**: 書き出したデータセットから, モデルの入力の形と出す値の数を, 分割のデータを読まずに返す (`model_inputs`)
 - **推論のときの同じ前処理**: 新しいデータに, 学習のときと同じレシピと中身の手順をかける
+- **記録した軌跡**: 強化学習の 1 歩が 1 行の軌跡 (ML-Found が評価で書くものと, 手元の CSV と Parquet) を読み, エピソードの長さ, 報酬の和, 観測と行動の値, 守りの結果を要約する
 
 ## どのアプリから使われるか
 
@@ -21,7 +22,7 @@
 | ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs` |
 | ML-Quest (問題の設定) | データの読み方 (`Data.source`), レシピの雛形と書き戻し, ファイルの組の書き出しの設定. 手元のデータの答えの候補 |
 | ML-CreateArchitecture (モデルの作成) | `model_inputs` でモデルの定義の入力と出力をデータセットに合わせる |
-| ML-Found | `task_from_dataset` が `dataset.yaml` を読む (`ml_eda` は使わない) |
+| ML-Found | `task_from_dataset` が `dataset.yaml` を読む (`ml_eda` は使わない). 評価の軌跡 (`trajectories/`) は ML-EDA が読む |
 | ML-Inference, ML-Provide | 書き出したデータセットの読み込み (`load_dataset`, `load_items`), 推論のときの同じ前処理, 書き出し (`export_dataset` など) |
 
 ## 導入
@@ -196,9 +197,26 @@ steps = load_items("datasets/scenes").entries["capture"]["steps"]
 normalize_capture("new/capture_001", "work/capture_001", steps=steps)
 ```
 
+### 記録した軌跡
+
+```python
+from ml_eda import describe_trajectory, load_trajectory
+
+# run_dir は ML-Found の実験のディレクトリ
+trajectory = load_trajectory(run_dir / "trajectories" / "valid_best.csv")
+trajectory.frame                      # 1 歩が 1 行の表 (pandas の DataFrame)
+trajectory.observation_columns        # ["obs_0", "obs_1", ...] (要素の順)
+summary = describe_trajectory(trajectory)   # JSON にできる辞書
+summary["return"]                     # エピソードごとの報酬の和の min, max, mean など
+summary["per_episode"]                # エピソードごとの長さ, 報酬の和, 終わり方
+summary["guard"]                      # 守りの結果と理由の数 (守りの列のある表だけ)
+```
+
+隣に説明 (`valid_best.json`) があれば型と環境の名前などを使い, 無ければ列の名前 (`obs`, `obs_<番号>`, `action`, `action_<番号>`) と値から読む. 手元の Parquet (`trajectory.parquet`) も同じ口で読む (pyarrow が要る). 列の決まりは [docs/DESIGN.md](docs/DESIGN.md) の「記録した軌跡」.
+
 ## 文書
 
-- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり, 他のリポジトリとの約束 (レシピとデータセットの形と版)
+- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり, 他のリポジトリとの約束 (レシピとデータセットの形と版, 読む軌跡の形)
 - [TODO.md](TODO.md): まだやっていないこと (優先度の順)
 - [CODING_STYLE.md](CODING_STYLE.md): コードの書き方
 - [CLAUDE.md](CLAUDE.md): このリポジトリで作業するときの方針
