@@ -15,7 +15,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 
 ## 2. 他のリポジトリとの約束
 
-このライブラリが持つ約束. 他の段階の約束は読まない.
+このライブラリが持つ約束と, 読む約束. 読むのは記録した軌跡 (ML-Found が書く表と説明) だけで, 他の段階の約束は読まない.
 
 | 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
@@ -27,6 +27,8 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 表の 1 ページ (`frame_view`) | 持つ | 版を持たない (下の形) | ML-Fathom (表の中身). 下の「公開の名前」 |
 | 書き出しの版の定数 (`DATASET_FORMAT_VERSION`, `ITEMS_FORMAT_VERSIONS`) | 持つ | データセットの版そのもの | ML-Fathom (書き出したデータセットの版の見分け), ML-Inference (一式の版の確かめ). 下の「公開の名前」 |
 | 画像 1 枚の読み方 (`read_image`) | 持つ | 版を持たない | ML-Fathom (撮影の 1 枚). 下の「公開の名前」 |
+| 記録した軌跡 (`<名前>.csv` か `<名前>.parquet` と, 説明の `<名前>.json`) | 読む | 説明の `format_version` 1 (`TRAJECTORY_FORMAT_VERSION`). 新しい版は読める項目だけを使い, 気付きに書く | 出どころは ML-Found の評価の軌跡 (実験のディレクトリの `trajectories/`. 形の出どころは ML-Found の `docs/FORMAT.md` の「trajectories」) と, 利用者の手元の表. 読む形の決まりは下の「記録した軌跡」 |
+| 軌跡の要約 (`load_trajectory`, `describe_trajectory`) | 持つ | 版を持たない (下の形) | ML-Fathom (軌跡の分析). 下の「記録した軌跡」 |
 | 項目の置き方の組 (`PLACEMENTS`) | 持つ | データセットの版 2 と 3 に含む | ML-Inference (一式の項目の置き方の確かめ). 下の「公開の名前」 |
 
 ### 公開の名前
@@ -40,6 +42,8 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 - `DATASET_FORMAT_VERSION`: `load_dataset` が読む列の正解のデータセットの版 (`int`. 今は 1)
 - `ITEMS_FORMAT_VERSIONS`: `load_items` が読むファイルの組のデータセットの版の組 (`tuple[int, ...]`. 今は `(2, 3)`)
 - `PLACEMENTS`: `load_items` が読める項目の置き方 (`dataset.yaml` の `entries.<名前>.placement`) の名前の組 (`tuple[str, ...]`. 今は `("file", "directory", "column")`. 意味は「書き出しの版 2」の `placement`). これに無い置き方の項目を持つデータセットは `load_items` が誤りで止まる
+- `TRAJECTORY_FORMAT_VERSION`: `load_trajectory` が知る軌跡の説明の版 (`int`. 今は 1)
+- `load_trajectory(path)`, `describe_trajectory(trajectory)`, `Trajectory`: 記録した軌跡を読み, 要約する. 形は下の「記録した軌跡」
 - `read_image(path)`: ファイル 1 つの画像を numpy の配列にする低い層. 形は (高さ, 幅) か (高さ, 幅, チャンネル), 型は `uint8`, 書き込める写し. EXIF の向きを直し, パレットなどは RGB (透明があれば RGBA), 16 ビットと浮動小数は 0 から 255 に縮めた 1 チャンネル, 2 値は 0 と 255 にそろえる. 版 2 の書き出しと `load_item` の画像と同じ読み方
 
 ## 3. 用語
@@ -52,6 +56,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 気付き (finding) | 分析で見つけた, 学習の前に確かめた方がよいこと (欠損の多い列, ほぼ定数の列, リークの疑い, クラスの偏りなど). 重要度 (`warning`, `info`) と理由を持つ |
 | レシピ (recipe) | 前処理の手順の並び. YAML に書き, 版を付ける |
 | データセット (dataset) | 前処理をして分割したデータを, 学習用に書き出したディレクトリ |
+| 軌跡 (trajectory) | 強化学習で, 方策を環境で走らせた記録. 1 歩が 1 行の表 (エピソードの番号, 歩数, 観測, 行動, 報酬, 終わったか). 下の「記録した軌跡」 |
 | 項目 (entry) | 版 2 のデータセットの 1 件を作る, 名前を付けた入力か正解 (画像, 領域, 撮影, 点群など). 「書き出しの版 2」 |
 
 ## 4. データの形
@@ -148,6 +153,57 @@ AR の端末などで物体の周りを撮った 1 回の撮影を 1 件とす�
     - 端に張り付いた標本の割合だけで見る. 音量を下げた後の割れ (端より低い所で平らな波形) と, 標本の 1 % に満たない短い割れは見ない
 - 気付き: 読めないファイル (`unreadable_items`. soundfile が無くて読めない件は除く), soundfile が無くて読めない形式がある (`missing_reader`. info), 標本化の周波数かチャンネル数がそろわない (`mixed_sizes`), 長さが 2 倍以上ばらつくか, 長さ 0 の音声と長さのある音声が混ざる (`mixed_lengths`. info), ほぼ無音 (`silent_items`), 音が割れている (`clipped_items`. info), ファイルが上限を超えた (`too_many_files`)
 - 前処理と書き出し: 画像, 文, 点群と同じく, 表の手順で件を絞ってから中身の手順 (`item_steps`. 下の「前処理のレシピ」の音声の手順) で 1 件ずつ (チャンネル, 標本の数) の float32 の配列にし, `export_dataset` が版 1 で書く (`kind: audio`, `train_items.npy` は (件数, チャンネル, 標本の数)). 全ての件の形をそろえるには, 標本化の周波数 (`resample`), チャンネル (`mix_channels`), 長さ (`fix_length`) の 3 つをそろえる. 読めない件は表の手順 `filter_rows` (`error` が `isna`) で除く. `prepare(read_items=False)` は読み込みの表から, そろえる手順の無いまま周波数, チャンネル数, 長さがそろわないことを注意 (`notes`) にする (`resample` があれば長さは秒で比べる). 推論のときは `transform_item` に音声のファイルの場所か `read_audio` の辞書を渡すと, 学習のときと同じ (チャンネル, 標本の数) の配列を返す
+
+### 記録した軌跡 (`load_trajectory`)
+
+強化学習の方策を走らせた軌跡を, 1 歩が 1 行の表で読み, エピソードの数, 長さ, 報酬の和, 観測と行動の値, 守りの結果を要約する (画面で方策のふるまいを分析するため). ML-Found が評価のときに書く軌跡と, 利用者の手元の表を同じ口で読む. 読み込みの登録簿には入れない (`load_data` は軌跡の CSV を普通の表として読む).
+
+- `load_trajectory(path)`: `path` は表 (`<名前>.csv` か `<名前>.parquet`) か, 説明 (`<名前>.json`. その `file` の表を読む. `file` は同じディレクトリの `.csv` か `.parquet` の名前だけ). 表を渡した場合は, 隣に `<名前>.json` があれば説明として読む. 無ければ説明の無い表として読む (利用者の表)
+- 表の列 (ML-Found の `docs/FORMAT.md` の「trajectories」と同じ名前と意味)
+
+| 列 | 型 | 要るか | 中身 |
+| --- | --- | --- | --- |
+| `episode` | 整数 (空は誤り) | 要る | エピソードの番号 |
+| `step` | 整数 (空は誤り) | 要る | エピソードの中の歩の番号 |
+| `obs` か `obs_<番号>` | 整数か数 | 要る | 行動を選ぶ前の観測. 1 つの値は `obs`, 並びは平らにした要素ごとに `obs_0`, `obs_1`, ... |
+| `action` か `action_<番号>` | 整数か数 | 要る | 環境に渡した行動. 守りで止めた判断の行は空 |
+| `reward` | 数 | 要る | 行動の後の報酬. 守りで止めた判断の行は空 |
+| `terminated`, `truncated` | 真偽値 (空は誤り) | 要る | 終了の歩か, 打ち切りの歩か |
+| `seed` | 整数 | 任意 | エピソードを始めた乱数の種 |
+| `guard`, `guard_reasons` | 文字 | 任意 | 守りの結果 (`ok`, `clipped`, `fallback`, `stop`, `handover`) と, 働いた理由 (`; ` でつなぐ. 働かなければ空) |
+
+- **観測と行動の列は名前で見分ける**: `obs` か `obs_<番号>` (番号は 0 か, 0 で始まらない 10 進), `action` か `action_<番号>`. 番号の列は番号の順に並べる (表の列の並びに依らない). 同じ表に `obs` と `obs_<番号>` が並ぶ場合と, どちらも無い場合は誤り. 番号が 0 から続かない場合は気付きに書く. 説明の `observation_columns` と `action_columns` は使わず, 名前で見分けたものと違えば気付きに書く
+- **守りの列**: `guard` の列がある表を守りのある表とする (`guarded`). 説明の `guarded` と違えば気付きに書く. `guard` が `stop` か `handover` の行は, 行動と報酬が空で, 環境を進めていない
+- **知らない列は残す**: 上の他の列 (後で足される, 行動を選んだ確率の列など) も表に残し, 型を決めて読む. 要約では `extra_columns` に並べる
+- **型の決め方**: 説明の `types` (`integer`, `number`, `boolean`, `string`. 他の値は使わず気付きに書く), 上の列の名前で決まった型, 値から決めた型の順. 値から決める場合は, 全ての空でない値が読める型を, 真偽値, 整数, 数, 文字の順に選ぶ (値の無い列は数). 観測, 行動, 報酬が整数か数でない場合と, 値が型の書き方でない場合は, 列の名前と値を挙げて誤り
+- **CSV の値**: UTF-8 (先頭の BOM は除く) で, 1 行目が見出し. 空の値だけが欠け. `nan`, `inf`, `-inf` は数の値で, 欠けにしない. 真偽値は `true` か `false` (大文字と小文字は区別しない). 見出しの列の名前が重なる表と, 値の数が見出しと違う行のある表は誤り
+- **Parquet**: 同じ列の名前で, 真偽値, 整数, 浮動小数の型の列を読む (整数の列は数としても読む). 文字の型の列は CSV と同じ読み方. null が欠けで, nan は値 (pandas を通さず pyarrow で読み, 欠けと nan を分ける). pyarrow が要る (任意の依存 `[parquet]`. 無ければ導入の仕方を添えた `ImportError`)
+- **表の型**: 欠けの無い列は numpy の型 (`int64`, `float64`, `bool`) か文字の `object`. 欠けのある列は pandas の欠けを持てる型 (`Int64`, `Float64`, `boolean`) か `None` を持つ `object`. `Float64` は nan を欠けと別の値として残す. numpy の `float64` の列には欠けが無いので, その nan は値 (pandas の `isna` は nan も真にするので, 欠けは列の型で見分けるか, 要約の `missing` を使う). `guard_reasons` の空は空の文字
+- **行の順**: エピソード, 歩の順でない表は, 同じ番号の行の順を保って並べ直し, 気付きに書く. 同じエピソードの同じ歩の行が重なる場合も気付きに書く
+- **説明**: 版 (`format_version`) が 1 以上の整数でない説明, JSON の辞書でない説明, リンク, 普通でないファイル, 1 MiB を超える説明は, 理由を気付きに書いて使わない (説明の無い表として読む). 説明を `path` に渡した場合は, 同じものを誤りにする. 知っている版 (`TRAJECTORY_FORMAT_VERSION`) より新しい説明は, 読める項目だけを使い, 新しい版の ML-Found の出力であることを気付きに書く. 説明の `columns`, `rows`, `episodes` が表と違えば, 表の方を使い気付きに書く
+- **読むファイル**: 表も説明も普通のファイルだけ. シンボリックリンクは辿らずに誤り (説明は使わない), FIFO などは待たずに誤り. 表は 64 MiB, 説明は 1 MiB まで (超えるものは読まない. 大きさは開いたファイルで確かめる)
+- `Trajectory` の欄: `name` (表のファイルの名前から拡張子を除いたもの), `format` (`csv` か `parquet`), `frame` (型の値の表), `types` (列ごとの型), `observation_columns`, `action_columns` (要素の順), `guarded`, `info` (説明の辞書か None), `notes` (気付きの日本語の文の並び)
+
+`describe_trajectory(trajectory)` は JSON にできる辞書を返す (nan と無限大は None). 鍵は次のとおり.
+
+| 鍵 | 中身 |
+| --- | --- |
+| `name`, `format`, `described` | 軌跡の名前, 表の形式, 説明を使ったか |
+| `format_version`, `source`, `env`, `epoch`, `description`, `complete`, `dropped_episodes`, `observation_space`, `action_space` | 説明の同じ名前の項目 (説明が無いか項目が無ければ None) |
+| `rows`, `episodes`, `steps` | 行の数, エピソードの数, 環境を進めた歩数 (報酬のある行の数) |
+| `columns` | 列ごとの `{"name", "type"}` の並び (表の列の順) |
+| `observation_columns`, `action_columns`, `extra_columns` | 観測と行動の列 (要素の順) と, 上の表に無い列 |
+| `guarded` | 守りの列があるか |
+| `length`, `return` | エピソードごとの歩数と報酬の和の `min`, `max`, `mean`, `std` (標本の標準偏差. 1 つなら 0), `median`. 報酬の和は, 和が有限のエピソードだけで求める |
+| `unknown_returns` | 報酬に nan か無限大を含み, 和が有限でないエピソードの数 |
+| `ends` | 終わり方ごとのエピソードの数 (`terminated`, `truncated`, `stop`, `handover`, `open`) |
+| `observations`, `actions` | 列ごとの `name`, `type`, `missing` (空の数), `nan`, `infinite`, 有限の値の `min`, `max`, `mean`, `std`, `median`, `counts` (整数の列で, 異なる値が 50 以下なら `{"value", "count"}` の並び. 他は None) |
+| `guard` | 守りの列のある表で, `results` (結果ごとの行の数. 知らない結果もそのまま数え, 空は `missing`) と `reasons` (理由ごとの `{"reason", "count"}` の並び. 多い順). 守りの列が無ければ None |
+| `per_episode` | エピソードごとの `episode`, `rows` (行の数), `length` (報酬のある行の数), `return` (報酬の和. 空を除き, 有限でなければ None), `end`, `seed` (最初の行の種か None) の並び (エピソードの順) |
+| `notes` | `Trajectory` の `notes` |
+
+- エピソードの歩数と報酬の和は, 報酬のある行で求める (守りで止めた判断の行は環境を進めていない). ML-Found の評価の行 (`length`, `reward`) と同じ値になる
+- 終わり方は最後の行で決める. `guard` が `stop` か `handover` ならそれ, 次に `terminated` が真なら `terminated` (`truncated` も真の場合を含む), `truncated` が真なら `truncated`, どれでもなければ `open` (利用者の表の, 終わりの印の無いエピソード)
 
 ## 6. 分析
 
@@ -506,6 +562,7 @@ split:
 ## 10. 安全
 
 - 読み込みは手元のファイルだけ. ネットワークは使わない
+- 記録した軌跡 (`load_trajectory`) は, 表と説明の普通のファイルだけを読む. シンボリックリンクは辿らず, FIFO などは待たずに誤りにし, 表は 64 MiB, 説明は 1 MiB を超えるものを読まない (5 章の「記録した軌跡」)
 - 読み込んだディレクトリの外を指すシンボリックリンクは, 画像, 文, 点群, 撮影, 音声のディレクトリの読み込みとその `load_item`, `load_items`, `read_capture`, 版 2 の書き出し (`export_image_masks`, `export_capture_clouds`), `normalize_capture`, `capture_shift` では既定で読まない (4 章の「外を指すリンク」. 読み込みの設定 `follow_links` か, 関数の引数 `follow_links=True` でたどる)
 - `pickle` を使う形式 (`.pkl`, `allow_pickle` の `.npy`) は読まない (任意のコードを動かせるため)
 - 書き出したデータセットの読み込み (`load_dataset`, `model_inputs` の版 1, `load_items`) は, 説明と表に書かれた場所をデータセットのディレクトリの中に限る (8 章と 9 章. 絶対パスと `..` は誤り. 外を指すリンクは `follow_links` でたどる)

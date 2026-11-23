@@ -1,0 +1,3 @@
+episode,step,obs_0,action_0,reward,terminated,truncated,seed
+0,0,1.0,1.0,-0.25,false,false,0
+0,1,1.0,1.0,-0.25,true,false,0

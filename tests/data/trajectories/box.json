@@ -1,0 +1,65 @@
+{
+  "format_version": 1,
+  "name": "box",
+  "file": "box.csv",
+  "source": "evaluation_loader",
+  "env": null,
+  "epoch": null,
+  "description": null,
+  "columns": [
+    "episode",
+    "step",
+    "obs_0",
+    "action_0",
+    "reward",
+    "terminated",
+    "truncated",
+    "seed"
+  ],
+  "types": {
+    "episode": "integer",
+    "step": "integer",
+    "obs_0": "number",
+    "action_0": "number",
+    "reward": "number",
+    "terminated": "boolean",
+    "truncated": "boolean",
+    "seed": "integer"
+  },
+  "observation_columns": [
+    "obs_0"
+  ],
+  "action_columns": [
+    "action_0"
+  ],
+  "observation_space": {
+    "type": "box",
+    "shape": [
+      1
+    ],
+    "low": [
+      -10.0
+    ],
+    "high": [
+      10.0
+    ]
+  },
+  "action_space": {
+    "type": "box",
+    "shape": [
+      1
+    ],
+    "low": [
+      -1.0
+    ],
+    "high": [
+      1.0
+    ]
+  },
+  "guarded": false,
+  "episodes": 1,
+  "rows": 2,
+  "complete": true,
+  "dropped_episodes": 0,
+  "created_at": "2026-11-23T18:11:37+09:00"
+}
