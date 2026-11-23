@@ -1,0 +1,9 @@
+episode,step,obs_0,action,reward,terminated,truncated,seed,guard,guard_reasons,action_prob
+0,0,0.0,1,1.0,false,false,7,ok,,0.7
+0,1,1.0,0,0.0,false,false,7,ok,,0.3
+0,2,2.0,1,1.0,false,false,7,ok,,0.7
+0,3,3.0,,,false,false,7,stop,観測の要素 0 が範囲の外 (3),
+1,0,0.0,1,1.0,false,false,8,ok,,0.7
+1,1,1.0,1,1.0,false,false,8,ok,,0.7
+1,2,2.0,0,0.0,false,false,8,ok,,0.3
+1,3,3.0,,,false,false,8,stop,観測の要素 0 が範囲の外 (3),
