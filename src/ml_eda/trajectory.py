@@ -50,6 +50,19 @@ REASON_SEPARATOR = "; "
 # 行動の値ごとの数を返す, 異なる値の数の上限
 MAX_ACTION_VALUES = 50
 
+# Parquet の行の数の上限 (64 MiB の CSV の最も短い行と同じ程度)
+MAX_PARQUET_ROWS = 4_000_000
+
+# 要約に並べるエピソードの数の上限
+MAX_EPISODE_ROWS = 1000
+
+# 気付きに書く値の文字の長さの上限
+MAX_NOTE_VALUE = 80
+
+# int64 の範囲
+INT64_MIN = -(1 << 63)
+INT64_MAX = (1 << 63) - 1
+
 # 文字の値の書き方
 INTEGER_TEXT = re.compile(r"[+-]?\d+")
 BOOLEAN_TEXT = {"true": True, "false": False}
@@ -281,7 +294,7 @@ def text_values(
         found = lower.map(BOOLEAN_TEXT)
     elif kind == "integer":
         bad = ~filled.str.strip().str.fullmatch(INTEGER_TEXT.pattern)
-        found = pd.to_numeric(filled.where(~bad, "0"))
+        found = filled.where(~bad, "0").map(int)
     elif kind == "number":
         found = pd.to_numeric(filled, errors="coerce")
         bad = found.isna() & ~lower.str.lstrip("+-").eq("nan")
@@ -368,8 +381,14 @@ def arrow_values(
         values, missing, kind = text_values(text, kind, name)
         return values, missing, kind
 
-    # 型の合う列だけ. 整数は数としても読む
+    # 全て null の列は, 欠けだけの列として決まった型で
     missing = array.is_null().to_numpy(zero_copy_only=False)
+    if pa.types.is_null(arrow_type):
+        values = np.full(len(array), None, dtype=object)
+        return values, missing, kind or "number"
+
+    # 型の合う列だけ. 整数は数としても読み, 値が全て整数の浮動小数は
+    # 整数としても読む (pandas が欠けのある整数を浮動小数で書くため)
     found = (
         "boolean" if pa.types.is_boolean(arrow_type)
         else "integer" if pa.types.is_integer(arrow_type)
@@ -381,11 +400,18 @@ def arrow_values(
         "number": ("integer", "number"),
         "string": ("boolean", "integer", "number", "string"),
     }[kind]
+    values = np.array(array.to_pylist(), dtype=object)
+    present = values[~missing]
+    if kind == "integer" and found == "number" and all(
+        math.isfinite(value) and float(value).is_integer()
+        for value in present
+    ):
+        found = "integer"
+        values[~missing] = [int(value) for value in present]
     if found not in allowed:
         raise ValueError(
             f"列 {name} の Parquet の型 {arrow_type} は {kind} ではありません"
         )
-    values = np.array(array.to_pylist(), dtype=object)
     if kind == "string":
         values = np.array(
             [None if value is None else str(value) for value in values],
@@ -396,7 +422,7 @@ def arrow_values(
 
 
 def typed_series(
-    values: np.ndarray, missing: np.ndarray, kind: str
+    values: np.ndarray, missing: np.ndarray, kind: str, name: str
 ) -> pd.Series:
     """
     値と欠けの印から, 型の列を作る関数
@@ -409,12 +435,19 @@ def typed_series(
         欠けの印
     kind: str
         列の型
+    name: str
+        列の名前 (誤りに書く)
 
     Returns
     ----------
     series: pd.Series
         欠けの無い列は int64, float64, bool, 文字の object. 欠けのある列は
         Int64, Float64 (nan は欠けと別に残す), boolean, None を持つ object
+
+    Raises
+    ----------
+    ValueError
+        整数が int64 に入らない場合
     """
     # 欠けの無い列は numpy の型
     if kind == "string":
@@ -424,6 +457,15 @@ def typed_series(
     dtype = {"integer": "int64", "number": "float64", "boolean": "bool"}[kind]
     filled = values.copy()
     filled[missing] = 0
+    if kind == "integer":
+        large = [
+            value for value in filled
+            if not INT64_MIN <= int(value) <= INT64_MAX
+        ]
+        if large:
+            raise ValueError(
+                f"列 {name} の値 {large[0]} は int64 に入りません"
+            )
     data = filled.astype(dtype)
     if not missing.any():
         return pd.Series(data)
@@ -488,7 +530,7 @@ def element_columns(columns: list, prefix: str, notes: list) -> list:
 
 
 def read_columns(
-    raw: bytes, table_format: str, declared: dict
+    raw: bytes, table_format: str, declared: dict, notes: list
 ) -> tuple[pd.DataFrame, dict]:
     """
     表を読み, 列ごとに型の値にする関数
@@ -501,6 +543,8 @@ def read_columns(
         csv か parquet
     declared: dict
         説明の列ごとの型 (説明が無ければ空)
+    notes: list
+        説明の型で読めなかった列を足す並び
 
     Returns
     ----------
@@ -523,19 +567,29 @@ def read_columns(
     if len(set(columns)) != len(columns):
         raise ValueError(f"表の列の名前が重なっています: {columns}")
 
-    # 説明の型, 名前で決まった型, 値から決めた型の順. 守りの理由の空は
-    # 働かなかったことなので空の文字
+    # 説明の型, 名前で決まった型, 値から決めた型の順. 説明の型で読め
+    # なければ, 表を使う決まりに合わせて決め直す
     data = {}
     types = {}
     for name in columns:
-        kind = declared.get(name, KNOWN_TYPES.get(name))
-        if table_format == "csv":
-            values, missing, kind = text_values(text[name], kind, name)
-        else:
-            values, missing, kind = arrow_values(
-                arrow.column(name), kind, name
+        column = text[name] if table_format == "csv" else arrow.column(name)
+        read = text_values if table_format == "csv" else arrow_values
+        fallback = KNOWN_TYPES.get(name)
+        kind = declared.get(name, fallback)
+        try:
+            values, missing, kind = read(column, kind, name)
+            series = typed_series(values, missing, kind, name)
+        except ValueError as error:
+            if name not in declared or declared[name] == fallback:
+                raise
+            notes.append(
+                f"説明の型 {declared[name]} で列 {name} を読めないので, "
+                f"型を決め直します: {error}"
             )
-        series = typed_series(values, missing, kind)
+            values, missing, kind = read(column, fallback, name)
+            series = typed_series(values, missing, kind, name)
+
+        # 守りの理由の空は, 働かなかったことなので空の文字
         if name == "guard_reasons" and kind == "string":
             series = series.fillna("")
         data[name] = series
@@ -629,6 +683,12 @@ def parquet_table(raw: bytes) -> Any:
             "parquet を読むには pyarrow が要ります (pip install pyarrow)"
         ) from error
     try:
+        rows = pq.ParquetFile(pa.BufferReader(raw)).metadata.num_rows
+        if rows > MAX_PARQUET_ROWS:
+            raise ValueError(
+                f"Parquet の表の行の数 ({rows}) が上限 "
+                f"({MAX_PARQUET_ROWS}) を超えるので読みません"
+            )
         table = pq.read_table(pa.BufferReader(raw))
     except (pa.ArrowException, OSError) as error:
         raise ValueError(f"表を Parquet として読めません ({error})") from error
@@ -796,9 +856,31 @@ def compare_info(
     for key, actual in checks:
         if key in info and info[key] != actual:
             notes.append(
-                f"説明の {key} ({info[key]!r}) が表 ({actual!r}) と違います. "
-                "表の方を使います"
+                f"説明の {key} ({short_text(info[key])}) が表 "
+                f"({short_text(actual)}) と違います. 表の方を使います"
             )
+
+
+def short_text(value: Any) -> str:
+    """
+    気付きに書く値を, 長さの上限までの文字にする関数
+
+    Parameters
+    ----------
+    value: Any
+        値
+
+    Returns
+    ----------
+    text: str
+        repr の文字. 長ければ切って ... を付ける
+    """
+    # 上限を超える分を切る
+    text = repr(value)
+    if len(text) > MAX_NOTE_VALUE:
+        text = text[:MAX_NOTE_VALUE - 3] + "..."
+
+    return text
 
 
 def load_trajectory(path: Union[str, Path]) -> Trajectory:
@@ -834,6 +916,12 @@ def load_trajectory(path: Union[str, Path]) -> Trajectory:
         path = table_of_info(info, path)
     elif path.suffix.lower() in TABLE_FORMATS:
         info = optional_info(path.with_suffix(".json"), notes)
+        if info is not None and info.get("file", path.name) != path.name:
+            notes.append(
+                f"隣の説明の file ({short_text(info.get('file'))}) が表の"
+                f"名前 ({path.name}) と違うので, 説明を使いません"
+            )
+            info = None
     else:
         raise ValueError(
             f"軌跡の表は .csv か .parquet のファイルにしてください: {path}"
@@ -842,7 +930,9 @@ def load_trajectory(path: Union[str, Path]) -> Trajectory:
 
     # 表を型の値で読み, 観測と行動の列を名前で見分ける
     raw = read_regular(path, MAX_TABLE_BYTES, "表")
-    frame, types = read_columns(raw, table_format, declared_types(info, notes))
+    frame, types = read_columns(
+        raw, table_format, declared_types(info, notes), notes
+    )
     observation = element_columns(
         list(frame.columns), OBSERVATION_PREFIX, notes
     )
@@ -1118,9 +1208,17 @@ def describe_trajectory(trajectory: Trajectory) -> dict:
             for name in trajectory.action_columns
         ],
         "guard": describe_guard(frame) if trajectory.guarded else None,
-        "per_episode": episodes,
+        "per_episode": episodes[:MAX_EPISODE_ROWS],
+        "per_episode_truncated": len(episodes) > MAX_EPISODE_ROWS,
         "notes": list(trajectory.notes),
     }
+
+    # エピソードごとの並びは先頭の上限まで (要約の値は全てのエピソードで)
+    if summary["per_episode_truncated"]:
+        summary["notes"].append(
+            f"エピソードが {len(episodes)} 件あるので, per_episode には先頭"
+            f"の {MAX_EPISODE_ROWS} 件だけを並べます"
+        )
     summary = to_json(summary)
 
     return summary
