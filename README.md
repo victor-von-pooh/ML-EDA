@@ -210,7 +210,7 @@ summary = describe_trajectory(trajectory)   # JSON にできる辞書
 summary["return"]                     # エピソードごとの報酬の和の min, max, mean など
 summary["per_episode"]                # エピソードごとの長さ, 報酬の和, 終わり方
 summary["guard"]                      # 守りの結果と理由の数 (守りの列のある表だけ)
-summary["action_prob"]                # 行動を選んだ確率の欠けと範囲の外の数 (確率の列のある表だけ)
+summary["action_prob"]                # 行動を選んだ確率の欠けと範囲の外の数, 範囲の中の値の min, max, mean など (確率の列のある表だけ)
 ```
 
 隣に説明 (`valid_best.json`) があれば型と環境の名前などを使い, 無ければ列の名前 (`obs`, `obs_<番号>`, `action`, `action_<番号>`) と値から読む. 手元の Parquet (`trajectory.parquet`) も同じ口で読む (pyarrow が要る). 列の決まりは [docs/DESIGN.md](docs/DESIGN.md) の「記録した軌跡」.

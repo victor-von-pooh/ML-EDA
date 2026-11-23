@@ -196,7 +196,7 @@ def test_action_prob_checks(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 0, 1 を超える値, 負の値, nan は範囲の外. 1 は範囲の中
+    # 0, 1 を超える値, 負の値, nan, inf は範囲の外. 1 は範囲の中
     path = write_table(tmp_path / "t.csv", [
         HEADER + ",action_prob",
         "0,0,0.0,1,1.0,false,false,1",
@@ -204,11 +204,12 @@ def test_action_prob_checks(tmp_path: Path) -> None:
         "0,2,2.0,1,1.0,false,false,1.5",
         "0,3,3.0,1,1.0,false,false,-0.2",
         "0,4,4.0,1,1.0,false,false,nan",
-        "0,5,5.0,1,1.0,true,false,",
+        "0,5,5.0,1,1.0,false,false,inf",
+        "0,6,6.0,1,1.0,true,false,",
     ])
     summary = describe_trajectory(load_trajectory(path))
     prob = summary["action_prob"]
-    assert (prob["missing"], prob["out_of_range"]) == (1, 4)
+    assert (prob["missing"], prob["out_of_range"]) == (1, 5)
     assert prob["max"] == prob["min"] == 1.0
     assert any("action_prob" in note for note in summary["notes"])
 
