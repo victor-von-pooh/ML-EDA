@@ -1,6 +1,10 @@
+import ast
+import inspect
 import json
 import sys
+import textwrap
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -10,7 +14,9 @@ from ml_eda import (
     describe_loaders, describe_steps, detect, export_dataset, load_data,
     load_dataset, load_recipe, prepare, preview, profile
 )
-from ml_eda.loaders import table_kind, to_datetime, to_numbers
+from ml_eda.loaders import (
+    LOADERS, finish_table, option_flag, table_kind, to_datetime, to_numbers
+)
 from ml_eda.pipeline import assign_splits
 from ml_eda.recipe import apply_lag
 
@@ -1068,3 +1074,167 @@ def test_public_read_image(tmp_path: Path) -> None:
     image = read_image(tmp_path / "rgb.png")
     assert image.shape == (3, 4, 3) and image.dtype == np.uint8
     assert image.flags.writeable and image[0, 0].tolist() == [10, 20, 30]
+
+
+def read_option_names(function: object, seen: set) -> set:
+    """
+    関数が読み込みの設定 (options) から読む名前を集める関数
+
+    Parameters
+    ----------
+    function: object
+        調べる関数 (options を渡す先の ml_eda の関数もたどる)
+    seen: set
+        調べ終えた関数 (同じ関数を二度調べない)
+
+    Returns
+    ----------
+    names: set
+        options.get, options[...], option_flag で読む設定の名前
+
+    Raises
+    ----------
+    AssertionError
+        options を, 引数 options を持つ ml_eda の関数と option_flag の
+        他に渡す場合 (読む名前を見逃さないため)
+    """
+    # 調べ終えた関数は飛ばす
+    names = set()
+    if function in seen:
+        return names
+    seen.add(function)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    for node in ast.walk(tree):
+        # options["名前"]
+        if isinstance(node, ast.Subscript) and isinstance(
+            node.value, ast.Name
+        ) and node.value.id == "options":
+            if isinstance(node.slice, ast.Constant):
+                names.add(node.slice.value)
+        if not isinstance(node, ast.Call):
+            continue
+
+        # options.get("名前")
+        call = node.func
+        if isinstance(call, ast.Attribute) and isinstance(
+            call.value, ast.Name
+        ) and call.value.id == "options" and call.attr == "get":
+            names.add(node.args[0].value)
+            continue
+
+        # options を渡す先の関数 (位置, options=options, **options.
+        # option_flag は 2 つ目の引数が名前)
+        given = [
+            index for index, arg in enumerate(node.args)
+            if isinstance(arg, ast.Name) and arg.id == "options"
+        ]
+        keyword = any(
+            isinstance(item.value, ast.Name) and item.value.id == "options"
+            for item in node.keywords
+        )
+        if not given and not keyword:
+            continue
+        callee = function.__globals__.get(call.id) if isinstance(
+            call, ast.Name
+        ) else None
+        if callee is option_flag and given:
+            names.add(node.args[given[0] + 1].value)
+        elif inspect.isfunction(callee) and (
+            callee.__module__.startswith("ml_eda")
+        ) and "options" in inspect.signature(callee).parameters:
+            names |= read_option_names(callee, seen)
+        else:
+            # 辿れない先に渡すと, 読む名前を見逃すので誤り
+            raise AssertionError(
+                f"{function.__name__} が options を辿れない先に渡して"
+                f"います: {ast.unparse(node)}"
+            )
+
+    return names
+
+
+def test_loader_options_listed() -> None:
+    """
+    読み込みの種類の設定の一覧が, 読み込みが実際に読む設定の名前と
+    食い違わないことを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 一覧の設定と, 読み込みの関数が読む名前が同じ
+    listed = {item["name"]: item["options"] for item in describe_loaders()}
+    for name, loader in LOADERS.items():
+        read = read_option_names(loader.load, set())
+        assert read == set(listed[name]), name
+        assert set(loader.sniff_options) <= read, name
+
+    # 表の読み込みは文の列を受け取る
+    for name in ("csv", "json", "parquet", "excel"):
+        assert "text_column" in listed[name]
+    assert "encoding" in listed["json"]
+
+
+def keyword_reader(path: Path, **options: Any) -> None:
+    """
+    設定を名前付きの引数で表の仕上げに渡す, 確かめ用の読み込みの関数
+
+    Parameters
+    ----------
+    path: Path
+        使わない
+    **options: Any
+        読み込みの設定
+
+    Returns
+    ----------
+    None
+    """
+    # 名前付きの引数で渡す
+    finish_table(pd.DataFrame(), options=options)
+
+
+def unknown_reader(path: Path, **options: Any) -> None:
+    """
+    設定を辿れない先に渡す, 確かめ用の読み込みの関数
+
+    Parameters
+    ----------
+    path: Path
+        使わない
+    **options: Any
+        読み込みの設定
+
+    Returns
+    ----------
+    None
+    """
+    # ml_eda の外の関数に広げて渡す
+    keyword_reader(path, **options)
+
+
+def test_option_names_follow_keywords() -> None:
+    """
+    設定の名前を集める関数が, 名前付きの引数で渡す先も辿り, 辿れない先
+    に渡すと誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # options=options で渡す先の表の仕上げが読む名前
+    assert read_option_names(keyword_reader, set()) == {
+        "text_column", "time_column", "kind"
+    }
+
+    # **options で ml_eda の外の関数に渡すと誤り
+    with pytest.raises(AssertionError, match="辿れない"):
+        read_option_names(unknown_reader, set())
