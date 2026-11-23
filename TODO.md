@@ -13,11 +13,7 @@
 
 ## 優先度 低
 
-### 軌跡の行動を選んだ確率の列を読む
-- 何を: `KNOWN_TYPES` に `action_prob` を足し, 軌跡の説明の `with_action_prob` を読み, 軌跡の要約で行動を選んだ確率の列があるかを出す
-- なぜ: ML-Found が行動を選んだ確率の列 (`action_prob`) を軌跡に書き出すようになり, ML-Fathom が方策の見積もりの前提として列の有無を出すため
-- 終わりの条件: `action_prob` の列が既知の型で読まれ, 説明の `with_action_prob` と要約に確率の列があるかが出る
-- つながり: ML-Fathom の「軌跡の画面に方策の見積もりを出す」, ML-Found の `estimate_policy_value`
+無し
 
 ## 条件待ち
 

@@ -32,8 +32,11 @@ ACTION_PREFIX = "action"
 KNOWN_TYPES = {
     "episode": "integer", "step": "integer", "reward": "number",
     "terminated": "boolean", "truncated": "boolean", "seed": "integer",
-    "guard": "string", "guard_reasons": "string",
+    "guard": "string", "guard_reasons": "string", "action_prob": "number",
 }
+
+# 行動を選んだ確率の列
+PROB_COLUMN = "action_prob"
 
 # 観測と行動の他に要る列
 REQUIRED_COLUMNS = ("episode", "step", "reward", "terminated", "truncated")
@@ -88,6 +91,8 @@ class Trajectory:
     info: Optional[dict] = None
     # 読むときに気付いたこと (日本語の文)
     notes: list = field(default_factory=list)
+    # 行動を選んだ確率の列 (action_prob) があるか
+    with_action_prob: bool = False
 
 
 def read_regular(path: Path, limit: int, what: str) -> bytes:
@@ -757,7 +762,7 @@ def check_columns(
     if lacking:
         raise ValueError(f"軌跡の表に要る列がありません: {lacking}")
 
-    # 番号と終わりの印は欠けの無い整数と真偽値, 観測, 行動, 報酬は数
+    # 番号と終わりの印は欠けの無い整数と真偽値, 観測, 行動, 報酬, 確率は数
     expected = {
         "episode": ("integer",), "step": ("integer",),
         "terminated": ("boolean",), "truncated": ("boolean",),
@@ -766,6 +771,8 @@ def check_columns(
     expected.update(
         {name: ("integer", "number") for name in observation + action}
     )
+    if PROB_COLUMN in frame:
+        expected[PROB_COLUMN] = ("integer", "number")
     for name, kinds in expected.items():
         if types[name] not in kinds:
             raise ValueError(
@@ -813,7 +820,7 @@ def order_rows(frame: pd.DataFrame, notes: list) -> pd.DataFrame:
 
 def compare_info(
     info: dict, frame: pd.DataFrame, observation: list, action: list,
-    guarded: bool, notes: list
+    guarded: bool, with_action_prob: bool, notes: list
 ) -> None:
     """
     説明と表の食い違いを気付きにする関数
@@ -830,6 +837,8 @@ def compare_info(
         名前で見分けた行動の列
     guarded: bool
         表に守りの結果の列があるか
+    with_action_prob: bool
+        表に行動を選んだ確率の列があるか
     notes: list
         食い違いを足す並び
 
@@ -851,7 +860,8 @@ def compare_info(
     checks = (
         ("columns", list(frame.columns)), ("observation_columns", observation),
         ("action_columns", action), ("guarded", guarded),
-        ("rows", len(frame)), ("episodes", episodes),
+        ("with_action_prob", with_action_prob), ("rows", len(frame)),
+        ("episodes", episodes),
     )
     for key, actual in checks:
         if key in info and info[key] != actual:
@@ -896,7 +906,7 @@ def load_trajectory(path: Union[str, Path]) -> Trajectory:
     Returns
     ----------
     trajectory: Trajectory
-        型の値の表, 観測と行動の列, 守りの列があるか, 説明, 気付き
+        型の値の表, 観測と行動の列, 守りと確率の列があるか, 説明, 気付き
 
     Raises
     ----------
@@ -940,14 +950,19 @@ def load_trajectory(path: Union[str, Path]) -> Trajectory:
     check_columns(frame, types, observation, action)
     frame = order_rows(frame, notes)
 
-    # 守りの列は表にあるかで決め, 説明と違えば知らせる
+    # 守りと確率の列は表にあるかで決め, 説明と違えば知らせる
     guarded = "guard" in frame.columns
+    with_action_prob = PROB_COLUMN in frame.columns
     if info is not None:
-        compare_info(info, frame, observation, action, guarded, notes)
+        compare_info(
+            info, frame, observation, action, guarded, with_action_prob,
+            notes
+        )
     trajectory = Trajectory(
         name=path.stem, format=table_format, frame=frame, types=types,
         observation_columns=observation, action_columns=action,
-        guarded=guarded, info=info, notes=notes
+        guarded=guarded, info=info, notes=notes,
+        with_action_prob=with_action_prob
     )
 
     return trajectory
@@ -1140,9 +1155,38 @@ def describe_guard(frame: pd.DataFrame) -> dict:
     return guard
 
 
+def describe_action_prob(series: pd.Series) -> dict:
+    """
+    行動を選んだ確率の列の欠けと範囲をまとめる関数
+
+    Parameters
+    ----------
+    series: pd.Series
+        確率の列
+
+    Returns
+    ----------
+    prob: dict
+        missing (空の数), out_of_range (0 より大きく 1 以下でない値の数.
+        nan と無限大も含む), 範囲の中の値の min, max, mean, std, median
+    """
+    # 空を除いた値を, 範囲の中と外に分ける
+    values, missing = float_values(series)
+    present = values[~missing]
+    inside = (present > 0.0) & (present <= 1.0)
+    prob = {
+        "missing": int(missing.sum()),
+        "out_of_range": int((~inside).sum()),
+        **number_summary(present[inside]),
+    }
+
+    return prob
+
+
 def describe_trajectory(trajectory: Trajectory) -> dict:
     """
-    軌跡のエピソード, 長さ, 報酬, 観測と行動, 守りの結果をまとめる関数
+    軌跡のエピソード, 長さ, 報酬, 観測と行動, 守りの結果, 行動を選んだ
+    確率をまとめる関数
 
     Parameters
     ----------
@@ -1195,6 +1239,7 @@ def describe_trajectory(trajectory: Trajectory) -> dict:
         "action_columns": list(trajectory.action_columns),
         "extra_columns": [name for name in frame.columns if name not in known],
         "guarded": trajectory.guarded,
+        "with_action_prob": trajectory.with_action_prob,
         "length": number_summary(lengths),
         "return": number_summary(returns),
         "unknown_returns": int(len(episodes) - returns.size),
@@ -1208,10 +1253,21 @@ def describe_trajectory(trajectory: Trajectory) -> dict:
             for name in trajectory.action_columns
         ],
         "guard": describe_guard(frame) if trajectory.guarded else None,
+        "action_prob": describe_action_prob(
+            frame[PROB_COLUMN]
+        ) if trajectory.with_action_prob else None,
         "per_episode": episodes[:MAX_EPISODE_ROWS],
         "per_episode_truncated": len(episodes) > MAX_EPISODE_ROWS,
         "notes": list(trajectory.notes),
     }
+
+    # 範囲の外の確率 (方策の見積もりに使えない値)
+    prob = summary["action_prob"]
+    if prob is not None and prob["out_of_range"]:
+        summary["notes"].append(
+            f"{PROB_COLUMN} に 0 より大きく 1 以下でない値が "
+            f"{prob['out_of_range']} 件あります"
+        )
 
     # エピソードごとの並びは先頭の上限まで (要約の値は全てのエピソードで)
     if summary["per_episode_truncated"]:

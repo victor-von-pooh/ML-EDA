@@ -113,6 +113,8 @@ def test_reads_found_trajectory() -> None:
         "end": "terminated", "seed": 4,
     }
     assert summary["guard"] is None
+    assert not summary["with_action_prob"]
+    assert summary["action_prob"] is None
 
 
 def test_reads_guarded_trajectory() -> None:
@@ -149,6 +151,85 @@ def test_reads_guarded_trajectory() -> None:
     ]
 
 
+def test_reads_action_prob() -> None:
+    """
+    行動を選んだ確率の列のある軌跡で, 確率の欠けと範囲をまとめることを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 3 歩と止めた判断の 1 行のエピソードが 2 つ. 止めた判断の行は空
+    trajectory = load_trajectory(SAMPLES / "prob.csv")
+    assert trajectory.with_action_prob
+    assert trajectory.types["action_prob"] == "number"
+    assert trajectory.notes == []
+    assert trajectory.frame["action_prob"].isna().sum() == 2
+
+    # 確率の列は既知の列で, 要約に欠けと範囲を出す
+    summary = describe_trajectory(trajectory)
+    json.dumps(summary, allow_nan=False)
+    assert summary["with_action_prob"]
+    assert summary["extra_columns"] == []
+    prob = summary["action_prob"]
+    assert (prob["missing"], prob["out_of_range"]) == (2, 0)
+    assert (prob["min"], prob["max"]) == (0.3, 0.7)
+    assert summary["notes"] == []
+
+
+def test_action_prob_checks(tmp_path: Path) -> None:
+    """
+    確率の範囲の外の値と, 説明の with_action_prob の食い違いを知らせる
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 0, 1 を超える値, 負の値, nan は範囲の外. 1 は範囲の中
+    path = write_table(tmp_path / "t.csv", [
+        HEADER + ",action_prob",
+        "0,0,0.0,1,1.0,false,false,1",
+        "0,1,1.0,1,1.0,false,false,0",
+        "0,2,2.0,1,1.0,false,false,1.5",
+        "0,3,3.0,1,1.0,false,false,-0.2",
+        "0,4,4.0,1,1.0,false,false,nan",
+        "0,5,5.0,1,1.0,true,false,",
+    ])
+    summary = describe_trajectory(load_trajectory(path))
+    prob = summary["action_prob"]
+    assert (prob["missing"], prob["out_of_range"]) == (1, 4)
+    assert prob["max"] == prob["min"] == 1.0
+    assert any("action_prob" in note for note in summary["notes"])
+
+    # 文字の確率は誤り
+    path = write_table(tmp_path / "s.csv", [
+        HEADER + ",action_prob", "0,0,0.0,1,1.0,true,false,high",
+    ])
+    with pytest.raises(ValueError, match="action_prob"):
+        load_trajectory(path)
+
+    # 説明の with_action_prob が表と違えば, 表の方を使い知らせる
+    path = copy_sample(tmp_path, "prob")
+    info_path = tmp_path / "prob.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["with_action_prob"] = False
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+    trajectory = load_trajectory(path)
+    assert trajectory.with_action_prob
+    assert any("with_action_prob" in note for note in trajectory.notes)
+
+
 def test_same_without_info(tmp_path: Path) -> None:
     """
     説明の無い表を, 列の名前と値から同じ型で読むことを確かめる関数
@@ -163,7 +244,7 @@ def test_same_without_info(tmp_path: Path) -> None:
     None
     """
     # 説明付きと同じ型, 列, 要約 (説明の項目は除く)
-    for name in ("valid", "guarded", "box"):
+    for name in ("valid", "guarded", "box", "prob"):
         bare = load_trajectory(copy_sample(tmp_path, name, info=False))
         full = load_trajectory(SAMPLES / f"{name}.csv")
         assert bare.info is None
@@ -171,6 +252,7 @@ def test_same_without_info(tmp_path: Path) -> None:
         assert bare.observation_columns == full.observation_columns
         assert bare.action_columns == full.action_columns
         assert bare.guarded == full.guarded
+        assert bare.with_action_prob == full.with_action_prob
         pd.testing.assert_frame_equal(bare.frame, full.frame)
         summary = describe_trajectory(bare)
         assert not summary["described"]
@@ -258,10 +340,10 @@ def test_element_columns_by_number(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 列の並びは番号の順でなく, 後で足される確率の列もある
+    # 列の並びは番号の順でなく, 知らない列もある
     path = write_table(tmp_path / "t.csv", [
         "episode,step,obs_10,obs_2,obs_0,action_1,action_0,reward,"
-        "terminated,truncated,action_prob",
+        "terminated,truncated,value",
         "0,0,1,2,3,0.5,0.25,1,false,true,0.9",
     ])
     trajectory = load_trajectory(path)
@@ -269,8 +351,10 @@ def test_element_columns_by_number(tmp_path: Path) -> None:
     assert trajectory.action_columns == ["action_0", "action_1"]
     assert any("番号" in note for note in trajectory.notes)
     summary = describe_trajectory(trajectory)
-    assert summary["extra_columns"] == ["action_prob"]
-    assert trajectory.types["action_prob"] == "number"
+    assert summary["extra_columns"] == ["value"]
+    assert trajectory.types["value"] == "number"
+    assert not trajectory.with_action_prob
+    assert summary["action_prob"] is None
     assert summary["ends"]["truncated"] == 1
     assert summary["observations"][0]["counts"] == [{"value": 3, "count": 1}]
 
