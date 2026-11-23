@@ -913,7 +913,7 @@ def load_csv(path: Path, **options: Any) -> Data:
     **options: Any
         sep (区切り文字), encoding (文字コード), header (ヘッダーの行,
         無い場合は None), time_column (日時の列), kind (table で時系列の
-        推定を止める)
+        推定を止める), text_column (文の列)
 
     Returns
     ----------
@@ -989,8 +989,8 @@ def load_json(path: Path, **options: Any) -> Data:
     path: Path
         ファイル
     **options: Any
-        records (レコードの配列がある鍵の名前, 入れ子の場合),
-        time_column, kind
+        records (レコードの配列がある鍵の名前, 入れ子の場合), encoding
+        (文字コード), time_column, kind, text_column
 
     Returns
     ----------
@@ -1085,7 +1085,7 @@ def load_parquet(path: Path, **options: Any) -> Data:
     path: Path
         ファイル
     **options: Any
-        time_column, kind
+        time_column, kind, text_column
 
     Returns
     ----------
@@ -1135,7 +1135,8 @@ def load_excel(path: Path, **options: Any) -> Data:
     path: Path
         ファイル
     **options: Any
-        sheet (シートの名前か番号, 既定は最初のシート), time_column, kind
+        sheet (シートの名前か番号, 既定は最初のシート), time_column, kind,
+        text_column
 
     Returns
     ----------
@@ -1261,6 +1262,7 @@ def register_builtin() -> None:
     table_options = {
         "time_column": "日時の列 (時系列として読む. 省略すると推定)",
         "kind": "table と書くと時系列の推定をしない",
+        "text_column": "文の列 (1 行が 1 つの文の, 文のデータとして読む)",
     }
     register_loader(Loader(
         "csv", "table", (".csv", ".tsv", ".txt", ".dat", ".data"),
@@ -1273,7 +1275,8 @@ def register_builtin() -> None:
     register_loader(Loader(
         "json", "table", (".json", ".jsonl", ".ndjson"), sniff_json,
         load_json,
-        {"records": "レコードの配列がある鍵 (入れ子の場合)", **table_options},
+        {"records": "レコードの配列がある鍵 (入れ子の場合)",
+         "encoding": "文字コード (既定 utf-8)", **table_options},
         "JSON (レコードの配列, 列の辞書, 1 行 1 レコード)"
     ))
     register_loader(Loader(
