@@ -10,21 +10,22 @@
 - **分析**: 列の型の推定, 統計とヒストグラム, 相関, 目的の列との関連の強さ, 時系列の間隔と周期, 気付き (欠損の多い列, ID らしい列, リークの疑い, クラスの偏りなど)
 - **前処理**: 手順の並び (レシピ) を YAML で書く. 値を学ぶ手順 (標準化, 欠損の補完など) は分割した後の学習用のデータだけで当てはめ, 検証用とテスト用には同じ値を使う
 - **書き出し**: 分割ごとのデータと, 当てはめた値を含むレシピと, 説明 (`dataset.yaml`) を 1 つのディレクトリに書く
-- **ファイルの組**: 画像と領域, 多視点の撮影と点群のように正解がファイルのデータを, データセットの版 2 で書き出して読む. 項目ごとの中身の手順 (大きさをそろえるなど) をかけると版 3
+- **ファイルの組**: 画像と領域, 多視点の撮影と点群のように正解がファイルのデータと, 正解の無い群分けの表を, データセットの版 2 で書き出して読む. 項目ごとの中身の手順 (大きさをそろえるなど) をかけると版 3
 - **モデルに要るもの**: 書き出したデータセットから, モデルの入力の形と出す値の数を, 分割のデータを読まずに返す (`model_inputs`)
 - **推論のときの同じ前処理**: 新しいデータに, 学習のときと同じレシピと中身の手順をかける
 - **記録した軌跡**: 強化学習の 1 歩が 1 行の軌跡 (ML-Found が評価で書くものと, 手元の CSV と Parquet) を読み, エピソードの長さ, 報酬の和, 観測と行動の値, 守りの結果, 行動を選んだ確率の列の有無と範囲を要約する
 - **並べるの反応の表**: 推薦の学習に使う 1 行が 1 つの反応の表を, ML-Quest の並べるの骨組みと同じ決まりで読み, 利用者, 品物, 反応の数, 利用者ごとの数の分布, 品物の人気の偏り, 時刻の範囲, 除いた行の数を要約する
+- **群分けの表**: 群分け (まとめる) の 1 行が 1 つの対象の表を版 2 のデータセットに書き出して読み, 学習の前に列の特徴をそのまま k-means で分けた群 (か渡した群) の要約 (群ごとの行の数, 割合, 安定性, 列の平均と最も多い値) を, ML-Quest のまとめるの骨組みの群の要約と同じ形で返す
 
 ## どのアプリから使われるか
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs` |
+| ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs`, 群の要約 (`describe_groups`) |
 | ML-Quest (問題の設定) | データの読み方 (`Data.source`), レシピの雛形と書き戻し, ファイルの組の書き出しの設定. 手元のデータの答えの候補 |
 | ML-CreateArchitecture (モデルの作成) | `model_inputs` でモデルの定義の入力と出力をデータセットに合わせる |
 | ML-Found | `task_from_dataset` が `dataset.yaml` を読む (`ml_eda` は使わない). 評価の軌跡 (`trajectories/`) は ML-EDA が読む |
-| ML-Inference, ML-Provide | 書き出したデータセットの読み込み (`load_dataset`, `load_items`), 推論のときの同じ前処理, 書き出し (`export_dataset` など) |
+| ML-Inference, ML-Provide | 書き出したデータセットの読み込み (`load_dataset`, `load_items`), 推論のときの同じ前処理, 書き出し (`export_dataset` など). ML-Inference は群の要約の形 (`describe_groups`) も使う |
 
 ## 導入
 
@@ -235,9 +236,30 @@ summary["time"]                       # 時刻の型と範囲
 
 ファイルは `load_data` と同じ読み方で読む (`loader` と読み込みの設定も渡せる. `load_data` で読んだ `Data` も渡せる). 時刻は数か日時. 利用者, 品物か時刻の欠けた行と, 反応の強さが 0 以下か数でない行は除く (ML-Quest の並べるの骨組みと同じ決まり). 反応の表はファイル 1 つのまま骨組みに渡し, 分割は骨組みが時刻で行う. 決まりは [docs/DESIGN.md](docs/DESIGN.md) の「並べるの反応の表」.
 
+### 群分けの表
+
+```python
+from ml_eda import describe_groups, export_group_rows, load_items
+
+# 群を作る列は問題の設定で答えたもの (行を見分ける列は任意)
+columns = ["spend", "visits", "region"]
+summary = describe_groups("customers.csv", columns, k=3)  # JSON にできる辞書
+summary["groups"]                     # 群ごとの rows, share, stability と列の平均か最も多い値. 最後は「全体」
+summary["stability"]                  # 種を変えて作り直した群との一致 (ari, ari_min)
+summary["silhouette"]                 # 群のまとまり
+
+# 版 2 のデータセットに書き出して読む (受け持ちは group, 正解は無い)
+export_group_rows("customers.csv", "datasets/customers", columns, id="cid")
+dataset = load_items("datasets/customers")
+dataset.split("train")[0]             # {"id", "split", "group", "spend", "visits", "region"}
+describe_groups(dataset, k=3)         # 書き出したデータセットからも同じ要約
+```
+
+群は ML-Quest のまとめるの骨組みと同じ符号化 (数の列は標準化, 他の列は値ごとの 0 と 1) をかけた列の特徴を, そのまま k-means で分けたもの (骨組みの比べる相手と同じ作り方). `labels` に行ごとの群か群の列の名前を渡すと, その群を要約する. 群の要約の行は骨組みの `evaluations/group_summary.json` の行と同じ形. 決まりは [docs/DESIGN.md](docs/DESIGN.md) の「群の要約」と「群分けの表」.
+
 ## 文書
 
-- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり, 他のリポジトリとの約束 (レシピとデータセットの形と版, 読む軌跡と反応の表の形)
+- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり, 他のリポジトリとの約束 (レシピとデータセットの形と版, 読む軌跡と反応の表の形, 群の要約の形)
 - [TODO.md](TODO.md): まだやっていないこと (優先度の順)
 - [CODING_STYLE.md](CODING_STYLE.md): コードの書き方
 - [CLAUDE.md](CLAUDE.md): このリポジトリで作業するときの方針

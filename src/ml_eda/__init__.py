@@ -4,6 +4,7 @@ from ml_eda import audio  # noqa: F401 (音声の読み込みを登録)
 from ml_eda.audio import read_audio
 from ml_eda.capture import capture_layout
 from ml_eda.data import KINDS, Data
+from ml_eda.groups import describe_groups, export_group_rows
 from ml_eda.itemprep import ITEM_STEPS, describe_item_steps
 from ml_eda.items import (
     PLACEMENTS, ItemDataset, ItemSplit, capture_shift, export_capture_clouds,
@@ -38,11 +39,12 @@ __all__ = [
     "Data", "Dataset", "ItemDataset", "ItemSplit", "Loader",
     "Prepared", "Reactions", "Step", "Trajectory", "capture_layout",
     "capture_shift",
-    "compare_tokenizers",
+    "compare_tokenizers", "describe_groups",
     "describe_item_steps", "describe_reactions", "export_capture_clouds",
     "export_image_masks",
     "describe_loaders",
     "describe_steps", "describe_trajectory", "detect", "export_dataset",
+    "export_group_rows",
     "frame_view", "load_data",
     "load_dataset", "load_items", "load_reactions", "load_recipe",
     "load_trajectory",

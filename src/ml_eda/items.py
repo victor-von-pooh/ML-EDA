@@ -2469,6 +2469,66 @@ class ItemDataset:
         return items
 
 
+def number_entry(spec: dict) -> bool:
+    """
+    表の列の値の項目が, 数の型の値を持つかを返す関数
+
+    Parameters
+    ----------
+    spec: dict
+        項目の説明 (dtype)
+
+    Returns
+    ----------
+    number: bool
+        説明の dtype が数の型 (真偽値を除く) か
+    """
+    # 型の名前を numpy の型として読む (読めない名前は数でない)
+    try:
+        kind = np.dtype(str(spec.get("dtype"))).kind
+    except TypeError:
+        kind = ""
+    number = kind != "" and kind in "iuf"
+
+    return number
+
+
+def csv_values(items: pd.DataFrame, entries: dict) -> pd.DataFrame:
+    """
+    csv で読んだ表の, 列の値の項目の空の値を欠けにする関数
+
+    csv では欠けた値が空の文字になるので, 数の項目は数に, 他の項目の
+    空の文字は None にする (parquet で読んだときと同じ値にするため)
+
+    Parameters
+    ----------
+    items: pd.DataFrame
+        csv で読んだ 1 行 1 件の表
+    entries: dict
+        項目の名前から説明
+
+    Returns
+    ----------
+    items: pd.DataFrame
+        列の値の項目を直した表
+    """
+    # 列の値の項目だけ (ファイルの場所の列は空の文字のまま)
+    for name, spec in entries.items():
+        if spec["placement"] != "column" or name not in items.columns:
+            continue
+        column = items[name]
+        if number_entry(spec):
+            items[name] = pd.to_numeric(
+                column.replace("", np.nan), errors="coerce"
+            )
+        else:
+            items[name] = column.map(
+                lambda value: None if value == "" else value
+            ).astype(object)
+
+    return items
+
+
 def load_items(
     path: Union[str, Path], follow_links: bool = False
 ) -> ItemDataset:
@@ -2533,10 +2593,13 @@ def load_items(
     if file.suffix == ".parquet":
         items = pd.read_parquet(file)
     else:
-        items = pd.read_csv(
-            file, dtype={"id": str, "split": str, "group": str},
-            keep_default_na=False
-        )
+        texts = {"id": str, "split": str, "group": str}
+        texts.update({
+            name: str for name, spec in entries.items()
+            if spec["placement"] == "column" and not number_entry(spec)
+        })
+        items = pd.read_csv(file, dtype=texts, keep_default_na=False)
+        items = csv_values(items, entries)
     lacking = [name for name in ("id", "split", *entries)
                if name not in items.columns]
     if lacking:
