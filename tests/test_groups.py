@@ -11,7 +11,9 @@ import ml_eda
 from ml_eda import (
     Data, describe_groups, export_group_rows, load_items, model_inputs
 )
+from ml_eda import groups
 from ml_eda.groups import MAX_WIDTH
+from ml_eda.items import csv_values
 
 
 def table(frame: pd.DataFrame, source: Optional[dict] = None) -> Data:
@@ -418,3 +420,145 @@ def test_not_group_dataset(tmp_path: Path) -> None:
                      encoding="utf-8")
     with pytest.raises(ValueError, match="受け持ちが predict"):
         describe_groups(load_items(tmp_path / "ds"), k=2)
+
+
+def test_same_values_as_the_skeleton() -> None:
+    """
+    完全には分かれない小さな表で, ML-Quest の骨組みの群の要約, 安定性,
+    シルエット係数と同じ値になるかを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 期待値は骨組みの summary_rows, stability (seed で 5 回), silhouette
+    # (種 0) に同じ表を渡して求めた値
+    frame = pd.DataFrame({
+        "x": [6.4, 2.7, 0.4, 0.2, 8.1, 9.1, 6.1, 7.3, 5.4, 9.4, 8.2, 0.0],
+        "y": [8.6, 0.3, 7.3, 1.8, 8.6, 5.4, 3.0, 4.2, 0.3, 1.2, 6.7, 6.5],
+        "c": ["a", "b", None, "b", "b", None, None, None, "b", None, None,
+              "b"],
+    })
+    summary = describe_groups(table(frame), ["x", "y", "c"], k=3)
+    expected = [
+        {"group": 0, "rows": 3, "share": 0.25, "stability": 0.92,
+         "x": 2.766666666666667, "y": 0.8, "c": "b (100 %)"},
+        {"group": 1, "rows": 4, "share": 1 / 3, "stability": 0.65,
+         "x": 3.725, "y": 7.75, "c": "b (50 %)"},
+        {"group": 2, "rows": 5, "share": 5 / 12,
+         "stability": 0.8523809523809524, "x": 8.02, "y": 4.1,
+         "c": "(欠損) (100 %)"},
+        {"group": "全体", "rows": 12, "share": 1.0, "stability": None,
+         "x": 5.275, "y": 4.491666666666667, "c": "(欠損) (50 %)"},
+    ]
+    assert summary["groups"] == [
+        {key: pytest.approx(value) if isinstance(value, float) else value
+         for key, value in row.items()} for row in expected
+    ]
+    assert summary["stability"]["ari"] == pytest.approx(0.6818593113933166)
+    assert summary["stability"]["ari_min"] == pytest.approx(
+        0.5271238485158649
+    )
+    assert summary["silhouette"] == pytest.approx(0.36390241512137544)
+
+
+def test_width_limit_with_labels() -> None:
+    """
+    群を渡した場合も, 符号化した行の幅の上限で止まるかを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 種類の値が上限より多い列
+    count = MAX_WIDTH + 1
+    wide = table(pd.DataFrame({
+        "name": [str(index) for index in range(count)],
+        "g": [index % 2 for index in range(count)],
+    }))
+    with pytest.raises(ValueError, match="上限"):
+        describe_groups(wide, ["name"], labels="g")
+
+
+def test_silhouette_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    2000 行を超える表で, 種から作り直した乱数で選んだ行のシルエット係数
+    を返すかを確かめる関数
+
+    Parameters
+    ----------
+    monkeypatch: pytest.MonkeyPatch
+        渡された乱数を記録する
+
+    Returns
+    ----------
+    None
+    """
+    # 2 つの群の 2500 行
+    rng = np.random.default_rng(1)
+    frame = pd.DataFrame({"x": np.concatenate([
+        rng.normal(0, 1, 1250), rng.normal(8, 1, 1250)
+    ])})
+    seen = []
+    original = groups.silhouette
+
+    def record(points: np.ndarray, labels: np.ndarray, size: int,
+               pick: np.random.Generator) -> float:
+        # 渡された乱数の初めの状態
+        seen.append(pick.bit_generator.state)
+        score = original(points, labels, size, pick)
+
+        return score
+
+    monkeypatch.setattr(groups, "silhouette", record)
+    summary = describe_groups(table(frame), ["x"], k=2, seed=3)
+
+    # 乱数は種 3 から作り直したもの, 値は同じ種で数え直した値
+    assert seen == [np.random.default_rng(3).bit_generator.state]
+    encoding = groups.make_encoding(frame)
+    points = groups.encode_rows(frame, encoding)
+    labels = np.array([0 if row["x"] < 4 else 1 for _, row in
+                       frame.iterrows()])
+    if summary["groups"][0]["x"] > 4:
+        labels = 1 - labels
+    again = original(points, labels, groups.SAMPLE,
+                     np.random.default_rng(3))
+    assert summary["silhouette"] == pytest.approx(again)
+    assert 0.5 < summary["silhouette"] <= 1
+
+
+def test_csv_values() -> None:
+    """
+    csv で読んだ列の値の項目の, 空の文字と数にならない文字の読み方を
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 数の項目は数に (数にならない文字は欠け), 他は文字 (空は欠け)
+    entries = {
+        "x": {"placement": "column", "dtype": "float64"},
+        "c": {"placement": "column", "dtype": "str"},
+        "image": {"placement": "file"},
+    }
+    items = pd.DataFrame({
+        "x": ["1.5", "", "many"], "c": ["01", "", "a"],
+        "image": ["", "b.png", ""],
+    })
+    read = csv_values(items, entries)
+    assert read["x"].iloc[0] == 1.5 and read["x"].iloc[1:].isna().all()
+    assert read["c"].iloc[0] == "01" and pd.isna(read["c"].iloc[1])
+    assert list(read["image"]) == ["", "b.png", ""]

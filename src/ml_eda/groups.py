@@ -437,8 +437,8 @@ def encode_rows(frame: pd.DataFrame, encoding: dict) -> np.ndarray:
     Returns
     ----------
     features: np.ndarray
-        (行の数, 符号化した行の幅) の float64 (数の列は標準化して欠けた
-        値は 0, 種類の列は値ごとの 0 と 1)
+        (行の数, 符号化した行の幅) の float64 (float32 に丸めた値. 数の
+        列は標準化して欠けた値は 0, 種類の列は値ごとの 0 と 1)
     """
     # 数の列を前に, 種類の列を後ろに並べる
     parts = []
@@ -448,7 +448,8 @@ def encode_rows(frame: pd.DataFrame, encoding: dict) -> np.ndarray:
     for name, values in encoding["categories"].items():
         text = frame[name].map(category_text).to_numpy()
         parts.append(np.stack([text == value for value in values], 1))
-    features = np.concatenate(parts, 1).astype(np.float64)
+    # 骨組みと同じ float32 の値にしてから float64 で数える
+    features = np.concatenate(parts, 1).astype(np.float32).astype(np.float64)
 
     return features
 
@@ -931,14 +932,17 @@ def describe_groups(
         raise ValueError("群を作る表に行がありません")
     notes = column_notes(frame)
 
-    # 符号化 (全ての行で決める)
+    # 符号化 (全ての行で決める. 幅は表を作る前に確かめる)
     encoding = make_encoding(frame)
-    features = encode_rows(frame, encoding)
-    if features.shape[1] > MAX_WIDTH:
+    width = len(encoding["numeric"]) + sum(
+        len(values) for values in encoding["categories"].values()
+    )
+    if width > MAX_WIDTH:
         raise ValueError(
-            f"符号化した行の幅が {features.shape[1]} で, 上限 {MAX_WIDTH} を"
-            "超えます. 値の多い種類の列を群を作る列から外してください"
+            f"符号化した行の幅が {width} で, 上限 {MAX_WIDTH} を超えます. "
+            "値の多い種類の列を群を作る列から外してください"
         )
+    features = encode_rows(frame, encoding)
 
     # 群 (渡した割り当てか, 列の特徴をそのまま k-means で)
     rng = np.random.default_rng(seed)
@@ -965,14 +969,12 @@ def describe_groups(
     )
     empty = [row["group"] for row in rows[:-1] if row["rows"] == 0]
     if empty:
-        notes.append(
-            f"行の無い群が {len(empty)} 個あります (異なる行が群の数より"
-            "少ないため). 群の数を減らしてください"
-        )
+        notes.append(f"行の無い群が {len(empty)} 個あります")
     if len(keys) < 2:
         notes.append("群が 1 つだけで, 群を比べられません")
 
-    # 群の安定性とまとまり
+    # 群の安定性とまとまり (点を選ぶ乱数は種から作り直す. ML-Quest の
+    # 骨組みと同じ)
     summary = {
         "method": "kmeans" if labels is None else "labels",
         "k": len(keys),
@@ -988,7 +990,9 @@ def describe_groups(
             "method": "seed", "repeats": repeats,
             "ari": found["ari"], "ari_min": found["ari_min"],
         },
-        "silhouette": silhouette(features, positions, SAMPLE, rng),
+        "silhouette": silhouette(
+            features, positions, SAMPLE, np.random.default_rng(seed)
+        ),
         "source": place,
         "notes": notes,
     }
