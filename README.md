@@ -14,6 +14,7 @@
 - **モデルに要るもの**: 書き出したデータセットから, モデルの入力の形と出す値の数を, 分割のデータを読まずに返す (`model_inputs`)
 - **推論のときの同じ前処理**: 新しいデータに, 学習のときと同じレシピと中身の手順をかける
 - **記録した軌跡**: 強化学習の 1 歩が 1 行の軌跡 (ML-Found が評価で書くものと, 手元の CSV と Parquet) を読み, エピソードの長さ, 報酬の和, 観測と行動の値, 守りの結果, 行動を選んだ確率の列の有無と範囲を要約する
+- **並べるの反応の表**: 推薦の学習に使う 1 行が 1 つの反応の表を, ML-Quest の並べるの骨組みと同じ決まりで読み, 利用者, 品物, 反応の数, 利用者ごとの数の分布, 品物の人気の偏り, 時刻の範囲, 除いた行の数を要約する
 
 ## どのアプリから使われるか
 
@@ -215,9 +216,28 @@ summary["action_prob"]                # 行動を選んだ確率の欠けと範�
 
 隣に説明 (`valid_best.json`) があれば型と環境の名前などを使い, 無ければ列の名前 (`obs`, `obs_<番号>`, `action`, `action_<番号>`) と値から読む. 手元の Parquet (`trajectory.parquet`) も同じ口で読む (pyarrow が要る). 列の決まりは [docs/DESIGN.md](docs/DESIGN.md) の「記録した軌跡」.
 
+### 並べるの反応の表
+
+```python
+from ml_eda import describe_reactions, load_reactions
+
+# 列の名前は問題の設定で答えたもの (反応の強さは任意)
+reactions = load_reactions("interactions.csv", user="member",
+                           item="item_id", time="ts", reaction="qty")
+reactions.frame                       # user, item, time, reaction の列 (時刻の順)
+summary = describe_reactions(reactions)     # JSON にできる辞書
+summary["users"], summary["items"], summary["reactions"]
+summary["dropped"]                    # 欠けた行と, 強さが 0 以下か数でない行の数
+summary["per_user"]                   # 利用者ごとの反応の数の min, max, 区切りごとの数など
+summary["popularity"]                 # 上位 10% の品物の反応の割合, ジニ係数, 人気の品物
+summary["time"]                       # 時刻の型と範囲
+```
+
+ファイルは `load_data` と同じ読み方で読む (`loader` と読み込みの設定も渡せる. `load_data` で読んだ `Data` も渡せる). 時刻は数か日時. 利用者, 品物か時刻の欠けた行と, 反応の強さが 0 以下か数でない行は除く (ML-Quest の並べるの骨組みと同じ決まり). 反応の表はファイル 1 つのまま骨組みに渡し, 分割は骨組みが時刻で行う. 決まりは [docs/DESIGN.md](docs/DESIGN.md) の「並べるの反応の表」.
+
 ## 文書
 
-- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり, 他のリポジトリとの約束 (レシピとデータセットの形と版, 読む軌跡の形)
+- [docs/DESIGN.md](docs/DESIGN.md): 今の設計と決まり, 他のリポジトリとの約束 (レシピとデータセットの形と版, 読む軌跡と反応の表の形)
 - [TODO.md](TODO.md): まだやっていないこと (優先度の順)
 - [CODING_STYLE.md](CODING_STYLE.md): コードの書き方
 - [CLAUDE.md](CLAUDE.md): このリポジトリで作業するときの方針

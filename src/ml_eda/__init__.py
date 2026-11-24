@@ -20,6 +20,7 @@ from ml_eda.pipeline import (
     preview_items
 )
 from ml_eda.profile import profile
+from ml_eda.reactions import Reactions, describe_reactions, load_reactions
 from ml_eda.recipe import (
     STEPS, Step, describe_steps, load_recipe, register_step
 )
@@ -35,13 +36,16 @@ __all__ = [
     "DATASET_FORMAT_VERSION", "ITEMS_FORMAT_VERSIONS", "ITEM_STEPS",
     "KINDS", "LOADERS", "PLACEMENTS", "STEPS", "TRAJECTORY_FORMAT_VERSION",
     "Data", "Dataset", "ItemDataset", "ItemSplit", "Loader",
-    "Prepared", "Step", "Trajectory", "capture_layout", "capture_shift",
+    "Prepared", "Reactions", "Step", "Trajectory", "capture_layout",
+    "capture_shift",
     "compare_tokenizers",
-    "describe_item_steps", "export_capture_clouds", "export_image_masks",
+    "describe_item_steps", "describe_reactions", "export_capture_clouds",
+    "export_image_masks",
     "describe_loaders",
     "describe_steps", "describe_trajectory", "detect", "export_dataset",
     "frame_view", "load_data",
-    "load_dataset", "load_items", "load_recipe", "load_trajectory",
+    "load_dataset", "load_items", "load_reactions", "load_recipe",
+    "load_trajectory",
     "model_inputs", "normalize_capture",
     "prepare", "preview",
     "preview_items", "read_audio", "read_capture", "read_cloud",
