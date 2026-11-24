@@ -15,7 +15,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 
 ## 2. 他のリポジトリとの約束
 
-このライブラリが持つ約束と, 読む約束. 読むのは記録した軌跡 (ML-Found が書く表と説明) だけで, 他の段階の約束は読まない.
+このライブラリが持つ約束と, 読む約束. 読むのは記録した軌跡 (ML-Found が書く表と説明) と並べるの反応の表 (ML-Quest の並べるの骨組みが読む形) だけで, 他の段階の約束は読まない.
 
 | 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
@@ -29,6 +29,8 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 画像 1 枚の読み方 (`read_image`) | 持つ | 版を持たない | ML-Fathom (撮影の 1 枚). 下の「公開の名前」 |
 | 記録した軌跡 (`<名前>.csv` か `<名前>.parquet` と, 説明の `<名前>.json`) | 読む | 説明の `format_version` 1 (`TRAJECTORY_FORMAT_VERSION`). 新しい版は読める項目だけを使い, 気付きに書く | 出どころは ML-Found の評価の軌跡 (実験のディレクトリの `trajectories/`. 形の出どころは ML-Found の `docs/FORMAT.md` の「trajectories」) と, 利用者の手元の表. 読む形の決まりは下の「記録した軌跡」 |
 | 軌跡の要約 (`load_trajectory`, `describe_trajectory`) | 持つ | 版を持たない (下の形) | 利用者が直接呼ぶ. 下の「記録した軌跡」 |
+| 並べるの反応の表 (1 行が 1 つの反応の表のファイル 1 つ) | 読む | 版を持たない (列の名前は問題の設定の答え) | 形の出どころは ML-Quest の `docs/DESIGN.md` の「並べるの骨組み」の反応の表. ML-Quest の骨組みの学習のスクリプトと同じ決まりで読み, 除く行を数える. 下の「並べるの反応の表」 |
+| 反応の要約 (`load_reactions`, `describe_reactions`) | 持つ | 版を持たない (下の形) | 利用者が直接呼ぶ. 下の「並べるの反応の表」 |
 | 項目の置き方の組 (`PLACEMENTS`) | 持つ | データセットの版 2 と 3 に含む | ML-Inference (一式の項目の置き方の確かめ). 下の「公開の名前」 |
 
 ### 公開の名前
@@ -44,6 +46,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 - `PLACEMENTS`: `load_items` が読める項目の置き方 (`dataset.yaml` の `entries.<名前>.placement`) の名前の組 (`tuple[str, ...]`. 今は `("file", "directory", "column")`. 意味は「書き出しの版 2」の `placement`). これに無い置き方の項目を持つデータセットは `load_items` が誤りで止まる
 - `TRAJECTORY_FORMAT_VERSION`: `load_trajectory` が知る軌跡の説明の版 (`int`. 今は 1)
 - `load_trajectory(path)`, `describe_trajectory(trajectory)`, `Trajectory`: 記録した軌跡を読み, 要約する. 形は下の「記録した軌跡」
+- `load_reactions(source, user, item, time, reaction=None, loader=None, **options)`, `describe_reactions(reactions)`, `Reactions`: 並べるの反応の表を読んで約束を確かめ, 要約する. 形は下の「並べるの反応の表」
 - `read_image(path)`: ファイル 1 つの画像を numpy の配列にする低い層. 形は (高さ, 幅) か (高さ, 幅, チャンネル), 型は `uint8`, 書き込める写し. EXIF の向きを直し, パレットなどは RGB (透明があれば RGBA), 16 ビットと浮動小数は 0 から 255 に縮めた 1 チャンネル, 2 値は 0 と 255 にそろえる. 版 2 の書き出しと `load_item` の画像と同じ読み方
 
 ## 3. 用語
@@ -57,6 +60,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | レシピ (recipe) | 前処理の手順の並び. YAML に書き, 版を付ける |
 | データセット (dataset) | 前処理をして分割したデータを, 学習用に書き出したディレクトリ |
 | 軌跡 (trajectory) | 強化学習で, 方策を環境で走らせた記録. 1 歩が 1 行の表 (エピソードの番号, 歩数, 観測, 行動, 報酬, 終わったか). 下の「記録した軌跡」 |
+| 反応の表 | 並べる (推薦) の学習に使う, 1 行が 1 つの反応 (利用者が品物を買った, 見たなど) の表. 利用者, 品物, 時刻の列と, 任意の反応の強さの列. 下の「並べるの反応の表」 |
 | 項目 (entry) | 版 2 のデータセットの 1 件を作る, 名前を付けた入力か正解 (画像, 領域, 撮影, 点群など). 「書き出しの版 2」 |
 
 ## 4. データの形
@@ -209,6 +213,34 @@ AR の端末などで物体の周りを撮った 1 回の撮影を 1 件とす�
 
 - エピソードの歩数と報酬の和は, 報酬のある行で求める (守りで止めた判断の行は環境を進めていない). ML-Found の評価の行 (`length`, `reward`) と同じ値になる
 - 終わり方は最後の行で決める. `guard` が `stop` か `handover` ならそれ, 次に `terminated` が真なら `terminated` (`truncated` も真の場合を含む), `truncated` が真なら `truncated`, どれでもなければ `open` (利用者の表の, 終わりの印の無いエピソード)
+
+### 並べるの反応の表 (`load_reactions`)
+
+並べる (推薦) の学習に使う, 1 行が 1 つの反応の表を読み, 約束を確かめて, 利用者, 品物, 反応の数, 偏り, 時刻の範囲, 除いた行を要約する. 形は ML-Quest の並べるの骨組みが読む反応の表と同じで, 除く行の決まりも骨組みの学習のスクリプトと同じにする (画面で見せた数と学習の `train.log` の数が合うように). 読み込みの登録簿には入れない (表は `load_data` で普通の表として読む).
+
+- `load_reactions(source, user, item, time, reaction=None, loader=None, **options)`: `source` は表のファイルか, `load_data` で読んだ `Data`. ファイルは `load_data(source, loader=loader, **options)` で読む (骨組みが問題の設定の読み方 `data.loader` と `data.options` で読むのと同じ). `Data` を渡した場合は, その表と読み方 (`Data.source`) を使い, `loader` と `options` を渡すと誤り. `user`, `item`, `time` は問題の設定で答えた列の名前 (ML-Quest の `ml.parts.<n>.rank` の `user`, `item`, `time`), `reaction` は反応の強さの列 (答えていなければ None)
+- **列**: 4 つの役割に同じ列を渡した場合, 要る列の名前が None の場合, 表に列が無い場合, 表に同じ名前の列が 2 つ以上ある場合は誤り. 他の列は読まない
+- **時刻**: 数の型の列は数のまま (`time_kind` は `number`). 他は日時として読み (`datetime`), 日時として読めない値は欠けにする. 欠けでない値があり, どれも読めない列は誤り
+- **除く行**: 利用者, 品物か時刻の欠けた行 (日時として読めない時刻を含む) を除き, 次に, 反応の強さの列があれば, 強さが 0 以下か数でない行を除く (強さを渡さなければ全ての行を反応とみなす). 除いた数は 2 つに分けて数え, 1 行以上なら気付きに書く. 同じ利用者と品物の行が何行あってもよい
+- **分割は持たない**: 反応の表はデータセット (`dataset.yaml` と分割ごとのデータ) にせず, ファイル 1 つのまま骨組みに渡す. 分割は骨組みが時刻で行う (反応を時刻の順に並べ, 古い反応を学習用, 新しい反応を検証用とテスト用にする). 並べるの分割は時刻で全体を切るのが決まりで, 割合は骨組みの config で変えるので, データセットの側で分けると決まりが 2 か所に分かれるため. 書き出しの前処理 (レシピ) もかけない
+- `Reactions` の欄: `frame` (残した反応の表. 列は `user`, `item`, `time` と, 強さがあれば `reaction` (float). 時刻の順で, 同じ時刻は元の行の順), `columns` (役割から元の列の名前. 強さが無ければ `reaction` は None), `time_kind` (`number` か `datetime`), `rows` (除く前の行の数), `dropped_missing` (欠けで除いた行の数), `dropped_not_positive` (強さで除いた行の数), `unreadable_time` (欠けでない値のうち, 日時として読めなかった時刻の数), `source` (読み込んだ場所と読み方. `Data.source`), `notes` (気付きの日本語の文の並び)
+
+`describe_reactions(reactions)` は JSON にできる辞書を返す (nan と無限大は None). 鍵は次のとおり.
+
+| 鍵 | 中身 |
+| --- | --- |
+| `columns` | 役割 (`user`, `item`, `time`, `reaction`) から元の列の名前 |
+| `source` | 読み込んだ場所と読み方 (`Data.source`) |
+| `rows`, `reactions` | 除く前の行の数と, 残した反応の数 |
+| `dropped` | `missing` (欠けで除いた行), `unreadable_time` (`missing` のうち, 日時として読めなかった時刻), `not_positive` (強さが 0 以下か数でない行), `total` (`missing` と `not_positive` の和) |
+| `users`, `items` | 残した反応の利用者と品物の数 |
+| `pairs`, `repeated` | 異なる利用者と品物の組の数と, 同じ組の 2 行目からの数 (`reactions` − `pairs`) |
+| `density` | `pairs` を利用者の数 × 品物の数で割った値 (反応が無ければ None) |
+| `per_user`, `per_item` | 利用者ごとと品物ごとの反応の数の `min`, `max`, `mean`, `std` (標本の標準偏差. 1 つなら 0), `median`, `once` (1 回だけの数) と, `bins` (区切り 1, 2, 3–5, 6–10, 11–20, 21–50, 51–100, 101 以上ごとの `{"from", "to", "count"}` の並び. `to` は含み, 最後は None) |
+| `popularity` | 品物の人気の偏り. `top_items` (反応の多い上位 10% の品物の数. 切り上げ), `top_share` (その品物の反応の割合. 反応が無ければ None), `gini` (品物ごとの反応の数のジニ係数. 0 はどの品物も同じ数で, 1 に近いほど偏る. 品物が無ければ None), `popular` (多い順の先頭 10 件の `{"item", "reactions"}`. 品物の値は数, 真偽値, 文字はそのまま, 他は文字) |
+| `time` | `kind` (`number` か `datetime`), `min`, `max` (日時は ISO 8601 の文字. 反応が無ければ None), `distinct` (異なる時刻の数) |
+| `reaction` | 残した反応の強さの `min`, `max`, `mean`, `std`, `median`. 強さの列が無ければ None |
+| `notes` | `Reactions` の `notes` と, 要約で気付いたこと (反応が残らない, 利用者か品物が 1 つだけで並べて確かめられない) |
 
 ## 6. 分析
 
@@ -568,6 +600,7 @@ split:
 
 - 読み込みは手元のファイルだけ. ネットワークは使わない
 - 記録した軌跡 (`load_trajectory`) は, 表と説明の普通のファイルだけを読む. シンボリックリンクは辿らず, FIFO などは待たずに誤りにし, 表は 64 MiB (Parquet は 400 万行), 説明は 1 MiB を超えるものを読まない (5 章の「記録した軌跡」)
+- 並べるの反応の表 (`load_reactions`) は `load_data` で読み, 読み込みと同じ決まりに従う (`Data` を渡した場合は読み直さない)
 - 読み込んだディレクトリの外を指すシンボリックリンクは, 画像, 文, 点群, 撮影, 音声のディレクトリの読み込みとその `load_item`, `load_items`, `read_capture`, 版 2 の書き出し (`export_image_masks`, `export_capture_clouds`), `normalize_capture`, `capture_shift` では既定で読まない (4 章の「外を指すリンク」. 読み込みの設定 `follow_links` か, 関数の引数 `follow_links=True` でたどる)
 - `pickle` を使う形式 (`.pkl`, `allow_pickle` の `.npy`) は読まない (任意のコードを動かせるため)
 - 書き出したデータセットの読み込み (`load_dataset`, `model_inputs` の版 1, `load_items`) は, 説明と表に書かれた場所をデータセットのディレクトリの中に限る (8 章と 9 章. 絶対パスと `..` は誤り. 外を指すリンクは `follow_links` でたどる)
