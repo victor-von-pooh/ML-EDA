@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -222,6 +222,19 @@ def test_describe_errors() -> None:
         with pytest.raises(ValueError, match="fraction"):
             describe_groups(data, ["x"], k=2, stability="sample",
                             fraction=fraction)
+
+    # seed では割合を確かめない. labels でも数え方と割合を確かめる
+    assert describe_groups(
+        data, ["x"], k=2, fraction=None
+    )["stability"]["fraction"] is None
+    with pytest.raises(ValueError, match="数え方 stability"):
+        describe_groups(data, ["x"], labels=[0, 1, 1], stability="bogus")
+    with pytest.raises(ValueError, match="fraction"):
+        describe_groups(data, ["x"], labels=[0, 1, 1], stability="sample",
+                        fraction=0)
+    given = describe_groups(data, ["x"], labels=[0, 1, 1],
+                            stability="sample", fraction=0.5)
+    assert given["stability"] is None
     wide = table(pd.DataFrame({"name": [str(i) for i in range(
         MAX_WIDTH + 1
     )]}))
@@ -519,6 +532,56 @@ def test_sample_stability_like_the_skeleton() -> None:
     assert ([{**row, "stability": None} for row in seed["groups"]]
             == [{**row, "stability": None} for row in sample["groups"]])
     assert seed["silhouette"] == sample["silhouette"]
+
+
+def test_sample_sizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    標本を変える数え方で, 引く行の数が群の数より少なくならず, 割合 1 と
+    行の数が群の数と同じ場合も数えられるかを確かめる関数
+
+    Parameters
+    ----------
+    monkeypatch: pytest.MonkeyPatch
+        k-means に渡す行の数を記録するための差し替え
+
+    Returns
+    ----------
+    None
+    """
+    # k-means に渡した点の数を記録する
+    sizes: list = []
+    original = groups.kmeans
+
+    def record(points: np.ndarray, k: int, rng: np.random.Generator,
+               *args: Any) -> np.ndarray:
+        sizes.append(len(points))
+        return original(points, k, rng, *args)
+
+    monkeypatch.setattr(groups, "kmeans", record)
+    frame = pd.DataFrame({"x": [float(i % 4) for i in range(12)],
+                          "y": [float(i) for i in range(12)]})
+
+    # int(12 × 0.1) = 1 は群の数 3 に上げる (1 回目は元の群で全ての行)
+    summary = describe_groups(table(frame), ["x", "y"], k=3,
+                              stability="sample", fraction=0.1, repeats=4)
+    assert sizes == [12, 3, 3, 3, 3]
+    assert summary["stability"]["fraction"] == 0.1
+    assert -1 <= summary["stability"]["ari_min"] <= 1
+
+    # 割合 1 は全ての行を引く (並びが変わるだけ)
+    sizes.clear()
+    whole = describe_groups(table(frame), ["x", "y"], k=3,
+                            stability="sample", fraction=1.0, repeats=2)
+    assert sizes == [12, 12, 12]
+    assert whole["stability"]["fraction"] == 1.0
+
+    # 行の数と群の数が同じ (どの行も 1 つの群で, 作り直しても同じ)
+    sizes.clear()
+    small = describe_groups(table(frame.head(3)), ["x", "y"], k=3,
+                            stability="sample")
+    assert sizes == [3] * 6
+    assert small["stability"]["ari"] == 1.0
+    assert all(row["stability"] == 1.0 for row in small["groups"][:-1])
 
 
 def test_width_limit_with_labels() -> None:

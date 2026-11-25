@@ -693,7 +693,7 @@ def group_jaccard(
 
 def measure_stability(
     points: np.ndarray, labels: np.ndarray, k: int, seed: int, repeats: int,
-    method: str, fraction: float
+    method: str, fraction: Optional[float]
 ) -> dict:
     """
     群を作り直し, 元の群との一致を数える関数
@@ -713,8 +713,8 @@ def measure_stability(
     method: str
         数え方 (seed は種を変えて全ての行で, sample は行の fraction の割合
         を引き直して作り直す)
-    fraction: float
-        sample で引く行の割合
+    fraction: Optional[float]
+        sample で引く行の割合 (seed では None)
 
     Returns
     ----------
@@ -881,7 +881,7 @@ def check_count(value: Any, label: str, lowest: int) -> int:
     return count
 
 
-def check_method(method: Any, fraction: Any) -> float:
+def check_method(method: Any, fraction: Any) -> Optional[float]:
     """
     群の安定性の数え方と, 引く行の割合を確かめる関数
 
@@ -890,24 +890,26 @@ def check_method(method: Any, fraction: Any) -> float:
     method: Any
         数え方 (STABILITY_METHODS のどれか)
     fraction: Any
-        sample で引く行の割合
+        sample で引く行の割合 (seed では確かめない)
 
     Returns
     ----------
-    share: float
-        引く行の割合
+    share: Optional[float]
+        引く行の割合 (seed では None)
 
     Raises
     ----------
     ValueError
         知らない数え方の場合と, 割合が 0 より大きく 1 以下の数でない場合
     """
-    # 割合は seed でも確かめる (真偽値は数とみなさない)
+    # 割合は sample だけで確かめる (真偽値は数とみなさない)
     if method not in STABILITY_METHODS:
         raise ValueError(
             f"群の安定性の数え方 stability は {', '.join(STABILITY_METHODS)}"
             f" のどれかにしてください (今は {method})"
         )
+    if method != "sample":
+        return None
     number = isinstance(fraction, (int, float, np.integer, np.floating))
     if (not number or isinstance(fraction, bool)
             or not 0 < fraction <= 1):
@@ -924,7 +926,7 @@ def describe_groups(
     source: Union[str, Path, Data, ItemDataset], columns: Any = None,
     k: Optional[int] = None, labels: Any = None, seed: int = 0,
     repeats: int = REPEATS, stability: str = "seed",
-    fraction: float = FRACTION, loader: Optional[str] = None,
+    fraction: Optional[float] = FRACTION, loader: Optional[str] = None,
     **options: Any
 ) -> dict:
     """
@@ -955,8 +957,8 @@ def describe_groups(
         群の安定性の数え方 (ML-Quest の問題の設定の答え group.stability と
         同じ値. seed は種を変えて, sample は行の fraction の割合を引き直して
         作り直す)
-    fraction: float = FRACTION
-        sample で引く行の割合 (0 より大きく 1 以下)
+    fraction: Optional[float] = FRACTION
+        sample で引く行の割合 (0 より大きく 1 以下. seed では使わない)
     loader: Optional[str] = None
         読み込みの名前, None の場合は推定 (load_data と同じ)
     **options: Any
@@ -1007,12 +1009,13 @@ def describe_groups(
     features = encode_rows(frame, encoding)
 
     # 群 (渡した割り当てか, 列の特徴をそのまま k-means で)
+    # 数え方は labels でも確かめる (labels では使わない)
     rng = np.random.default_rng(seed)
     found = None
+    fraction = check_method(stability, fraction)
     if labels is None:
         count = check_count(k, "群の数 k", 2)
         repeats = check_count(repeats, "作り直しの回数 repeats", 1)
-        fraction = check_method(stability, fraction)
         if count > len(frame):
             raise ValueError(
                 f"群の数 {count} が行の数 {len(frame)} より多いです"
@@ -1052,7 +1055,7 @@ def describe_groups(
         "groups": rows,
         "stability": None if found is None else {
             "method": stability, "repeats": repeats,
-            "fraction": fraction if stability == "sample" else None,
+            "fraction": fraction,
             "ari": found["ari"], "ari_min": found["ari_min"],
         },
         "silhouette": silhouette(

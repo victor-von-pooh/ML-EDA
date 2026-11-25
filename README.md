@@ -245,9 +245,9 @@ from ml_eda import describe_groups, export_group_rows, load_items
 columns = ["spend", "visits", "region"]
 summary = describe_groups("customers.csv", columns, k=3)  # JSON にできる辞書
 summary["groups"]                     # 群ごとの rows, share, stability と列の平均か最も多い値. 最後は「全体」
-summary["stability"]                  # 種を変えて作り直した群との一致 (ari, ari_min)
-describe_groups("customers.csv", columns, k=3, stability="sample")  # 行の 8 割を引き直して作り直す数え方
+summary["stability"]                  # 数え方 (method) で作り直した群との一致 (ari, ari_min)
 summary["silhouette"]                 # 群のまとまり
+describe_groups("customers.csv", columns, k=3, stability="sample")  # 既定の seed は種を変える. sample は行の 8 割を引き直して作り直す数え方
 
 # 版 2 のデータセットに書き出して読む (受け持ちは group, 正解は無い)
 export_group_rows("customers.csv", "datasets/customers", columns, id="cid")
