@@ -17,6 +17,9 @@ from ml_eda.itemprep import (
     run_item_steps, to_array
 )
 from ml_eda.loaders import within
+from ml_eda.pinned import (
+    drop_holder, entry_name, entry_state, make_holder, move_into
+)
 from ml_eda.profile import finding, to_json
 from ml_eda.recipe import (
     HIDDEN, STEPS, WANT, category_key, check_recipe_steps, load_recipe,
@@ -1500,20 +1503,25 @@ def write_frame(frame: pd.DataFrame, path: Path) -> str:
 
 
 def start_writing(
-    path: Union[str, Path], overwrite: bool
+    path: Union[str, Path], overwrite: bool, parent: Optional[int] = None
 ) -> tuple[Path, Path]:
     """
     データセットを書き出す一時ディレクトリを作る関数
 
-    版 1 と版 2 の書き出しで共通. 隣の一時ディレクトリに書いてから
-    finish_writing で入れ替える
+    版 1 と版 2 の書き出しで共通. 一時ディレクトリに書いてから
+    finish_writing で入れ替える. parent を渡すと, 一時ディレクトリは
+    途中の場所を含まない手元の一時の場所に作り, 既にある場所は開いた親
+    に対してリンクをたどらずに確かめる
 
     Parameters
     ----------
     path: Union[str, Path]
-        書き出すディレクトリ
+        書き出すディレクトリ (parent を渡すと最後の部分が親の中の名前.
+        途中は使わないので, 開いた親と合うことは使う側が確かめる)
     overwrite: bool
         既にあるディレクトリを置き換えるか
+    parent: Optional[int] = None
+        使う側が開いた, 書き出す場所の親のディレクトリの記述子
 
     Returns
     ----------
@@ -1525,9 +1533,24 @@ def start_writing(
     FileExistsError
         ディレクトリが既にあり, overwrite が False の場合と, データセット
         ではない (dataset.yaml の無い) ディレクトリを置き換えようとした場合
+    ValueError
+        parent を渡し, 最後の部分が親の中の名前にできない場合
     """
-    # 置き換えられるのは, 前に書き出したデータセットだけ
+    # 開いた親に書く場合 (途中の場所は使わない)
     final = Path(path).expanduser()
+    if parent is not None:
+        name = entry_name(final)
+        state = entry_state(parent, name)
+        if state is not None and not overwrite:
+            raise FileExistsError(f"{final} は既にあります")
+        if state == "other":
+            raise FileExistsError(
+                f"{final} はデータセットではないので置き換えません"
+            )
+        places = (final, make_holder(name))
+        return places
+
+    # 置き換えられるのは, 前に書き出したデータセットだけ
     if final.exists():
         if not overwrite:
             raise FileExistsError(f"{final} は既にあります")
@@ -1546,7 +1569,32 @@ def start_writing(
     return places
 
 
-def finish_writing(target: Path, final: Path, info: dict) -> None:
+def drop_writing(target: Path, parent: Optional[int] = None) -> None:
+    """
+    書き出しに失敗した一時ディレクトリを消す関数
+
+    Parameters
+    ----------
+    target: Path
+        start_writing が返した一時ディレクトリ
+    parent: Optional[int] = None
+        start_writing に渡した親の記述子 (渡していれば手元の一時の場所
+        ごと消す)
+
+    Returns
+    ----------
+    None
+    """
+    # 開いた親に書く場合は手元の一時の場所ごとの消去
+    if parent is not None:
+        drop_holder(target)
+        return
+    shutil.rmtree(target, ignore_errors=True)
+
+
+def finish_writing(
+    target: Path, final: Path, info: dict, parent: Optional[int] = None
+) -> None:
     """
     説明を書き, 一時ディレクトリを書き出す場所に入れ替える関数
 
@@ -1558,16 +1606,28 @@ def finish_writing(target: Path, final: Path, info: dict) -> None:
         書き出す場所
     info: dict
         dataset.yaml の中身
+    parent: Optional[int] = None
+        start_writing に渡した親の記述子 (渡していれば, 親に対してリンク
+        をたどらずに入れ替える)
 
     Returns
     ----------
     None
+
+    Raises
+    ----------
+    FileExistsError
+        parent を渡し, 書き出す場所がデータセットではないものに替わった
+        場合
     """
     # 説明は最後に書き, 前のデータセットと入れ替える
     (target / "dataset.yaml").write_text(
         yaml.safe_dump(info, allow_unicode=True, sort_keys=False),
         encoding="utf-8"
     )
+    if parent is not None:
+        move_into(target, parent, entry_name(final), final)
+        return
     if final.exists():
         shutil.rmtree(final)
     target.rename(final)
@@ -1643,7 +1703,8 @@ def shared_source(data: Data) -> dict:
 
 def export_dataset(
     data: Data, recipe: Union[str, Path, dict], path: Union[str, Path],
-    name: Optional[str] = None, overwrite: bool = False
+    name: Optional[str] = None, overwrite: bool = False,
+    parent: Optional[int] = None
 ) -> dict:
     """
     前処理して分割したデータを, 学習用のディレクトリに書き出す関数
@@ -1660,6 +1721,11 @@ def export_dataset(
         データセットの名前 (省略するとディレクトリの名前)
     overwrite: bool = False
         既にあるディレクトリを置き換えるか
+    parent: Optional[int] = None
+        使う側が開いた, 書き出す場所の親のディレクトリの記述子 (渡すと
+        path の最後の部分を親の中の名前とし, 途中の場所をたどらずに書く.
+        path の途中は使わないので, 開いた親と合うことは使う側が確かめる.
+        閉じるのは使う側)
 
     Returns
     ----------
@@ -1671,52 +1737,56 @@ def export_dataset(
     FileExistsError
         ディレクトリが既にあり, overwrite が False の場合と, データセット
         ではない (dataset.yaml の無い) ディレクトリを置き換えようとした場合
+    ValueError
+        parent を渡し, path の最後の部分が親の中の名前にできない場合
     """
-    # 隣の一時ディレクトリで前処理 (中身の配列も 1 件ずつここに書く) を
+    # 一時ディレクトリで前処理 (中身の配列も 1 件ずつここに書く) を
     # 済ませてから入れ替える. 失敗したら一時ディレクトリを消す
-    final, target = start_writing(path, overwrite)
+    final, target = start_writing(path, overwrite, parent)
     try:
         prepared = prepare(data, recipe, item_dir=target)
-    except Exception:
-        shutil.rmtree(target, ignore_errors=True)
-        raise
-    splits = {}
-    for split, frame in prepared.frames.items():
-        splits[split] = {
-            "file": write_frame(frame, target / split),
-            "rows": int(len(frame)),
-        }
-        if split in prepared.arrays:
-            splits[split]["items"] = f"{split}_items.npy"
-            splits[split]["shape"] = list(prepared.arrays[split].shape)
-    (target / "recipe.yaml").write_text(
-        yaml.safe_dump(to_plain(prepared.recipe), allow_unicode=True,
-                       sort_keys=False),
-        encoding="utf-8"
-    )
+        splits = {}
+        for split, frame in prepared.frames.items():
+            splits[split] = {
+                "file": write_frame(frame, target / split),
+                "rows": int(len(frame)),
+            }
+            if split in prepared.arrays:
+                splits[split]["items"] = f"{split}_items.npy"
+                splits[split]["shape"] = list(prepared.arrays[split].shape)
+        (target / "recipe.yaml").write_text(
+            yaml.safe_dump(to_plain(prepared.recipe), allow_unicode=True,
+                           sort_keys=False),
+            encoding="utf-8"
+        )
 
-    # 説明
-    first = next(iter(prepared.frames.values()))
-    reference = prepared.frames.get("train", first)
-    info = {
-        "format_version": DATASET_FORMAT_VERSION,
-        "name": name or final.name,
-        "created_at": dt.datetime.now().astimezone().isoformat(),
-        "kind": data.kind,
-        "task": prepared.recipe["task"],
-        "target": prepared.target,
-        "features": [
-            {"name": str(c), "dtype": str(reference[c].dtype)}
-            for c in prepared.features
-        ],
-        "classes": prepared.classes,
-        "text_column": data.roles.get("text") if data.kind == "text" else None,
-        "splits": splits,
-        "source": to_plain(shared_source(data)),
-        "recipe": "recipe.yaml",
-        "notes": prepared.notes,
-    }
-    finish_writing(target, final, info)
+        # 説明
+        first = next(iter(prepared.frames.values()))
+        reference = prepared.frames.get("train", first)
+        info = {
+            "format_version": DATASET_FORMAT_VERSION,
+            "name": name or final.name,
+            "created_at": dt.datetime.now().astimezone().isoformat(),
+            "kind": data.kind,
+            "task": prepared.recipe["task"],
+            "target": prepared.target,
+            "features": [
+                {"name": str(c), "dtype": str(reference[c].dtype)}
+                for c in prepared.features
+            ],
+            "classes": prepared.classes,
+            "text_column": (
+                data.roles.get("text") if data.kind == "text" else None
+            ),
+            "splits": splits,
+            "source": to_plain(shared_source(data)),
+            "recipe": "recipe.yaml",
+            "notes": prepared.notes,
+        }
+        finish_writing(target, final, info, parent)
+    except Exception:
+        drop_writing(target, parent)
+        raise
 
     return info
 
