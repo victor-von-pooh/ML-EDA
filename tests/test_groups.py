@@ -135,7 +135,8 @@ def test_summary_rows_like_the_skeleton(tmp_path: Path) -> None:
 
     # 安定性とまとまり, 欠けの気付き
     assert summary["stability"] == {
-        "method": "seed", "repeats": 5, "ari": 1.0, "ari_min": 1.0
+        "method": "seed", "repeats": 5, "fraction": None, "ari": 1.0,
+        "ari_min": 1.0
     }
     assert summary["silhouette"] > 0.5
     assert any("欠けた値のある行が 2 行" in note
@@ -214,6 +215,13 @@ def test_describe_errors() -> None:
         describe_groups(data, ["x"], k=4)
     with pytest.raises(ValueError, match="repeats"):
         describe_groups(data, ["x"], k=2, repeats=0)
+    for method in ("bootstrap", "Seed", None):
+        with pytest.raises(ValueError, match="数え方 stability"):
+            describe_groups(data, ["x"], k=2, stability=method)
+    for fraction in (0, 1.5, -0.1, True, "0.5", float("nan")):
+        with pytest.raises(ValueError, match="fraction"):
+            describe_groups(data, ["x"], k=2, stability="sample",
+                            fraction=fraction)
     wide = table(pd.DataFrame({"name": [str(i) for i in range(
         MAX_WIDTH + 1
     )]}))
@@ -464,6 +472,53 @@ def test_same_values_as_the_skeleton() -> None:
         0.5271238485158649
     )
     assert summary["silhouette"] == pytest.approx(0.36390241512137544)
+
+
+def test_sample_stability_like_the_skeleton() -> None:
+    """
+    標本を変える数え方 (sample) で, ML-Quest の骨組みの安定性と同じ値に
+    なるかを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 期待値は骨組みの stability (group.stability: sample, 5 回, 学習用の
+    # 行は全ての行, 種 0) に同じ表を渡して求めた値
+    frame = pd.DataFrame({
+        "x": [6.4, 2.7, 0.4, 0.2, 8.1, 9.1, 6.1, 7.3, 5.4, 9.4, 8.2, 0.0],
+        "y": [8.6, 0.3, 7.3, 1.8, 8.6, 5.4, 3.0, 4.2, 0.3, 1.2, 6.7, 6.5],
+        "c": ["a", "b", None, "b", "b", None, None, None, "b", None, None,
+              "b"],
+    })
+    expected = {
+        0.8: (0.47111697896895705, 0.11310190369540872,
+              [0.7666666666666667, 0.58, 0.6464285714285715]),
+        0.5: (0.33987565850181384, 0.11310190369540872,
+              [0.55, 0.48, 0.6409523809523809]),
+    }
+    for fraction, (ari, ari_min, jaccard) in expected.items():
+        summary = describe_groups(table(frame), ["x", "y", "c"], k=3,
+                                  stability="sample", fraction=fraction)
+        assert summary["stability"] == {
+            "method": "sample", "repeats": 5, "fraction": fraction,
+            "ari": pytest.approx(ari), "ari_min": pytest.approx(ari_min),
+        }
+        assert [row["stability"] for row in summary["groups"]] == [
+            *map(pytest.approx, jaccard), None
+        ]
+
+    # 群と行の要約, まとまりは数え方で変わらない
+    seed = describe_groups(table(frame), ["x", "y", "c"], k=3)
+    sample = describe_groups(table(frame), ["x", "y", "c"], k=3,
+                             stability="sample")
+    assert ([{**row, "stability": None} for row in seed["groups"]]
+            == [{**row, "stability": None} for row in sample["groups"]])
+    assert seed["silhouette"] == sample["silhouette"]
 
 
 def test_width_limit_with_labels() -> None:

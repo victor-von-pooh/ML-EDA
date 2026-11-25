@@ -35,6 +35,10 @@ REPEATS = 5
 INITS = 5
 ITERATIONS = 100
 SAMPLE = 2000
+FRACTION = 0.8
+
+# 群の安定性の数え方 (ML-Quest の問題の設定の答え group.stability の値)
+STABILITY_METHODS = ("seed", "sample")
 
 # 符号化した行の幅の上限 (種類の値の多い列で表が大きくなりすぎないため)
 MAX_WIDTH = 1000
@@ -687,11 +691,12 @@ def group_jaccard(
     return scores
 
 
-def stability(
-    points: np.ndarray, labels: np.ndarray, k: int, seed: int, repeats: int
+def measure_stability(
+    points: np.ndarray, labels: np.ndarray, k: int, seed: int, repeats: int,
+    method: str, fraction: float
 ) -> dict:
     """
-    種を変えて群を作り直し, 元の群との一致を数える関数
+    群を作り直し, 元の群との一致を数える関数
 
     Parameters
     ----------
@@ -705,6 +710,11 @@ def stability(
         元の群の乱数の種 (作り直しは seed + 1 + 回の番号)
     repeats: int
         作り直す回数
+    method: str
+        数え方 (seed は種を変えて全ての行で, sample は行の fraction の割合
+        を引き直して作り直す)
+    fraction: float
+        sample で引く行の割合
 
     Returns
     ----------
@@ -712,11 +722,16 @@ def stability(
         ari (調整ランド指数の平均), ari_min (最も低い値), jaccard (群ごと
         の Jaccard 係数の平均. 行の無い群は NaN)
     """
-    # 作り直すたびに別の種 (ML-Quest の骨組みの seed と同じ)
+    # 作り直すたびに別の種. 標本を変えるなら行の一部を引き直す (ML-Quest の
+    # 骨組みの stability と同じ. 骨組みの学習用の行はここでは全ての行)
     scores, overlaps = [], []
     for repeat in range(repeats):
         rng = np.random.default_rng(seed + 1 + repeat)
-        again = assign(points, kmeans(points, k, rng))
+        rows = np.arange(len(points))
+        if method == "sample":
+            size = max(k, int(len(points) * fraction))
+            rows = rng.choice(rows, size, replace=False)
+        again = assign(points, kmeans(points[rows], k, rng))
         scores.append(adjusted_rand(labels, again))
         overlaps.append(group_jaccard(labels, again, k))
     overlaps = np.array(overlaps)
@@ -866,10 +881,51 @@ def check_count(value: Any, label: str, lowest: int) -> int:
     return count
 
 
+def check_method(method: Any, fraction: Any) -> float:
+    """
+    群の安定性の数え方と, 引く行の割合を確かめる関数
+
+    Parameters
+    ----------
+    method: Any
+        数え方 (STABILITY_METHODS のどれか)
+    fraction: Any
+        sample で引く行の割合
+
+    Returns
+    ----------
+    share: float
+        引く行の割合
+
+    Raises
+    ----------
+    ValueError
+        知らない数え方の場合と, 割合が 0 より大きく 1 以下の数でない場合
+    """
+    # 割合は seed でも確かめる (真偽値は数とみなさない)
+    if method not in STABILITY_METHODS:
+        raise ValueError(
+            f"群の安定性の数え方 stability は {', '.join(STABILITY_METHODS)}"
+            f" のどれかにしてください (今は {method})"
+        )
+    number = isinstance(fraction, (int, float, np.integer, np.floating))
+    if (not number or isinstance(fraction, bool)
+            or not 0 < fraction <= 1):
+        raise ValueError(
+            "引く行の割合 fraction は 0 より大きく 1 以下にしてください "
+            f"(今は {fraction})"
+        )
+    share = float(fraction)
+
+    return share
+
+
 def describe_groups(
     source: Union[str, Path, Data, ItemDataset], columns: Any = None,
     k: Optional[int] = None, labels: Any = None, seed: int = 0,
-    repeats: int = REPEATS, loader: Optional[str] = None, **options: Any
+    repeats: int = REPEATS, stability: str = "seed",
+    fraction: float = FRACTION, loader: Optional[str] = None,
+    **options: Any
 ) -> dict:
     """
     学習に通さず, 表の列から群を作るか渡した群を使い, 群の要約を返す関数
@@ -895,6 +951,12 @@ def describe_groups(
         k-means の乱数の種
     repeats: int = REPEATS
         群の安定性を数える作り直しの回数 (1 以上)
+    stability: str = "seed"
+        群の安定性の数え方 (ML-Quest の問題の設定の答え group.stability と
+        同じ値. seed は種を変えて, sample は行の fraction の割合を引き直して
+        作り直す)
+    fraction: float = FRACTION
+        sample で引く行の割合 (0 より大きく 1 以下)
     loader: Optional[str] = None
         読み込みの名前, None の場合は推定 (load_data と同じ)
     **options: Any
@@ -909,7 +971,7 @@ def describe_groups(
     ----------
     ValueError
         列の誤り, 群の数の誤り, 群の数が行の数より多い場合, 符号化した行の
-        幅が大きすぎる場合, 群の割り当ての誤り
+        幅が大きすぎる場合, 群の割り当ての誤り, 安定性の数え方の誤り
     """
     # 表と群を作る列
     if isinstance(source, ItemDataset):
@@ -950,13 +1012,15 @@ def describe_groups(
     if labels is None:
         count = check_count(k, "群の数 k", 2)
         repeats = check_count(repeats, "作り直しの回数 repeats", 1)
+        fraction = check_method(stability, fraction)
         if count > len(frame):
             raise ValueError(
                 f"群の数 {count} が行の数 {len(frame)} より多いです"
             )
         positions = assign(features, kmeans(features, count, rng))
         keys = list(range(count))
-        found = stability(features, positions, count, seed, repeats)
+        found = measure_stability(features, positions, count, seed,
+                                  repeats, stability, fraction)
     else:
         if k is not None:
             raise ValueError(
@@ -987,7 +1051,8 @@ def describe_groups(
         "seed": seed if labels is None else None,
         "groups": rows,
         "stability": None if found is None else {
-            "method": "seed", "repeats": repeats,
+            "method": stability, "repeats": repeats,
+            "fraction": fraction if stability == "sample" else None,
             "ari": found["ari"], "ari_min": found["ari_min"],
         },
         "silhouette": silhouette(
