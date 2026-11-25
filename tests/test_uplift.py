@@ -9,6 +9,7 @@ from ml_eda import (
     model_inputs, prepare
 )
 from ml_eda.data import Data
+from ml_eda.uplift import splits_constant
 
 
 def make_coupons(count: int = 400, treated_rate: float = 0.5) -> pd.DataFrame:
@@ -200,7 +201,7 @@ def test_binary_outcome(tmp_path: Path) -> None:
     assert info["task"] == "uplift"
     assert info["classes"] == []
 
-    # 行の id と処置は元の値で, 学習に使う列から除く (auto の標準化も)
+    # 元の値の行の id と処置と, 学習に使う列からの除外 (auto の標準化も)
     merged = pd.concat(dataset.frames.values())
     assert sorted(merged["customer_id"]) == sorted(frame["customer_id"])
     lookup = frame.set_index("customer_id")["coupon"]
@@ -237,7 +238,7 @@ def test_binary_outcome(tmp_path: Path) -> None:
     assert inputs["outputs"] == 1
     assert inputs["inputs"][0]["shape"] == [None, len(dataset.features)]
 
-    # 推論のときは処置と結果の列が無くても前処理をかけられる
+    # 処置と結果の列の無い推論のときの前処理
     fresh = frame.drop(columns=["coupon", "bought"]).head(5)
     applied = dataset.transform(fresh)
     assert list(applied[dataset.features].columns) == dataset.features
@@ -306,7 +307,7 @@ def test_small_group_in_all_splits() -> None:
     with pytest.raises(ValueError, match="処置の群の行が 2 行"):
         prepare(table_data(frame), uplift_recipe())
 
-    # 割合が 0 の分割には置かない
+    # 割合が 0 の分割の除外
     recipe = uplift_recipe(split={
         "method": "stratified", "valid": 0.2, "test": 0.0, "seed": 0
     })
@@ -314,11 +315,10 @@ def test_small_group_in_all_splits() -> None:
     assert set(prepared.frames) == {"train", "valid"}
 
 
-def test_keep_and_filtered_treatment(tmp_path: Path) -> None:
+def test_keep_and_dropped_treatment(tmp_path: Path) -> None:
     """
-    結果の欠けた行を unlabeled の分割に残し, 処置の欠けた行を分割の前の
-    手順で落とせ, 処置の列を手順で落としても元の値が残ることを確かめる
-    関数
+    結果の欠けた行を unlabeled の分割に残し, 処置の列を手順で落としても
+    元の値が残ることを確かめる関数
 
     Parameters
     ----------
@@ -329,24 +329,21 @@ def test_keep_and_filtered_treatment(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 結果の欠けた 20 行と, 処置の欠けた 5 行
+    # 結果の欠けた 20 行
     frame = make_coupons()
     frame["bought"] = frame["bought"].astype(float)
     frame.loc[:19, "bought"] = np.nan
-    frame["coupon"] = frame["coupon"].astype(float)
-    frame.loc[100:104, "coupon"] = np.nan
     recipe = uplift_recipe(
         split={"method": "stratified", "valid": 0.2, "test": 0.2,
                "seed": 0, "unlabeled": "keep"}
     )
     recipe["steps"] = [
-        {"op": "filter_rows", "column": "coupon", "compare": "notna"},
         {"op": "drop_columns", "columns": ["amount", "coupon"]},
     ] + recipe["steps"][1:]
     info = export_dataset(table_data(frame), recipe, tmp_path / "ds")
     dataset = load_dataset(tmp_path / "ds")
 
-    # unlabeled の分割の処置は元の値で, 平均は None
+    # unlabeled の分割の処置の元の値と, None の平均
     assert len(dataset.frames["unlabeled"]) == 20
     assert set(dataset.frames["unlabeled"]["coupon"]) <= {0, 1}
     entry = info["uplift"]["splits"]["unlabeled"]
@@ -356,14 +353,68 @@ def test_keep_and_filtered_treatment(tmp_path: Path) -> None:
         len(item) for name, item in dataset.frames.items()
         if name != "unlabeled"
     )
-    assert labeled == 375
+    assert labeled == 380
     assert dataset.frames["train"]["coupon"].dtype == np.int64
     assert info["uplift"]["unlabeled"] == "keep"
 
-    # 処置の欠けた行を落とさなければ誤り
-    recipe["steps"] = recipe["steps"][1:]
+
+@pytest.mark.parametrize("unlabeled", ["drop", "keep"])
+def test_missing_treatment(unlabeled: str) -> None:
+    """
+    処置の欠けた行を, 結果も欠けた行と手順で落とす行も含めて, 結果の
+    欠けの扱いより先に誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    unlabeled: str
+        結果の欠けた行の扱い
+
+    Returns
+    ----------
+    None
+    """
+    # 処置と結果の両方が欠けた 1 行
+    frame = make_coupons()
+    frame["bought"] = frame["bought"].astype(float)
+    frame["coupon"] = frame["coupon"].astype(float)
+    frame.loc[0, ["bought", "coupon"]] = np.nan
+    recipe = uplift_recipe(split={
+        "method": "stratified", "valid": 0.2, "test": 0.2, "seed": 0,
+        "unlabeled": unlabeled
+    })
     with pytest.raises(ValueError, match="処置の列 coupon に欠け"):
         prepare(table_data(frame), recipe)
+
+    # 手順で落とす行の欠けも誤り
+    recipe["steps"] = [
+        {"op": "filter_rows", "column": "coupon", "compare": "notna"},
+    ] + recipe["steps"]
+    with pytest.raises(ValueError, match="処置の列 coupon に欠け"):
+        prepare(table_data(frame), recipe)
+
+
+@pytest.mark.parametrize("step", [
+    {"op": "standardize", "columns": ["age", "coupon"]},
+    {"op": "one_hot", "columns": ["coupon"]},
+])
+def test_treatment_in_steps(step: dict) -> None:
+    """
+    手順の columns に処置の列を名前で書くと誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    step: dict
+        処置の列を書いた手順
+
+    Returns
+    ----------
+    None
+    """
+    # 名前で書いた処置の列
+    recipe = uplift_recipe()
+    recipe["steps"] = recipe["steps"][:1] + [step]
+    with pytest.raises(ValueError, match="処置の列 coupon は手順で"):
+        prepare(table_data(make_coupons()), recipe)
 
 
 @pytest.mark.parametrize("change, message", [
@@ -392,7 +443,7 @@ def test_recipe_errors(change: dict, message: str) -> None:
     ----------
     None
     """
-    # 項目の上書き (None は項目を消す)
+    # 項目の上書き (None は項目の削除)
     recipe = uplift_recipe()
     for key, value in change.items():
         if value is None:
@@ -613,3 +664,52 @@ def test_groups_after_steps() -> None:
     ]
     with pytest.raises(ValueError, match="処置の群の行がありません"):
         prepare(table_data(make_coupons()), recipe)
+
+
+def test_splits_constant() -> None:
+    """
+    片方の群でだけ値が変わる列を, 値が 1 つの群だけに 5 行以上を求めて
+    見分けることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 値が 1 つの対照の群 (6 行) と, 値が変わる処置の群 (2 行)
+    treated = np.array([True, True] + [False] * 6)
+    column = pd.Series([1, 2] + [0] * 6)
+    assert splits_constant(column, treated)
+
+    # 値が 1 つの側が 5 行未満なら見ない
+    column = pd.Series([1, 1] + [0, 1, 2, 3, 4, 5])
+    assert not splits_constant(column, treated)
+
+    # 両方の群で値が変わる列
+    column = pd.Series([1, 2] + [0, 1, 0, 1, 0, 1])
+    assert not splits_constant(column, treated)
+
+
+def test_describe_kind_rows() -> None:
+    """
+    要約の結果の種類を, 書き出しと同じく結果の分かる全ての行で決めることを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 処置の欠けた行にだけ 0 と 1 でない結果
+    frame = make_coupons()
+    frame["coupon"] = frame["coupon"].astype(float)
+    frame["bought"] = frame["bought"].astype(float)
+    frame.loc[0, ["coupon", "bought"]] = [np.nan, 2.5]
+    summary = describe_uplift(table_data(frame), "coupon", "bought")
+    assert summary["outcome_kind"] == "amount"

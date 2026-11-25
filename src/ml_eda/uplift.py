@@ -54,6 +54,7 @@ def zero_one(values: pd.Series) -> tuple[Optional[pd.Series], list[str]]:
         0 と 1 に読めない値の例 (最大 3 つ)
     """
     # 真偽値と, 0 と 1 だけの数
+    labels: Optional[pd.Series] = None
     if pd.api.types.is_bool_dtype(values):
         labels = values.astype("int64")
         return labels, []
@@ -63,16 +64,16 @@ def zero_one(values: pd.Series) -> tuple[Optional[pd.Series], list[str]]:
     )
     if not numeric:
         others = values.astype(str).unique().tolist()[:3]
-        return None, others
+        return labels, others
     others = [
         str(value) for value in values.unique().tolist()
         if value not in (0, 1)
     ][:3]
     if others:
-        return None, others
+        return labels, others
     labels = values.astype("int64")
 
-    return labels, []
+    return labels, others
 
 
 def treatment_values(values: pd.Series, name: str) -> pd.Series:
@@ -100,8 +101,8 @@ def treatment_values(values: pd.Series, name: str) -> pd.Series:
     missing = int(values.isna().sum())
     if missing:
         raise ValueError(
-            f"処置の列 {name} に欠けがあります ({missing} 行). 前もって"
-            "落としてください (filter_rows の compare: isna など)"
+            f"処置の列 {name} に欠けがあります ({missing} 行). 読み込む"
+            "前の表から落としてください"
         )
     labels, others = zero_one(values)
     if labels is None:
@@ -160,7 +161,7 @@ def choose_outcome_kind(
             "買ったかは 0 と 1, 買った額は数にしてください"
         )
 
-    # 書かなければ, 0 と 1 だけなら binary
+    # 書かなければ, 0 と 1 だけの場合の binary
     chosen = kind or ("binary" if labels is not None else "amount")
 
     return chosen
@@ -182,7 +183,7 @@ def outcome_values(values: pd.Series, kind: str) -> pd.Series:
     converted: pd.Series
         binary は int64 の 0 と 1, amount は数のまま
     """
-    # binary は 0 と 1 の整数, amount はそのまま
+    # binary は 0 と 1 の整数, amount は元の数
     if kind == "binary":
         converted = values.astype("int64")
         return converted
@@ -216,7 +217,7 @@ def uplift_table(
     ValueError
         読んだデータに読み込みの名前か設定を渡した場合と, 表でない場合
     """
-    # 読んだデータはそのまま使う (読み方は読んだときのもの)
+    # 読んだデータ (読み方は読んだときのもの)
     if isinstance(source, Data):
         if loader is not None or options:
             raise ValueError(
@@ -257,7 +258,7 @@ def column_of(frame: pd.DataFrame, name: Any, label: str) -> pd.Series:
     ValueError
         列が無いか 2 つ以上ある場合
     """
-    # 同じ名前の列は取り違えるので誤り
+    # 1 つだけある列 (同じ名前の列は取り違えるので誤り)
     count = list(frame.columns).count(str(name))
     if count != 1:
         raise ValueError(f"{label} {name} がありません (か 2 つ以上)")
@@ -293,7 +294,7 @@ def balance_columns(
     ValueError
         渡した列が無いか, 除く列を渡した場合
     """
-    # 省くと, 除く列の他の数, 真偽, カテゴリの列
+    # 省いた場合の, 除く列の他の数, 真偽, カテゴリの列
     if columns is None:
         chosen = []
         for name in frame.columns:
@@ -333,7 +334,7 @@ def smd(treated: np.ndarray, control: np.ndarray) -> Optional[float]:
         (処置の群の平均 − 対照の群の平均) / √((分散 + 分散) / 2). 群に値が
         2 つ未満か, 分母が 0 で平均が違う場合は None
     """
-    # 不偏の分散で, 分母が 0 なら平均が同じかで決める
+    # 不偏の分散と, 分母が 0 の場合の扱い
     if len(treated) < 2 or len(control) < 2:
         return None
     difference = float(treated.mean() - control.mean())
@@ -368,7 +369,7 @@ def column_balance(
     result: dict
         column, type, smd, value (カテゴリの列で SMD の最も大きい値)
     """
-    # 数と, 数か真偽値の 2 値の列は値のまま
+    # 数と, 数か真偽値の 2 値の列の値
     result = {"column": str(column.name), "type": kind, "smd": None,
               "value": None}
     known = column.notna().to_numpy()
@@ -382,7 +383,7 @@ def column_balance(
         )
         return result
 
-    # カテゴリの列は値ごとの 0 と 1 の割合 (値の多い列は求めない)
+    # カテゴリの列の値ごとの 0 と 1 の割合 (値の多い列は除外)
     text = column.astype(str).to_numpy()
     values = pd.unique(text[known])
     if len(values) > BALANCE_VALUES:
@@ -413,17 +414,17 @@ def splits_constant(column: pd.Series, treated: np.ndarray) -> bool:
     Returns
     ----------
     found: bool
-        両方の群が 5 行以上あり, 片方の値が 1 つ以下でもう片方が 2 つ以上
+        片方の群が 5 行以上で値が 1 つ以下, もう片方の値が 2 つ以上
     """
-    # 群ごとの異なる値の数
-    if treated.sum() < CONSTANT_GROUP_ROWS:
-        return False
-    if (~treated).sum() < CONSTANT_GROUP_ROWS:
-        return False
+    # 群ごとの行の数と異なる値の数 (値が 1 つ以下の側だけ 5 行以上を見る)
     text = column.astype(str).where(column.notna(), None)
-    in_treated = text[treated].nunique()
-    in_control = text[~treated].nunique()
-    found = min(in_treated, in_control) <= 1 < max(in_treated, in_control)
+    found = False
+    for flags in (treated, ~treated):
+        rows = int(flags.sum())
+        one = text[flags].nunique()
+        other = text[~flags].nunique()
+        if rows >= CONSTANT_GROUP_ROWS and one <= 1 < other:
+            found = True
 
     return found
 
@@ -593,14 +594,14 @@ def missing_findings(
     findings: list[dict]
         treatment_missing と outcome_missing の気付き
     """
-    # 処置の欠けは書き出しで誤り, 結果の欠けは落とすか残す
+    # 処置の欠け (書き出しでは誤り) と結果の欠け (落とすか残す)
     findings = []
     if treatment_missing:
         findings.append(finding(
             "warning", "treatment_missing",
             f"処置の列 {treatment} の欠けた行が {treatment_missing} 行あり"
-            "ます. 書き出しでは誤りになるので, 前もって落としてください "
-            "(filter_rows の compare: isna)", [treatment]
+            "ます. 書き出しでは誤りになるので, 読み込む前の表から落として"
+            "ください", [treatment]
         ))
     if outcome_missing:
         findings.append(finding(
@@ -673,7 +674,10 @@ def describe_uplift(
     treatment_missing = int(treat.isna().sum())
     outcome_missing = int((treat.notna() & result.isna()).sum())
     known = (treat.notna() & result.notna()).to_numpy()
-    kind = choose_outcome_kind(result[known], str(outcome), outcome_kind)
+    # 結果の種類は書き出しと同じく, 結果の分かる全ての行で決定
+    kind = choose_outcome_kind(
+        result.dropna(), str(outcome), outcome_kind
+    )
     labels = treatment_values(treat[known], str(treatment))
     values = outcome_values(result[known], kind).astype(float)
     rows = frame[known].reset_index(drop=True)

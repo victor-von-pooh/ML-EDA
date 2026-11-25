@@ -856,8 +856,7 @@ def anomaly_splits(
 
 def row_id_name(data: Data, recipe: dict) -> str:
     """
-    異常の検知と効果を見積もるの行の id の列を確かめて, その名前を返す
-    関数
+    異常の検知と効果を見積もるの行の id の列を確かめて名前を返す関数
 
     Parameters
     ----------
@@ -1031,8 +1030,7 @@ def anomaly_notes(
 
 def treatment_name(data: Data, recipe: dict) -> str:
     """
-    効果を見積もるの処置の列が読み込んだ表にあることを確かめて, その名前を
-    返す関数
+    効果を見積もるの処置の列が表にあるかを確かめて名前を返す関数
 
     Parameters
     ----------
@@ -1145,7 +1143,7 @@ def uplift_target(
     result: pd.DataFrame
         結果の分かる行の表 (binary は int64 の 0 と 1)
     """
-    # 欠けた行は落とす (keep の行は後で unlabeled の分割)
+    # 欠けた行の除去 (keep の行は後で unlabeled の分割)
     labeled = frame[target].notna()
     result = frame[labeled].copy()
     result[target] = outcome_values(frame.loc[labeled, target], kind)
@@ -1233,7 +1231,7 @@ def uplift_splits(
     if kind == "binary":
         keys = keys + "/" + frame[target].astype(str).to_numpy()
 
-    # 層ごとに比例して配る (層化の分割と同じ)
+    # 層ごとの比例配分 (層化の分割と同じ)
     layers = sorted(set(keys))
     members = [np.flatnonzero(keys == layer) for layer in layers]
     sizes = [len(rows) for rows in members]
@@ -1626,9 +1624,11 @@ def run_step(
         ):
             # 時系列の予測では目的の列の過去の値が最も大事な手がかりなので,
             # lag の auto は目的の列も選ぶ (ずらすので未来の値は使わない)
-            chosen = {
-                k: v for k, v in roles.items() if k != "target"
-            } if spec["op"] == "lag" else roles
+            # 処置の列は落とす手順だけで指定可 (書き出しには元の値)
+            dropped = {"target"} if spec["op"] == "lag" else set()
+            if spec["op"] == "drop_columns":
+                dropped.add("treatment")
+            chosen = {k: v for k, v in roles.items() if k not in dropped}
             params["columns"] = resolve_columns(
                 frame, params.get("columns"), chosen,
                 WANT.get(spec["op"], "numeric")
@@ -1701,6 +1701,10 @@ def apply_recipe(
                 frame, target, recipe["split"].get("unlabeled", "drop")
             )
         elif uplift:
+            # 処置の欠けの確かめ (結果の欠けた行を落とす前の全ての行)
+            original_treatment(
+                data, treatment_name(data, recipe), list(range(len(frame)))
+            )
             kind = uplift_kind(data, recipe)
             frame = uplift_target(frame, target, kind)
         else:
@@ -1734,7 +1738,7 @@ def apply_recipe(
     if anomaly:
         frame[SPLIT_COLUMN] = anomaly_splits(frame, split, target)
     elif uplift:
-        # 処置は元の値で確かめる (分割の前の手順で落とした行は除く)
+        # 処置の元の値 (分割の前の手順で落とした行は除く)
         treated = original_treatment(
             data, roles["treatment"], frame[ROW_COLUMN].tolist()
         ).to_numpy() == 1

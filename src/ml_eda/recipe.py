@@ -167,9 +167,9 @@ def resolve_columns(
     Raises
     ----------
     ValueError
-        無い列を指定した場合
+        無い列を指定した場合と, 効果を見積もるの処置の列を指定した場合
     """
-    # 名前の指定はそのまま (無い列は誤り)
+    # 名前の指定はそのまま (無い列と, 処置の列は誤り)
     reserved = {
         roles.get("target"), roles.get("time"), roles.get("id"),
         roles.get("text"), roles.get("treatment")
@@ -179,6 +179,12 @@ def resolve_columns(
         missing = [name for name in names if name not in frame.columns]
         if missing:
             raise ValueError(f"列がありません: {', '.join(missing)}")
+        treatment = roles.get("treatment")
+        if treatment is not None and treatment in names:
+            raise ValueError(
+                f"処置の列 {treatment} は手順で変えられません (書き出しには"
+                "元の値の 0 と 1 を置くため. 落とす drop_columns は使える)"
+            )
         return names
 
     # auto は型で選ぶ
