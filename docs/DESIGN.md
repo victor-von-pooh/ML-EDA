@@ -20,7 +20,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
 | 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
-| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む. 異常の検知の骨組みは異常の検知の表 (`task: anomaly`) を読む. 下の「異常の検知の表」. 群分けの表 (版 2 の `role: group`) は分析の保存で, 学習には使わない. 下の「群分けの表」), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
+| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む. 異常の検知の骨組み (ML-Quest の docs/DESIGN.md の 11 節) は異常の検知の表 (`task: anomaly`) を読む. 下の「異常の検知の表」. 群分けの表 (版 2 の `role: group`) は分析の保存で, 学習には使わない. 下の「群分けの表」), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
 | データの読み方 (`Data.source` の `loader`, `options`, `size`, `modified`) | 持つ | 版を持たない (読み込みの名前と設定, 読んだときの大きさと更新時刻) | ML-Quest (問題の設定の `data` に残し, `size` と `modified` で入れた後にファイルが変わったかを確かめる), ML-Fathom. 下の「読み込み」と「データの形」の `source` |
 | 1 件の場所 (`Data.source` の `root` と `frame` の `path`) | 持つ | 版を持たない (下の形) | ML-Fathom (1 件の中身を読む前に, 読み込んだディレクトリの中かを確かめる), ML-Inference (撮影の 1 件の場所). 下の「データの形」の `source` |
 | 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の値の決まり (`convention.shift`) は, 見本の一覧の版 2 でこれと同じ向き (ML-Found の `load_samples` は逆の向きの版 1 を版 2 の意味に写して返す) |
@@ -476,7 +476,7 @@ split:
 
 ### 異常の検知の表 (`task: anomaly`)
 
-正常の行が多く, 異常の正解が無いか少しだけある表 (機械のセンサの値や取引の記録など) を, 正常の行だけで学ぶ (自己符号化器の再構成の誤差か, 距離に基づく度合い) ために書き出す. 1 件 = 1 行で正解は列 1 つ (異常か正常か) なので, 版 2 の受け持ちではなく版 1 の `task: anomaly` で書く (学習のスクリプト (ML-Quest の異常の検知の骨組み) と推論 (ML-Inference) が, `load_dataset` の `arrays`, `tensors`, `transform` をそのまま使えるように).
+正常の行が多く, 異常の正解が無いか少しだけある表 (機械のセンサの値や取引の記録など) を, 正常の行だけで学ぶ (自己符号化器の再構成の誤差か, 距離に基づく度合い) ために書き出す. 1 件 = 1 行で正解は列 1 つ (異常か正常か) なので, 版 2 の受け持ちではなく版 1 の `task: anomaly` で書く (学習のスクリプト (ML-Quest の docs/DESIGN.md の 11 節「異常の検知の骨組み」) と推論 (ML-Inference) が, `load_dataset` の `arrays`, `tensors`, `transform` をそのまま使えるように).
 
 ```yaml
 format_version: 1
