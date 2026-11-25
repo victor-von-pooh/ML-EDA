@@ -14,7 +14,10 @@ from ml_eda.itemprep import ITEM_STEPS
 FORMAT_VERSION = 1
 
 # タスクの種類
-TASKS = ("classification", "regression", "forecasting", "anomaly", "none")
+TASKS = (
+    "classification", "regression", "forecasting", "anomaly", "uplift",
+    "none"
+)
 
 # 分割のしかた
 SPLIT_METHODS = (
@@ -28,6 +31,15 @@ UNLABELED_MODES = ("drop", "keep", "normal")
 
 # 異常の検知の分割のしかた (正常の行を無作為に分ける)
 ANOMALY_METHODS = ("random",)
+
+# 効果を見積もるの分割のしかた (処置で層を作る)
+UPLIFT_METHODS = ("stratified",)
+
+# 効果を見積もるの結果の種類 (買ったかの 0 と 1 か, 買った額)
+OUTCOME_KINDS = ("binary", "amount")
+
+# 行の id の列 (レシピの id) を書けるタスク
+ID_TASKS = ("anomaly", "uplift")
 
 
 @dataclass
@@ -155,18 +167,24 @@ def resolve_columns(
     Raises
     ----------
     ValueError
-        無い列を指定した場合
+        無い列を指定した場合と, 効果を見積もるの処置の列を指定した場合
     """
-    # 名前の指定はそのまま (無い列は誤り)
+    # 名前の指定はそのまま (無い列と, 処置の列は誤り)
     reserved = {
         roles.get("target"), roles.get("time"), roles.get("id"),
-        roles.get("text")
+        roles.get("text"), roles.get("treatment")
     }
     if spec not in (None, "auto"):
         names = [spec] if isinstance(spec, str) else list(spec)
         missing = [name for name in names if name not in frame.columns]
         if missing:
             raise ValueError(f"列がありません: {', '.join(missing)}")
+        treatment = roles.get("treatment")
+        if treatment is not None and treatment in names:
+            raise ValueError(
+                f"処置の列 {treatment} は手順で変えられません (書き出しには"
+                "元の値の 0 と 1 を置くため. 落とす drop_columns は使える)"
+            )
         return names
 
     # auto は型で選ぶ
@@ -1462,7 +1480,8 @@ def check_anomaly_recipe(
     Raises
     ----------
     ValueError
-        異常の検知でないのに id か normal を書いた場合, 異常の検知で
+        異常の検知と効果を見積もるでないのに id を書いた場合, 異常の
+        検知でないのに normal を書いた場合, 異常の検知で
         分割のしかたが random でない場合, id が文字でない場合
     """
     # 異常の検知だけの書き方
@@ -1472,10 +1491,15 @@ def check_anomaly_recipe(
             "split.unlabeled: normal は異常の検知 (task: anomaly) だけで"
             "書けます"
         )
-    if not anomaly and "id" in recipe:
+    if task not in ID_TASKS and "id" in recipe:
         raise ValueError(
-            "レシピの id (行の id の列) は異常の検知 (task: anomaly) だけで"
-            "書けます"
+            "レシピの id (行の id の列) は異常の検知 (task: anomaly) と効果を"
+            "見積もる (task: uplift) だけで書けます"
+        )
+    name = recipe.get("id")
+    if "id" in recipe and (not isinstance(name, str) or not name):
+        raise ValueError(
+            f"レシピの id は行の id の列の名前 (文字) にしてください: {name}"
         )
     if not anomaly:
         return
@@ -1486,10 +1510,73 @@ def check_anomaly_recipe(
             "異常の検知の分割のしかたは random だけです (正常の行を無作為に"
             f"分け, 異常の行を検証用とテスト用に置く): {method}"
         )
-    name = recipe.get("id")
-    if "id" in recipe and (not isinstance(name, str) or not name):
+
+
+def check_uplift_recipe(recipe: dict, task: str, method: str) -> None:
+    """
+    効果を見積もるだけの書き方 (treatment, outcome) と, 効果を見積もるの
+    結果の列, 処置の列, 分割のしかたを確かめる関数
+
+    Parameters
+    ----------
+    recipe: dict
+        読み込んだレシピ
+    task: str
+        タスク
+    method: str
+        分割のしかた
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        効果を見積もるでないのに treatment か outcome を書いた場合, 効果を
+        見積もるで結果の列か処置の列が無い場合, 2 つが同じ列の場合,
+        結果の種類の誤りの場合, 分割のしかたが stratified でない場合
+    """
+    # 効果を見積もるだけの書き方
+    uplift = task == "uplift"
+    for key in ("treatment", "outcome"):
+        if not uplift and key in recipe:
+            raise ValueError(
+                f"レシピの {key} は効果を見積もる (task: uplift) だけで"
+                "書けます"
+            )
+    if not uplift:
+        return
+
+    # 結果の列, 処置の列, 結果の種類
+    target = recipe.get("target")
+    treatment = recipe.get("treatment")
+    if not isinstance(target, str) or not target:
         raise ValueError(
-            f"レシピの id は行の id の列の名前 (文字) にしてください: {name}"
+            "効果を見積もる (task: uplift) には結果の列 (target) が要ります"
+        )
+    if not isinstance(treatment, str) or not treatment:
+        raise ValueError(
+            "効果を見積もる (task: uplift) には処置の列 (treatment) の名前 "
+            f"(文字) が要ります: {treatment}"
+        )
+    if treatment in (target, recipe.get("id")):
+        raise ValueError(
+            f"処置の列 {treatment} は, 結果の列と行の id の列と違う列に"
+            "してください"
+        )
+    outcome = recipe.get("outcome")
+    if "outcome" in recipe and outcome not in OUTCOME_KINDS:
+        raise ValueError(
+            "レシピの outcome (結果の種類) は binary か amount にして"
+            f"ください: {outcome}"
+        )
+
+    # 分割のしかた (全ての分割に処置の群と対照の群を置く)
+    if method not in UPLIFT_METHODS:
+        raise ValueError(
+            "効果を見積もるの分割のしかたは stratified だけです (処置で層を"
+            f"作り, 全ての分割に処置の群と対照の群を置く): {method}"
         )
 
 
@@ -1512,7 +1599,7 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     ValueError
         新しい版, 知らない手順, 手順と中身の手順の知らない引数と空 (None)
         の引数, 形の誤りの場合と, 目的の列の無いレシピで split.unlabeled
-        が keep の場合, 異常の検知の決まりに合わない場合
+        が keep の場合, 異常の検知と効果を見積もるの決まりに合わない場合
     """
     # ファイルなら読み込み
     if isinstance(recipe, (str, Path)):
@@ -1557,6 +1644,7 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
             f"{unlabeled}"
         )
     check_anomaly_recipe(loaded, task, method, unlabeled)
+    check_uplift_recipe(loaded, task, method)
 
     # keep は目的の列を書いたレシピだけ (読み込んだ時点で分かるように.
     # 書かないと前と後の様子と書き出しの全てで誤りになるため)

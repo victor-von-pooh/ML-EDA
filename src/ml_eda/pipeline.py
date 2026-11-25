@@ -26,6 +26,9 @@ from ml_eda.recipe import (
     HIDDEN, STEPS, WANT, category_key, check_recipe_steps, load_recipe,
     resolve_columns, to_plain
 )
+from ml_eda.uplift import (
+    UPLIFT_KINDS, choose_outcome_kind, outcome_values, treatment_values
+)
 
 # データセットの説明の形式の版 (load_dataset が読む, 1 件 = 1 行の約束.
 # ML-Inference が写しの確かめに使うので, 版 2 を足しても 1 のまま)
@@ -58,9 +61,12 @@ STRATA_LIMIT = 20
 # グループでまとめる分割のしかた (分割の件数が割合から外れうる)
 GROUP_METHODS = ("group", "group_time", "stratified_group")
 
-# 異常の検知で, レシピに id が無い場合の行の id の列 (読み込んだ表の
-# 行の位置)
+# 異常の検知と効果を見積もるで, レシピに id が無い場合の行の id の列
+# (読み込んだ表の行の位置)
 ANOMALY_ID = "row_id"
+
+# 行の id の列を置くタスク
+ID_TASKS = ("anomaly", "uplift")
 
 # 異常の検知で書き出せる種類
 ANOMALY_KINDS = ("table", "timeseries")
@@ -125,6 +131,9 @@ class Prepared:
     # 異常の検知の説明 (行の id の列, 正解の有る無し, 分割ごとの行の数.
     # 異常の検知でなければ None)
     anomaly: Optional[dict] = None
+    # 効果を見積もるの説明 (行の id の列, 処置の列, 結果の種類, 分割ごとの
+    # 群の行の数と結果の平均. 効果を見積もるでなければ None)
+    uplift: Optional[dict] = None
 
 
 def split_counts(count: int, valid: float, test: float) -> tuple[int, int]:
@@ -845,9 +854,9 @@ def anomaly_splits(
     return assigned
 
 
-def anomaly_id(data: Data, recipe: dict) -> str:
+def row_id_name(data: Data, recipe: dict) -> str:
     """
-    異常の検知の行の id の列を確かめて, その名前を返す関数
+    異常の検知と効果を見積もるの行の id の列を確かめて名前を返す関数
 
     Parameters
     ----------
@@ -1017,6 +1026,348 @@ def anomaly_notes(
             notes.append(NO_ANOMALY_NOTE.format(split=name))
 
     return notes
+
+
+def treatment_name(data: Data, recipe: dict) -> str:
+    """
+    効果を見積もるの処置の列が表にあるかを確かめて名前を返す関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        読み込んだレシピ
+
+    Returns
+    ----------
+    name: str
+        処置の列の名前
+
+    Raises
+    ----------
+    ValueError
+        列が無いか 2 つ以上ある場合
+    """
+    # 1 つだけある列
+    name = str(recipe["treatment"])
+    columns = [str(column) for column in data.frame.columns]
+    if columns.count(name) != 1:
+        raise ValueError(f"処置の列 {name} がありません (か 2 つ以上)")
+
+    return name
+
+
+def original_treatment(
+    data: Data, name: str, rows: list[int]
+) -> pd.Series:
+    """
+    処置の列の, 元の表での値を 0 と 1 の整数にして返す関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    name: str
+        処置の列
+    rows: list[int]
+        元のデータでの行の位置
+
+    Returns
+    ----------
+    values: pd.Series
+        行ごとの int64 の 0 と 1 (位置の順. 0 から始まる番号)
+
+    Raises
+    ----------
+    ValueError
+        欠けがある場合と, 0 と 1 (か真偽値) でない値がある場合
+    """
+    # 元の値の確かめと 0 と 1
+    columns = [str(column) for column in data.frame.columns]
+    column = data.frame.iloc[list(rows), columns.index(name)]
+    values = treatment_values(column.reset_index(drop=True), name)
+
+    return values
+
+
+def uplift_kind(data: Data, recipe: dict) -> str:
+    """
+    効果を見積もるの結果の種類を, レシピか結果の列の値から決める関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        読み込んだレシピ (target, outcome)
+
+    Returns
+    ----------
+    kind: str
+        binary か amount
+
+    Raises
+    ----------
+    ValueError
+        結果の列が無い場合と, 値が結果の種類に合わない場合
+    """
+    # 読み込んだ表の結果の列の欠けの無い値
+    target = str(recipe["target"])
+    columns = [str(column) for column in data.frame.columns]
+    if columns.count(target) != 1:
+        raise ValueError(f"結果の列 {target} がありません (か 2 つ以上)")
+    values = data.frame.iloc[:, columns.index(target)].dropna()
+    kind = choose_outcome_kind(values, target, recipe.get("outcome"))
+
+    return kind
+
+
+def uplift_target(
+    frame: pd.DataFrame, target: str, kind: str
+) -> pd.DataFrame:
+    """
+    効果を見積もるの結果の欠けた行を落とし, 結果を書き出す型にする関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        読み込んだ表
+    target: str
+        結果の列
+    kind: str
+        結果の種類 (binary か amount)
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        結果の分かる行の表 (binary は int64 の 0 と 1)
+    """
+    # 欠けた行の除去 (keep の行は後で unlabeled の分割)
+    labeled = frame[target].notna()
+    result = frame[labeled].copy()
+    result[target] = outcome_values(frame.loc[labeled, target], kind)
+
+    return result
+
+
+def move_one(
+    assigned: np.ndarray, members: np.ndarray, keys: np.ndarray,
+    donor: str, name: str, rng: np.random.Generator
+) -> None:
+    """
+    群の行を 1 つ, 別の分割から群の行の無い分割に移す関数
+
+    移すのは, 移す元の分割の中で群の行の最も多い層の行を 1 つ無作為に
+    (同じ数なら層の値の文字の順の先)
+
+    Parameters
+    ----------
+    assigned: np.ndarray
+        行ごとの分割の名前 (書き換える)
+    members: np.ndarray
+        群の行の位置
+    keys: np.ndarray
+        行ごとの層の値
+    donor: str
+        移す元の分割
+    name: str
+        移す先の分割
+    rng: np.random.Generator
+        行を選ぶ乱数
+
+    Returns
+    ----------
+    None
+    """
+    # 移す元の群の行の, 最も多い層
+    pool = members[assigned[members] == donor]
+    layers, counts = np.unique(keys[pool], return_counts=True)
+    layer = layers[int(np.argmax(counts))]
+    candidates = pool[keys[pool] == layer]
+    chosen = int(candidates[int(rng.integers(len(candidates)))])
+    assigned[chosen] = name
+
+
+def uplift_splits(
+    frame: pd.DataFrame, split: dict, target: str, kind: str,
+    treated: np.ndarray
+) -> pd.Series:
+    """
+    効果を見積もるの分割 (処置で層を作り, 全ての分割に処置の群と対照の群
+    を置く) をする関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        結果の分かる行の表
+    split: dict
+        valid, test (割合), seed
+    target: str
+        結果の列
+    kind: str
+        結果の種類 (binary は処置と結果の組で層を作る)
+    treated: np.ndarray
+        行ごとの処置の群か (真偽)
+
+    Returns
+    ----------
+    assigned: pd.Series
+        行ごとの分割の名前
+
+    Raises
+    ----------
+    ValueError
+        割合の誤りの場合と, 群の行が置く分割の数より少ない場合
+    """
+    # 割合の確認と層 (binary は処置と結果の組)
+    valid = float(split.get("valid", 0.2))
+    test = float(split.get("test", 0.0))
+    if valid < 0 or test < 0 or valid + test >= 1:
+        raise ValueError("valid と test の割合は 0 以上で, 合計を 1 未満に")
+    rng = np.random.default_rng(int(split.get("seed", 0)))
+    n_valid, n_test = split_counts(len(frame), valid, test)
+    keys = np.where(treated, "1", "0").astype(object)
+    if kind == "binary":
+        keys = keys + "/" + frame[target].astype(str).to_numpy()
+
+    # 層ごとの比例配分 (層化の分割と同じ)
+    layers = sorted(set(keys))
+    members = [np.flatnonzero(keys == layer) for layer in layers]
+    sizes = [len(rows) for rows in members]
+    valid_shares = allocate(sizes, n_valid)
+    test_shares = allocate(
+        [size - share for size, share in zip(sizes, valid_shares)], n_test
+    )
+    assigned = np.array(["train"] * len(frame), dtype=object)
+    for rows, v_count, t_count in zip(members, valid_shares, test_shares):
+        order = rng.permutation(len(rows))
+        labels = label_by_position(
+            pd.RangeIndex(len(rows)), order, v_count, t_count
+        )
+        assigned[rows] = labels.to_numpy()
+
+    # 置く分割の全てに, 処置の群と対照の群の行を 1 つ以上
+    needed = ["train"] + [
+        name for name, ratio in (("valid", valid), ("test", test))
+        if ratio > 0
+    ]
+    for flag, label in ((True, "処置の群"), (False, "対照の群")):
+        group = np.flatnonzero(treated == flag)
+        if len(group) < len(needed):
+            raise ValueError(
+                f"{label}の行が {len(group)} 行で, 置く分割 "
+                f"({', '.join(needed)}) の数より少ないです (全ての分割に"
+                "処置の群と対照の群が要るため. 記録を足すか, valid と test "
+                "の割合を見直す)"
+            )
+        for name in needed:
+            counts = {n: int((assigned[group] == n).sum()) for n in needed}
+            if counts[name]:
+                continue
+            donor = max(needed, key=lambda n: (counts[n], -needed.index(n)))
+            move_one(assigned, group, keys, donor, name, rng)
+    result = pd.Series(assigned, index=frame.index, dtype=object)
+
+    return result
+
+
+def check_uplift_groups(split: dict, treatment: str, frames: dict) -> None:
+    """
+    手順の後の, 置く分割の全てに処置の群と対照の群があるかを確かめる関数
+
+    分割の後の手順で行を絞ると, 分割の群が欠けうるため
+
+    Parameters
+    ----------
+    split: dict
+        レシピの分割 (valid, test)
+    treatment: str
+        処置の列
+    frames: dict
+        分割ごとの表 (処置の列は 0 と 1)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        学習用か, 割合が 0 より大きい分割に, 群の行が無い場合
+    """
+    # 学習用と割合を書いた分割
+    needed = ["train"] + [
+        name for name in ("valid", "test")
+        if float(split.get(name, 0.2 if name == "valid" else 0.0)) > 0
+    ]
+    for name in needed:
+        values = frames[name][treatment] if name in frames else pd.Series(
+            [], dtype="int64"
+        )
+        for flag, label in ((1, "処置の群"), (0, "対照の群")):
+            if not (values == flag).any():
+                raise ValueError(
+                    f"手順の後の {name} に{label}の行がありません (分割の後の"
+                    "手順で行を絞らないか, 分割の前に絞る)"
+                )
+
+
+def uplift_summary(
+    recipe: dict, roles: dict, kind: str, frames: dict
+) -> dict:
+    """
+    効果を見積もるの説明 (行の id の列, 処置の列, 結果の種類, 分割ごとの
+    群の行の数と結果の平均) を作る関数
+
+    Parameters
+    ----------
+    recipe: dict
+        読み込んだレシピ
+    roles: dict
+        列の役割 (target, treatment, id)
+    kind: str
+        結果の種類
+    frames: dict
+        分割ごとの表 (処置の列は 0 と 1)
+
+    Returns
+    ----------
+    summary: dict
+        id, treatment, outcome, unlabeled, splits (分割ごとの treated,
+        control, treated_mean, control_mean, effect)
+    """
+    # 分割ごとの群の行の数と結果の平均 (unlabeled は数だけ)
+    target = roles["target"]
+    treatment = roles["treatment"]
+    splits = {}
+    for name, frame in frames.items():
+        treated = (frame[treatment] == 1).to_numpy()
+        entry = {
+            "treated": int(treated.sum()),
+            "control": int((~treated).sum()),
+            "treated_mean": None, "control_mean": None, "effect": None,
+        }
+        if name != UNLABELED:
+            values = frame[target].to_numpy(dtype=float)
+            if entry["treated"]:
+                entry["treated_mean"] = float(values[treated].mean())
+            if entry["control"]:
+                entry["control_mean"] = float(values[~treated].mean())
+            if entry["treated"] and entry["control"]:
+                entry["effect"] = (
+                    entry["treated_mean"] - entry["control_mean"]
+                )
+        splits[name] = entry
+    summary = {
+        "id": str(roles["id"]),
+        "treatment": str(treatment),
+        "outcome": kind,
+        "unlabeled": str(recipe["split"].get("unlabeled", "drop")),
+        "splits": splits,
+    }
+
+    return summary
 
 
 def first_fit(steps: list) -> int:
@@ -1273,9 +1624,11 @@ def run_step(
         ):
             # 時系列の予測では目的の列の過去の値が最も大事な手がかりなので,
             # lag の auto は目的の列も選ぶ (ずらすので未来の値は使わない)
-            chosen = {
-                k: v for k, v in roles.items() if k != "target"
-            } if spec["op"] == "lag" else roles
+            # 処置の列は落とす手順だけで指定可 (書き出しには元の値)
+            dropped = {"target"} if spec["op"] == "lag" else set()
+            if spec["op"] == "drop_columns":
+                dropped.add("treatment")
+            chosen = {k: v for k, v in roles.items() if k not in dropped}
             params["columns"] = resolve_columns(
                 frame, params.get("columns"), chosen,
                 WANT.get(spec["op"], "numeric")
@@ -1339,17 +1692,27 @@ def apply_recipe(
     frame.columns = [str(name) for name in frame.columns]
     frame[ROW_COLUMN] = np.arange(len(frame))
     anomaly = recipe["task"] == "anomaly"
+    uplift = recipe["task"] == "uplift"
     if target:
         if target not in frame.columns:
             raise ValueError(f"目的の列 {target} がありません")
-        frame = (
-            anomaly_target(
+        if anomaly:
+            frame = anomaly_target(
                 frame, target, recipe["split"].get("unlabeled", "drop")
             )
-            if anomaly else frame[frame[target].notna()]
-        )
-    if anomaly:
-        roles["id"] = anomaly_id(data, recipe)
+        elif uplift:
+            # 処置の欠けの確かめ (結果の欠けた行を落とす前の全ての行)
+            original_treatment(
+                data, treatment_name(data, recipe), list(range(len(frame)))
+            )
+            kind = uplift_kind(data, recipe)
+            frame = uplift_target(frame, target, kind)
+        else:
+            frame = frame[frame[target].notna()]
+    if recipe["task"] in ID_TASKS:
+        roles["id"] = row_id_name(data, recipe)
+    if uplift:
+        roles["treatment"] = treatment_name(data, recipe)
     steps = recipe["steps"] if upto is None else recipe["steps"][:upto]
 
     # 分割の前の手順, 分割, 分割の後の手順. 分割に使う日時とグループの
@@ -1372,10 +1735,18 @@ def apply_recipe(
         if group in frame.columns:
             frame[GROUP_COLUMN] = frame[group]
         split = {**split, "column": GROUP_COLUMN}
-    frame[SPLIT_COLUMN] = (
-        anomaly_splits(frame, split, target) if anomaly
-        else assign_splits(frame, split, split_roles)
-    )
+    if anomaly:
+        frame[SPLIT_COLUMN] = anomaly_splits(frame, split, target)
+    elif uplift:
+        # 処置の元の値 (分割の前の手順で落とした行は除く)
+        treated = original_treatment(
+            data, roles["treatment"], frame[ROW_COLUMN].tolist()
+        ).to_numpy() == 1
+        frame[SPLIT_COLUMN] = uplift_splits(
+            frame, split, target, kind, treated
+        )
+    else:
+        frame[SPLIT_COLUMN] = assign_splits(frame, split, split_roles)
     frame = frame.drop(columns=[TIME_COLUMN, GROUP_COLUMN], errors="ignore")
     for number, spec in enumerate(steps[head:], head + 1):
         frame = run_step(
@@ -1532,9 +1903,14 @@ def prepare(
     # 分割と手順 (異常の検知は表と時系列だけ)
     recipe = load_recipe(recipe)
     anomaly = recipe["task"] == "anomaly"
+    uplift = recipe["task"] == "uplift"
     if anomaly and data.kind not in ANOMALY_KINDS:
         raise ValueError(
             f"異常の検知 (task: anomaly) は表と時系列だけです: {data.kind}"
+        )
+    if uplift and data.kind not in UPLIFT_KINDS:
+        raise ValueError(
+            f"効果を見積もる (task: uplift) は表と時系列だけです: {data.kind}"
         )
     result, roles = apply_recipe(data, recipe)
     target = roles.get("target")
@@ -1563,11 +1939,15 @@ def prepare(
                 f"({result[target].dtype}). タスクを分類にするか, 型を変える"
             )
 
-    # 異常の検知の行の id (手順で落としても変えても元の値)
-    if anomaly:
+    # 行の id と処置の列 (手順で落としても変えても元の値)
+    if recipe["task"] in ID_TASKS:
         result[roles["id"]] = id_values(
             data, roles["id"], result[ROW_COLUMN].tolist()
         )
+    if uplift:
+        result[roles["treatment"]] = original_treatment(
+            data, roles["treatment"], result[ROW_COLUMN].tolist()
+        ).to_numpy()
     names = [n for n in SPLITS if (result[SPLIT_COLUMN] == n).any()]
     positions = {
         n: result.loc[result[SPLIT_COLUMN] == n, ROW_COLUMN].tolist()
@@ -1586,7 +1966,10 @@ def prepare(
     overlaps += split_notes(recipe["split"], result)
 
     # 学習に使う列 (画像などは中身の配列を使うので無し. 役割の列を除く)
-    reserved = {target, roles.get("id"), roles.get("time"), SPLIT_COLUMN}
+    reserved = {
+        target, roles.get("id"), roles.get("time"), roles.get("treatment"),
+        SPLIT_COLUMN
+    }
     features = [] if data.item_loader is not None else [
         name for name in result.columns
         if name not in reserved and name not in HIDDEN_COLUMNS
@@ -1597,8 +1980,12 @@ def prepare(
         extra, extra_rows = unlabeled_split(
             data, recipe, target, features, list(frames["train"].columns)
         )
-        if extra_rows and anomaly:
+        if extra_rows and recipe["task"] in ID_TASKS:
             extra[roles["id"]] = id_values(data, roles["id"], extra_rows)
+        if extra_rows and uplift:
+            extra[roles["treatment"]] = original_treatment(
+                data, roles["treatment"], extra_rows
+            ).to_numpy()
         if extra_rows:
             frames[UNLABELED] = extra
             positions[UNLABELED] = extra_rows
@@ -1654,9 +2041,18 @@ def prepare(
     if anomaly:
         summary = anomaly_summary(data, recipe, target, frames, positions)
         notes.extend(anomaly_notes(recipe["split"], target, summary))
+
+    # 効果を見積もるの説明 (分割ごとの群の行の数と結果の平均)
+    effects = None
+    if uplift:
+        check_uplift_groups(recipe["split"], roles["treatment"], frames)
+        effects = uplift_summary(
+            recipe, roles, uplift_kind(data, recipe), frames
+        )
     prepared = Prepared(
         frames=frames, recipe=recipe, features=features, target=target,
-        classes=classes, notes=notes, findings=findings, anomaly=summary
+        classes=classes, notes=notes, findings=findings, anomaly=summary,
+        uplift=effects
     )
 
     return prepared
@@ -2191,6 +2587,8 @@ def export_dataset(
         }
         if prepared.anomaly is not None:
             info["anomaly"] = to_plain(prepared.anomaly)
+        if prepared.uplift is not None:
+            info["uplift"] = to_plain(prepared.uplift)
         finish_writing(target, final, info, parent)
     except Exception:
         drop_writing(target, parent)
@@ -2331,8 +2729,9 @@ class Dataset:
         x: np.ndarray
             (件数, 列の数) の float32 の配列
         y: Optional[np.ndarray]
-            目的の値 (分類は int64 の番号, 回帰は float32). 目的の列が
-            無い場合と, 目的の値が全て欠けた分割 (unlabeled) は None
+            目的の値 (分類, 異常の検知, 結果が binary の効果を見積もるは
+            int64, 他は float32). 目的の列が無い場合と, 目的の値が全て
+            欠けた分割 (unlabeled) は None
         """
         # 特徴量 (画像などは中身の配列) と目的の値を取り出す
         frame = self.frames[split]
@@ -2348,9 +2747,13 @@ class Dataset:
             and bool(frame[self.target].notna().any())
         )
         if labeled:
+            binary = (self.info.get("uplift") or {}).get("outcome") == (
+                "binary"
+            )
             dtype = (
                 np.int64
                 if self.info["task"] in ("classification", "anomaly")
+                or binary
                 else np.float32
             )
             # 書き込める配列にする (PyTorch のテンソルにそのまま渡せるように)
@@ -2645,6 +3048,39 @@ class Dataset:
 
         return tensors
 
+    def treatment(self, split: str) -> np.ndarray:
+        """
+        効果を見積もるの分割の処置 (処置の群は 1, 対照の群は 0) を返す関数
+
+        Parameters
+        ----------
+        split: str
+            train, valid, test, unlabeled のどれか
+
+        Returns
+        ----------
+        values: np.ndarray
+            行ごとの int64 の 0 と 1 (arrays の行と同じ順)
+
+        Raises
+        ----------
+        ValueError
+            効果を見積もる (task: uplift) のデータセットでない場合
+        """
+        # 説明の uplift の処置の列
+        effects = self.info.get("uplift")
+        if self.info.get("task") != "uplift" or not effects:
+            raise ValueError(
+                "処置は効果を見積もる (task: uplift) のデータセットだけに"
+                "あります"
+            )
+        frame = self.frames[split]
+        values = frame[effects["treatment"]].to_numpy(
+            dtype=np.int64, copy=True
+        )
+
+        return values
+
 
 def load_dataset(
     path: Union[str, Path], follow_links: bool = False
@@ -2826,7 +3262,8 @@ def model_outputs(
     ----------
     outputs: Optional[int]
         分類はクラスの数, 回帰と時系列の予測は 1, 異常の検知は学習に使う
-        列の数 (自己符号化器が入力を作り直す). 分からなければ None
+        列の数 (自己符号化器が入力を作り直す), 効果を見積もるは 1 (処置
+        したときとしないときの予測のそれぞれ). 分からなければ None
     """
     # 版 1 の説明は何期先までを持たないので, 時系列の予測も 1 行に 1 つ
     outputs = None
@@ -2836,6 +3273,8 @@ def model_outputs(
         outputs = 1
     elif task == "anomaly":
         outputs = width
+    elif task == "uplift":
+        outputs = 1
 
     return outputs
 
