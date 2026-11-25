@@ -1516,7 +1516,8 @@ def start_writing(
     Parameters
     ----------
     path: Union[str, Path]
-        書き出すディレクトリ (parent を渡すと最後の部分が親の中の名前)
+        書き出すディレクトリ (parent を渡すと最後の部分が親の中の名前.
+        途中は使わないので, 開いた親と合うことは使う側が確かめる)
     overwrite: bool
         既にあるディレクトリを置き換えるか
     parent: Optional[int] = None
@@ -1535,7 +1536,7 @@ def start_writing(
     ValueError
         parent を渡し, 最後の部分が親の中の名前にできない場合
     """
-    # 開いた親に書く場合 (途中の場所をたどらない)
+    # 開いた親に書く場合 (途中の場所は使わない)
     final = Path(path).expanduser()
     if parent is not None:
         name = entry_name(final)
@@ -1584,7 +1585,7 @@ def drop_writing(target: Path, parent: Optional[int] = None) -> None:
     ----------
     None
     """
-    # 開いた親に書く場合は手元の一時の場所ごと
+    # 開いた親に書く場合は手元の一時の場所ごとの消去
     if parent is not None:
         drop_holder(target)
         return
@@ -1723,6 +1724,7 @@ def export_dataset(
     parent: Optional[int] = None
         使う側が開いた, 書き出す場所の親のディレクトリの記述子 (渡すと
         path の最後の部分を親の中の名前とし, 途中の場所をたどらずに書く.
+        path の途中は使わないので, 開いた親と合うことは使う側が確かめる.
         閉じるのは使う側)
 
     Returns

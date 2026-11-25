@@ -942,6 +942,7 @@ def export_image_masks(
     parent: Optional[int] = None
         使う側が開いた, 書き出す場所の親のディレクトリの記述子 (渡すと
         path の最後の部分を親の中の名前とし, 途中の場所をたどらずに書く.
+        path の途中は使わないので, 開いた親と合うことは使う側が確かめる.
         閉じるのは使う側)
 
     Returns
@@ -1868,6 +1869,7 @@ def export_capture_clouds(
     parent: Optional[int] = None
         使う側が開いた, 書き出す場所の親のディレクトリの記述子 (渡すと
         path の最後の部分を親の中の名前とし, 途中の場所をたどらずに書く.
+        path の途中は使わないので, 開いた親と合うことは使う側が確かめる.
         閉じるのは使う側)
 
     Returns

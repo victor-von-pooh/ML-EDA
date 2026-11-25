@@ -40,7 +40,7 @@ def entry_name(final: Path) -> str:
     ValueError
         名前が空か, . か .. の場合
     """
-    # 親の中の 1 つの名前 (途中はたどらない)
+    # 親の中の 1 つの名前 (途中は使わない)
     name = final.name
     if name in ("", ".", ".."):
         raise ValueError(
@@ -77,7 +77,7 @@ def entry_state(parent: int, name: str) -> Optional[str]:
         state = "other"
         return state
 
-    # 中の説明も, リンクをたどらずに確かめる
+    # リンクをたどらない, 中の説明の確かめ
     fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
     try:
         mode = os.stat(
@@ -109,7 +109,7 @@ def remove_entry(parent: int, name: str) -> None:
     ----------
     None
     """
-    # ディレクトリでないもの (リンクも) はそのものを消す
+    # ディレクトリでないもの (リンクも) はそのものの消去
     try:
         mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
     except FileNotFoundError:
@@ -118,7 +118,7 @@ def remove_entry(parent: int, name: str) -> None:
         os.unlink(name, dir_fd=parent)
         return
 
-    # 中を開いて 1 つずつ消してから, ディレクトリを消す
+    # 中を開いて 1 つずつ消した後の, ディレクトリの消去
     fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
     try:
         for child in os.listdir(fd):
@@ -153,11 +153,11 @@ def copy_entry(source: Path, parent: int, name: str) -> None:
         写す先が既にある場合と, 普通のファイルでもディレクトリでもない
         ものがある場合
     """
-    # 写す先のディレクトリを作って開く
+    # 写す先のディレクトリの作成と記述子
     os.mkdir(name, dir_fd=parent)
     fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
 
-    # 中のディレクトリは奥へ, ファイルは開いた先に新しく書く
+    # 中のディレクトリは奥へ, ファイルは開いた先への新しい書き込み
     try:
         with os.scandir(source) as entries:
             for entry in entries:
@@ -221,8 +221,99 @@ def drop_holder(target: Path) -> None:
     ----------
     None
     """
-    # 自分だけが読み書きできる一時のディレクトリごと
+    # 自分だけが読み書きできる一時のディレクトリごとの消去
     shutil.rmtree(target.parent, ignore_errors=True)
+
+
+def clear_leftover(parent: int, leftover: str, final: Path) -> None:
+    """
+    前の失敗で親の中に残った一時の名前を, 書き出しの印があるときだけ消す
+    関数
+
+    印は dataset.yaml (この書き出しは説明を書いてから親の中に移すので,
+    残ったものは説明を持つ). 印の無いものは使う側のものかもしれないので
+    消さずに断る
+
+    Parameters
+    ----------
+    parent: int
+        親のディレクトリの記述子
+    leftover: str
+        親の中の一時の名前 (.<名前>.writing か .<名前>.old)
+    final: Path
+        書き出す場所 (理由の文に使う)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    FileExistsError
+        一時の名前に印の無いもの (リンクも) がある場合
+    """
+    # 印のあるディレクトリだけの消去
+    state = entry_state(parent, leftover)
+    if state == "other":
+        raise FileExistsError(
+            f"{final} の隣の {leftover} はこの書き出しの残りではないので"
+            "消しません. 確かめてからもう一度書き出してください"
+        )
+    if state == "dataset":
+        remove_entry(parent, leftover)
+
+
+def replace_entry(
+    parent: int, writing: str, name: str, final: Path
+) -> None:
+    """
+    親の中の一時ディレクトリを, 前のデータセットと入れ替える関数
+
+    前のものは先に退避の名前 (.<名前>.old) に移し, 移した後のものを
+    確かめてから消す (確かめと消去の間に替えられても, データセットで
+    ないものを消さないため). データセットでなければ元の名前に戻す
+
+    Parameters
+    ----------
+    parent: int
+        親のディレクトリの記述子
+    writing: str
+        親の中の一時ディレクトリの名前
+    name: str
+        親の中の名前
+    final: Path
+        書き出す場所 (理由の文に使う)
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    FileExistsError
+        前のものがデータセットではない (リンクも) 場合
+    """
+    # 前のものの退避 (無ければ退避しない)
+    aside = f".{name}.old"
+    clear_leftover(parent, aside, final)
+    try:
+        os.rename(name, aside, src_dir_fd=parent, dst_dir_fd=parent)
+        moved = True
+    except FileNotFoundError:
+        moved = False
+
+    # 退避したものの確かめ (データセットでなければ元の名前に戻して断る)
+    if moved and entry_state(parent, aside) != "dataset":
+        if entry_state(parent, name) is None:
+            os.rename(aside, name, src_dir_fd=parent, dst_dir_fd=parent)
+        raise FileExistsError(
+            f"{final} はデータセットではないので置き換えません"
+        )
+
+    # 新しいものを置いてから, 退避した前のデータセットの消去
+    os.rename(writing, name, src_dir_fd=parent, dst_dir_fd=parent)
+    if moved:
+        remove_entry(parent, aside)
 
 
 def move_into(target: Path, parent: int, name: str, final: Path) -> None:
@@ -230,8 +321,8 @@ def move_into(target: Path, parent: int, name: str, final: Path) -> None:
     手元に書いた中身を, 開いた親の中の名前に入れ替える関数
 
     親の中の一時ディレクトリ (.<名前>.writing) に移し (別のファイル
-    システムならリンクをたどらずに写す), 前のデータセットを消して入れ
-    替える. どれも親に対する相対の操作で, リンクをたどらない
+    システムならリンクをたどらずに写す), 前のデータセットと入れ替える
+    (replace_entry). どれも親に対する相対の操作で, リンクをたどらない
 
     Parameters
     ----------
@@ -251,12 +342,15 @@ def move_into(target: Path, parent: int, name: str, final: Path) -> None:
     Raises
     ----------
     FileExistsError
-        書き出す場所がデータセットではない (リンクも) 場合
+        書き出す場所がデータセットではない (リンクも) 場合と, 親の中の
+        一時の名前に印の無いものがある場合
     """
-    # 前の失敗で残った一時ディレクトリは消してから移す
+    # 前の失敗の残り (印のあるものだけ) を消してからの移し
     writing = f".{name}.writing"
+    placed = False
     try:
-        remove_entry(parent, writing)
+        clear_leftover(parent, writing, final)
+        placed = True
         try:
             os.rename(target, writing, dst_dir_fd=parent)
         except OSError as error:
@@ -264,20 +358,15 @@ def move_into(target: Path, parent: int, name: str, final: Path) -> None:
                 raise
             copy_entry(target, parent, writing)
 
-        # 置き換えられるのは前のデータセットだけ
-        state = entry_state(parent, name)
-        if state == "other":
-            raise FileExistsError(
-                f"{final} はデータセットではないので置き換えません"
-            )
-        if state == "dataset":
-            remove_entry(parent, name)
-        os.rename(writing, name, src_dir_fd=parent, dst_dir_fd=parent)
+        # 前のデータセットとの入れ替え
+        replace_entry(parent, writing, name, final)
     except BaseException:
-        try:
-            remove_entry(parent, writing)
-        except OSError:
-            pass
+        # 自分で置いた一時ディレクトリだけの片付け
+        if placed:
+            try:
+                remove_entry(parent, writing)
+            except OSError:
+                pass
         raise
     finally:
         drop_holder(target)
