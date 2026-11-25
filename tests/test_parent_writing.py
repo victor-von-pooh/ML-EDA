@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -584,6 +585,40 @@ def test_holder_private(holders: Path) -> None:
     assert list(holders.iterdir()) == []
 
 
+def text_dataset(tmp_path: Path, path: Path, fd: int) -> None:
+    """
+    中身の配列と語彙を持つ文のデータセットを, 開いた親に書き出す関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    path: Path
+        書き出す場所
+    fd: int
+        開いた親の記述子
+
+    Returns
+    ----------
+    None
+    """
+    # 2 つのラベルの短い文と, 語の番号の並びにするレシピ
+    reviews = tmp_path / "reviews"
+    if not reviews.exists():
+        for label, words in (("pos", "good great"), ("neg", "bad awful")):
+            (reviews / label).mkdir(parents=True)
+            for index in range(5):
+                (reviews / label / f"{index}.txt").write_text(
+                    f"this is {words} {index}", encoding="utf-8"
+                )
+    recipe = {
+        "target": "label", "task": "classification",
+        "item_steps": [{"op": "vocabulary", "length": 6}],
+        "split": {"method": "stratified", "valid": 0.2},
+    }
+    export_dataset(load_data(reviews), recipe, path, parent=fd)
+
+
 def test_parent_model_inputs(
     tmp_path: Path, opened: tuple[Path, int]
 ) -> None:
@@ -605,20 +640,7 @@ def test_parent_model_inputs(
     # 表と, 中身の配列と語彙を持つ文のデータセット
     place, fd = opened
     export_dataset(small_table(tmp_path), RECIPE, place / NAME, parent=fd)
-    for label, words in (("pos", "good great"), ("neg", "bad awful")):
-        (tmp_path / "reviews" / label).mkdir(parents=True)
-        for index in range(5):
-            (tmp_path / "reviews" / label / f"{index}.txt").write_text(
-                f"this is {words} {index}", encoding="utf-8"
-            )
-    recipe = {
-        "target": "label", "task": "classification",
-        "item_steps": [{"op": "vocabulary", "length": 6}],
-        "split": {"method": "stratified", "valid": 0.2},
-    }
-    export_dataset(
-        load_data(tmp_path / "reviews"), recipe, place / "text", parent=fd
-    )
+    text_dataset(tmp_path, place / "text", fd)
 
     # パスで読んだものと同じ (語彙と配列の型も)
     for name in (NAME, "text"):
@@ -666,7 +688,9 @@ def test_parent_model_inputs_links(
     place, fd = opened
     export_dataset(small_table(tmp_path), RECIPE, tmp_path / "elsewhere")
     (place / NAME).symlink_to(tmp_path / "elsewhere")
-    with pytest.raises(ValueError, match="シンボリックリンク"):
+    with pytest.raises(
+        ValueError, match=f"データセットのディレクトリ {NAME} がシンボリック"
+    ):
         model_inputs(place / NAME, parent=fd)
 
     # 説明がリンク
@@ -674,7 +698,9 @@ def test_parent_model_inputs_links(
     (place / "inner" / "dataset.yaml").symlink_to(
         tmp_path / "elsewhere" / "dataset.yaml"
     )
-    with pytest.raises(ValueError, match="シンボリックリンク"):
+    with pytest.raises(
+        ValueError, match="ファイル dataset.yaml がシンボリックリンク"
+    ):
         model_inputs(place / "inner", parent=fd)
 
     # 無い説明と, follow_links との組
@@ -684,4 +710,107 @@ def test_parent_model_inputs_links(
     with pytest.raises(ValueError, match="follow_links"):
         model_inputs(place / "empty", follow_links=True, parent=fd)
     with pytest.raises(ValueError, match="データセットの外"):
-        pinned.read_under(fd, "empty", "../x")
+        pinned.open_under(fd, "empty", "../x")
+
+
+def test_parent_model_inputs_inner_links(
+    tmp_path: Path, opened: tuple[Path, int]
+) -> None:
+    """
+    開いた親を渡した model_inputs が, 中身の配列, レシピ, 途中の
+    ディレクトリのリンクを, どれかを添えた誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    opened: tuple[Path, int]
+        親の場所と, 開いた記述子
+
+    Returns
+    ----------
+    None
+    """
+    # 中身の配列のリンク (中身は同じ写し)
+    place, fd = opened
+    text_dataset(tmp_path, place / "text", fd)
+    root = place / "text"
+    shutil.copyfile(root / "train_items.npy", tmp_path / "copy.npy")
+    (root / "train_items.npy").unlink()
+    (root / "train_items.npy").symlink_to(tmp_path / "copy.npy")
+    with pytest.raises(
+        ValueError, match="ファイル train_items.npy がシンボリックリンク"
+    ):
+        model_inputs(root, parent=fd)
+
+    # レシピのリンク
+    (root / "train_items.npy").unlink()
+    shutil.copyfile(tmp_path / "copy.npy", root / "train_items.npy")
+    shutil.copyfile(root / "recipe.yaml", tmp_path / "recipe.yaml")
+    (root / "recipe.yaml").unlink()
+    (root / "recipe.yaml").symlink_to(tmp_path / "recipe.yaml")
+    with pytest.raises(
+        ValueError, match="ファイル recipe.yaml がシンボリックリンク"
+    ):
+        model_inputs(root, parent=fd)
+
+    # 途中のディレクトリのリンクと, ディレクトリでないもの
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "x.npy").write_bytes(b"")
+    (root / "sub").symlink_to(tmp_path / "sub", target_is_directory=True)
+    with pytest.raises(
+        ValueError, match="途中のディレクトリ sub がシンボリックリンク"
+    ):
+        pinned.open_under(fd, "text", "sub/x.npy")
+    with pytest.raises(ValueError, match="dataset.yaml を開けない"):
+        pinned.open_under(fd, "text", "dataset.yaml/x")
+
+
+def test_parent_model_inputs_headers(
+    tmp_path: Path, opened: tuple[Path, int]
+) -> None:
+    """
+    開いた親を渡した model_inputs が, 版 2.0 の配列の頭を読み, 壊れた頭,
+    物体型の配列, FIFO の説明を待たずに誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    opened: tuple[Path, int]
+        親の場所と, 開いた記述子
+
+    Returns
+    ----------
+    None
+    """
+    # 版 2.0 の頭で書き直した配列 (パスで読んだものと同じ)
+    place, fd = opened
+    text_dataset(tmp_path, place / "text", fd)
+    items = place / "text" / "train_items.npy"
+    array = np.load(items)
+    with open(items, "wb") as file:
+        np.lib.format.write_array(file, array, version=(2, 0))
+    with open(items, "rb") as file:
+        assert np.lib.format.read_magic(file) == (2, 0)
+    assert model_inputs(place / "text", parent=fd) == model_inputs(
+        place / "text"
+    )
+
+    # 物体型の配列 (パスで読む場合も誤り)
+    np.save(items, np.array([1, "a"], dtype=object), allow_pickle=True)
+    with pytest.raises(ValueError, match="物体"):
+        model_inputs(place / "text", parent=fd)
+    with pytest.raises(ValueError):
+        model_inputs(place / "text")
+
+    # 壊れた頭
+    items.write_bytes(b"not an array")
+    with pytest.raises(ValueError):
+        model_inputs(place / "text", parent=fd)
+
+    # FIFO の説明 (待たずに誤り)
+    (place / "fifo").mkdir()
+    os.mkfifo(place / "fifo" / "dataset.yaml")
+    with pytest.raises(ValueError, match="普通のファイルではありません"):
+        model_inputs(place / "fifo", parent=fd)

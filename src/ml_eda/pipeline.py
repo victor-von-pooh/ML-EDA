@@ -19,7 +19,7 @@ from ml_eda.itemprep import (
 from ml_eda.loaders import within
 from ml_eda.pinned import (
     drop_holder, entry_name, entry_state, make_holder, move_into,
-    open_under, read_under
+    open_under
 )
 from ml_eda.profile import finding, to_json
 from ml_eda.recipe import (
@@ -2606,7 +2606,10 @@ class DatasetPlace:
         """
         # 開いた親に対するか, パスでの読み込み (どちらも中に限る)
         if self.parent is not None:
-            data = read_under(self.parent, entry_name(self.root), name)
+            with open_under(
+                self.parent, entry_name(self.root), name
+            ) as file:
+                data = file.read()
             return data
         data = within(
             self.root, name, False, self.follow_links, FileNotFoundError
@@ -2649,6 +2652,13 @@ class DatasetPlace:
                 raise ValueError(
                     f"{name} の .npy の版 {version} は頭だけでは読めません"
                 )
+
+        # 物体型の配列の断り (パスで読む場合 (allow_pickle=False) と同じ)
+        if dtype.hasobject:
+            raise ValueError(
+                f"{name} は Python の物体を持つ配列なので読みません "
+                "(pickle を使うため)"
+            )
         header = (tuple(shape), dtype)
 
         return header

@@ -374,39 +374,6 @@ def move_into(target: Path, parent: int, name: str, final: Path) -> None:
         drop_holder(target)
 
 
-def read_under(parent: int, name: str, place: Any) -> bytes:
-    """
-    開いた親の中のデータセットのファイルを, リンクをたどらずに読む関数
-
-    Parameters
-    ----------
-    parent: int
-        データセットの親のディレクトリの記述子
-    name: str
-        親の中のデータセットの名前
-    place: Any
-        説明に書かれた場所 (データセットからの相対)
-
-    Returns
-    ----------
-    data: bytes
-        ファイルの中身
-
-    Raises
-    ----------
-    ValueError
-        場所が文字でないか外を指す (絶対パスや ..) 場合と, 途中か場所が
-        リンクか普通のファイルでない場合
-    FileNotFoundError
-        ファイルが無い場合
-    """
-    # 開いたファイルの中身の全て
-    with open_under(parent, name, place) as file:
-        data = file.read()
-
-    return data
-
-
 def open_under(parent: int, name: str, place: Any) -> BinaryIO:
     """
     開いた親の中のデータセットのファイルを, リンクをたどらずに開く関数
@@ -446,7 +413,8 @@ def open_under(parent: int, name: str, place: Any) -> BinaryIO:
     # データセットから一段ずつの, リンクをたどらない開き
     fds: list[int] = []
     try:
-        for index, part in enumerate([name, *parts]):
+        names = [name, *parts]
+        for index, part in enumerate(names):
             last = index == len(parts)
             flags = FILE_READ_FLAGS if last else DIRECTORY_FLAGS
             where = fds[-1] if fds else parent
@@ -458,16 +426,65 @@ def open_under(parent: int, name: str, place: Any) -> BinaryIO:
                 ) from error
             except OSError as error:
                 raise ValueError(
-                    f"データセットの {text} の途中か場所がシンボリック"
-                    "リンクかディレクトリでないので読みません"
+                    refused_reason(where, part, names[:index], last)
                 ) from error
         if not stat.S_ISREG(os.fstat(fds[-1]).st_mode):
             raise ValueError(
                 f"データセットの {text} は普通のファイルではありません"
             )
-        file = os.fdopen(fds.pop(), "rb")
+        file = os.fdopen(fds[-1], "rb")
+        fds.pop()
     finally:
         for fd in fds:
             os.close(fd)
 
     return file
+
+
+def refused_reason(
+    where: int, part: str, before: list[str], last: bool
+) -> str:
+    """
+    開いた親の中で開けなかった場所の理由の文を返す関数
+
+    Parameters
+    ----------
+    where: int
+        開けなかった場所の親のディレクトリの記述子
+    part: str
+        開けなかった場所の名前
+    before: list[str]
+        その場所より前の名前 (先頭はデータセットの名前. データセット自体
+        なら空)
+    last: bool
+        読むファイルそのものか (False ならディレクトリのはずの場所)
+
+    Returns
+    ----------
+    reason: str
+        何がリンクか, ディレクトリでないかの文
+    """
+    # 場所の呼び方 (データセット, 途中のディレクトリ, 読むファイル)
+    if not before and not last:
+        what = f"データセットのディレクトリ {part}"
+    elif last:
+        what = f"データセットのファイル {'/'.join([*before[1:], part])}"
+    else:
+        what = (
+            f"データセットの途中のディレクトリ "
+            f"{'/'.join([*before[1:], part])}"
+        )
+
+    # リンクか, それ以外 (ディレクトリでないものなど) かの見分け
+    try:
+        mode = os.stat(part, dir_fd=where, follow_symlinks=False).st_mode
+        linked = stat.S_ISLNK(mode)
+    except OSError:
+        linked = False
+    reason = (
+        f"{what} がシンボリックリンクなので読みません" if linked
+        else f"{what} を開けないので読みません (ディレクトリでないもの"
+        "などです)"
+    )
+
+    return reason
