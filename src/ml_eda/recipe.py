@@ -14,7 +14,7 @@ from ml_eda.itemprep import ITEM_STEPS
 FORMAT_VERSION = 1
 
 # タスクの種類
-TASKS = ("classification", "regression", "forecasting", "none")
+TASKS = ("classification", "regression", "forecasting", "anomaly", "none")
 
 # 分割のしかた
 SPLIT_METHODS = (
@@ -22,8 +22,12 @@ SPLIT_METHODS = (
     "stratified_group", "none"
 )
 
-# 目的の列の欠けた行の扱い (落とすか, unlabeled の分割に残すか)
-UNLABELED_MODES = ("drop", "keep")
+# 目的の列の欠けた行の扱い (落とすか, unlabeled の分割に残すか. normal
+# は異常の検知で正常と見なす)
+UNLABELED_MODES = ("drop", "keep", "normal")
+
+# 異常の検知の分割のしかた (正常の行を無作為に分ける)
+ANOMALY_METHODS = ("random",)
 
 
 @dataclass
@@ -1433,6 +1437,62 @@ def check_recipe_steps(
         check_item_step_params(index, step, empty)
 
 
+def check_anomaly_recipe(
+    recipe: dict, task: str, method: str, unlabeled: str
+) -> None:
+    """
+    異常の検知だけの書き方 (id, split.unlabeled: normal) と, 異常の検知の
+    分割のしかたを確かめる関数
+
+    Parameters
+    ----------
+    recipe: dict
+        読み込んだレシピ
+    task: str
+        タスク
+    method: str
+        分割のしかた
+    unlabeled: str
+        目的の列の欠けた行の扱い
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        異常の検知でないのに id か normal を書いた場合, 異常の検知で
+        分割のしかたが random でない場合, id が文字でない場合
+    """
+    # 異常の検知だけの書き方
+    anomaly = task == "anomaly"
+    if not anomaly and unlabeled == "normal":
+        raise ValueError(
+            "split.unlabeled: normal は異常の検知 (task: anomaly) だけで"
+            "書けます"
+        )
+    if not anomaly and "id" in recipe:
+        raise ValueError(
+            "レシピの id (行の id の列) は異常の検知 (task: anomaly) だけで"
+            "書けます"
+        )
+    if not anomaly:
+        return
+
+    # 分割のしかたと行の id の列
+    if method not in ANOMALY_METHODS:
+        raise ValueError(
+            "異常の検知の分割のしかたは random だけです (正常の行を無作為に"
+            f"分け, 異常の行を検証用とテスト用に置く): {method}"
+        )
+    name = recipe.get("id")
+    if "id" in recipe and (not isinstance(name, str) or not name):
+        raise ValueError(
+            f"レシピの id は行の id の列の名前 (文字) にしてください: {name}"
+        )
+
+
 def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     """
     レシピを読み込み, 形を確かめる関数
@@ -1452,7 +1512,7 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     ValueError
         新しい版, 知らない手順, 手順と中身の手順の知らない引数と空 (None)
         の引数, 形の誤りの場合と, 目的の列の無いレシピで split.unlabeled
-        が keep の場合
+        が keep の場合, 異常の検知の決まりに合わない場合
     """
     # ファイルなら読み込み
     if isinstance(recipe, (str, Path)):
@@ -1493,8 +1553,10 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     unlabeled = loaded["split"].get("unlabeled", "drop")
     if unlabeled not in UNLABELED_MODES:
         raise ValueError(
-            f"split.unlabeled は drop か keep にしてください: {unlabeled}"
+            "split.unlabeled は drop, keep, normal のどれかにしてください: "
+            f"{unlabeled}"
         )
+    check_anomaly_recipe(loaded, task, method, unlabeled)
 
     # keep は目的の列を書いたレシピだけ (読み込んだ時点で分かるように.
     # 書かないと前と後の様子と書き出しの全てで誤りになるため)

@@ -90,6 +90,17 @@ export_dataset(data, "recipe.yaml", "datasets/titanic")
 
 目的の列の欠けた行は既定 (`unlabeled: drop`) で落とす. 分割に `unlabeled: keep` を書くと, 落とさずに `unlabeled` の分割 (`unlabeled.parquet`) に残す (半教師あり学習や異常の検知のため). 前処理の値は学習用だけで当てはめ, 正解の無い行には推論のときと同じようにかける. `tensors("unlabeled")` は特徴量だけを返す.
 
+異常の検知 (正常の行が多く, 異常の正解が無いか少しだけある表) は `task: anomaly` で書く. 正解の列 (`target`) は異常を 1 か真, 正常を 0 か偽にし, 正解の無い表は書かない (全ての行を正常と見なす). 分割は `random` だけで, 学習用には正常の行だけを置き, 異常の行は検証用とテスト用に配る. `unlabeled: normal` は正解の欠けた行を正常と見なす. レシピの `id` に行の id の列を書くと, 全ての分割に元の値のまま残る (書かなければ行の位置の `row_id`). `dataset.yaml` の `anomaly` に分割ごとの正常, 正常と見なした行, 異常の行の数が入る.
+
+```yaml
+task: anomaly
+target: is_anomaly
+id: reading_id
+steps:
+  - {op: standardize, columns: auto}
+split: {method: random, valid: 0.2, test: 0.2, seed: 0, unlabeled: normal}
+```
+
 ### 画像, 文, 点群, 音声
 
 画像のディレクトリ (`<クラス>/<画像>` ならラベル付き), 1 行 1 文の `.txt` か `<クラス>/<文>.txt`, 点群 (`.ply`, `.pcd`, `.xyz`, `.npy`. 1 つか `<クラス>/<点群>`) も `load_data` で読める. 表 (`data.frame`) は 1 行 1 件の様子 (画像なら幅, 高さ, ラベル) で, 中身は `data.load_item(i)` で読む. 分析には大きさのばらつきなどの気付きが加わる.

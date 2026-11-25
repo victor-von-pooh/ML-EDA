@@ -766,7 +766,7 @@ def test_unlabeled_split_cases(tmp_path: Path) -> None:
     """
     # 知らない値と, 目的の列の無いレシピの keep は誤り
     frame = unlabeled_table()
-    with pytest.raises(ValueError, match="drop か keep"):
+    with pytest.raises(ValueError, match="drop, keep, normal"):
         prepare(table(frame), {"split": {"method": "none",
                                          "unlabeled": "yes"}})
     with pytest.raises(ValueError, match="目的の列が要ります"):

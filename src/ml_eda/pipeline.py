@@ -58,6 +58,19 @@ STRATA_LIMIT = 20
 # グループでまとめる分割のしかた (分割の件数が割合から外れうる)
 GROUP_METHODS = ("group", "group_time", "stratified_group")
 
+# 異常の検知で, レシピに id が無い場合の行の id の列 (読み込んだ表の
+# 行の位置)
+ANOMALY_ID = "row_id"
+
+# 異常の検知で書き出せる種類
+ANOMALY_KINDS = ("table", "timeseries")
+
+# 異常の検知で, 検証用とテスト用に異常の行が無い場合の注意
+NO_ANOMALY_NOTE = (
+    "検証用とテスト用に異常の行がありません (上位 K 件の適合率と PR-AUC "
+    "を数えられない. 異常の行を増やすか, valid か test の割合を見直す)"
+)
+
 # 目的の列があるのにタスクを決めていない場合の注意
 NO_TASK_NOTE = (
     "タスクが決まっていません. 目的の列はそのままの値で書き出します"
@@ -108,6 +121,9 @@ class Prepared:
     arrays: dict = field(default_factory=dict)
     # 分割の後に分かる気付き (分割をまたぐグループや画像の重なり)
     findings: list = field(default_factory=list)
+    # 異常の検知の説明 (行の id の列, 正解の有る無し, 分割ごとの行の数.
+    # 異常の検知でなければ None)
+    anomaly: Optional[dict] = None
 
 
 def split_counts(count: int, valid: float, test: float) -> tuple[int, int]:
@@ -645,6 +661,325 @@ def label_by_position(
     return labels
 
 
+def anomaly_labels(values: pd.Series, target: str) -> pd.Series:
+    """
+    異常の検知の正解を, 異常は 1, 正常は 0 の整数にする関数
+
+    Parameters
+    ----------
+    values: pd.Series
+        欠けの無い正解の列の値
+    target: str
+        正解の列の名前 (誤りの文に使う)
+
+    Returns
+    ----------
+    labels: pd.Series
+        int64 の 0 と 1
+
+    Raises
+    ----------
+    ValueError
+        真偽値でも, 0 と 1 だけの数でもない場合
+    """
+    # 真偽値はそのまま, 数は 0 と 1 だけ
+    if pd.api.types.is_bool_dtype(values):
+        labels = values.astype("int64")
+        return labels
+    numeric = (
+        pd.api.types.is_numeric_dtype(values)
+        or values.map(lambda value: isinstance(value, bool)).all()
+    )
+    others = [] if not numeric else [
+        value for value in values.unique().tolist()
+        if value not in (0, 1)
+    ]
+    if not numeric or others:
+        examples = (
+            [str(value) for value in others[:3]] if numeric
+            else values.astype(str).unique().tolist()[:3]
+        )
+        raise ValueError(
+            f"異常の検知の正解の列 {target} は, 異常を 1 か真, 正常を 0 か偽"
+            f"にしてください (他の値: {', '.join(examples)})"
+        )
+    labels = values.astype("int64")
+
+    return labels
+
+
+def anomaly_target(
+    frame: pd.DataFrame, target: str, unlabeled: str
+) -> pd.DataFrame:
+    """
+    異常の検知の正解を 0 と 1 にし, 欠けた行を落とすか正常と見なす関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        読み込んだ表
+    target: str
+        正解の列
+    unlabeled: str
+        欠けた行の扱い (drop と keep は落とし, normal は正常と見なす)
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        正解を int64 の 0 と 1 にした表
+
+    Raises
+    ----------
+    ValueError
+        正解の値が 0 と 1 (か真偽値) でない場合
+    """
+    # 欠けの無い値の確認
+    labeled = frame[target].notna()
+    labels = anomaly_labels(frame.loc[labeled, target], target)
+
+    # 欠けた行は正常と見なすか, 落とす (keep の行は後で unlabeled に)
+    if unlabeled == "normal":
+        values = pd.Series(0, index=frame.index, dtype="int64")
+        values.loc[labeled] = labels
+        result = frame.copy()
+    else:
+        values = labels
+        result = frame[labeled].copy()
+    result[target] = values
+
+    return result
+
+
+def anomaly_counts(count: int, valid: float, test: float) -> tuple[int, int]:
+    """
+    異常の行の数を, 検証用とテスト用に割合の比で配る関数
+
+    Parameters
+    ----------
+    count: int
+        異常の行の数
+    valid: float
+        検証用の割合
+    test: float
+        テスト用の割合
+
+    Returns
+    ----------
+    counts: tuple[int, int]
+        検証用とテスト用の数 (合計は count. 両方の割合があり 2 件以上なら
+        どちらも 1 件以上)
+
+    Raises
+    ----------
+    ValueError
+        異常の行があるのに, 検証用とテスト用の割合が共に 0 の場合
+    """
+    # 割合の比で四捨五入 (0.5 は切り上げ)
+    if count and valid + test <= 0:
+        raise ValueError(
+            "異常の行を置く検証用かテスト用が要ります (valid か test の割合を"
+            "0 より大きくする. 異常の行は学習用に入れないため)"
+        )
+    if not count:
+        return 0, 0
+    n_valid = int(np.floor(count * valid / (valid + test) + 0.5))
+    if valid > 0 and test > 0 and count >= 2:
+        n_valid = min(max(n_valid, 1), count - 1)
+    counts = (n_valid, count - n_valid)
+
+    return counts
+
+
+def anomaly_splits(
+    frame: pd.DataFrame, split: dict, target: Optional[str]
+) -> pd.Series:
+    """
+    異常の検知の分割 (正常の行は無作為に分け, 異常の行は検証用とテスト用)
+    をする関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        正解を 0 と 1 にした表
+    split: dict
+        valid, test (割合), seed
+    target: Optional[str]
+        正解の列 (正解の無い表は None で, 全ての行を正常とする)
+
+    Returns
+    ----------
+    assigned: pd.Series
+        行ごとの分割の名前
+
+    Raises
+    ----------
+    ValueError
+        割合の誤りの場合と, 異常の行を置く分割が無い場合
+    """
+    # 割合の確認
+    valid = float(split.get("valid", 0.2))
+    test = float(split.get("test", 0.0))
+    if valid < 0 or test < 0 or valid + test >= 1:
+        raise ValueError("valid と test の割合は 0 以上で, 合計を 1 未満に")
+    rng = np.random.default_rng(int(split.get("seed", 0)))
+    anomalous = (
+        (frame[target] == 1).to_numpy() if target
+        else np.zeros(len(frame), dtype=bool)
+    )
+
+    # 正常の行は random と同じ分け方
+    normal = frame.index[~anomalous]
+    n_valid, n_test = split_counts(len(normal), valid, test)
+    order = rng.permutation(len(normal))
+    assigned = pd.Series("train", index=frame.index, dtype=object)
+    assigned.loc[normal] = label_by_position(normal, order, n_valid, n_test)
+
+    # 異常の行は検証用とテスト用だけ
+    anomaly = frame.index[anomalous]
+    a_valid, a_test = anomaly_counts(len(anomaly), valid, test)
+    order = rng.permutation(len(anomaly))
+    assigned.loc[anomaly] = label_by_position(anomaly, order, a_valid, a_test)
+
+    return assigned
+
+
+def anomaly_id(data: Data, recipe: dict) -> str:
+    """
+    異常の検知の行の id の列を確かめて, その名前を返す関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        読み込んだレシピ
+
+    Returns
+    ----------
+    name: str
+        行の id の列 (レシピに無ければ行の位置の row_id)
+
+    Raises
+    ----------
+    ValueError
+        書いた列が無いか, 欠けか同じ値がある場合と, id を書かずに表に
+        row_id の列がある場合
+    """
+    # レシピに無ければ行の位置 (同じ名前の列があれば取り違えるので誤り)
+    columns = [str(name) for name in data.frame.columns]
+    name = recipe.get("id")
+    if not name:
+        if ANOMALY_ID in columns:
+            raise ValueError(
+                f"表に {ANOMALY_ID} の列があります. 行の id の列をレシピの id "
+                "に書いてください"
+            )
+        return ANOMALY_ID
+
+    # 書いた列は 1 つだけあり, 欠けも同じ値も無いこと
+    if columns.count(name) != 1:
+        raise ValueError(f"行の id の列 {name} がありません (か 2 つ以上)")
+    values = data.frame.iloc[:, columns.index(name)]
+    if values.isna().any():
+        raise ValueError(
+            f"行の id の列 {name} に欠けがあります ({int(values.isna().sum())}"
+            " 行)"
+        )
+    if values.duplicated().any():
+        repeated = values[values.duplicated()].astype(str).unique()[:3]
+        raise ValueError(
+            f"行の id の列 {name} に同じ値があります (例: "
+            f"{', '.join(repeated)})"
+        )
+
+    return name
+
+
+def id_values(data: Data, name: str, rows: list[int]) -> np.ndarray:
+    """
+    行の id の列の, 元の表での値を返す関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    name: str
+        行の id の列 (row_id で表に無ければ行の位置)
+    rows: list[int]
+        元のデータでの行の位置
+
+    Returns
+    ----------
+    values: np.ndarray
+        行ごとの元の値
+    """
+    # 表の列の元の値か, 行の位置
+    columns = [str(column) for column in data.frame.columns]
+    if name not in columns:
+        values = np.asarray(rows, dtype=np.int64)
+        return values
+    values = data.frame.iloc[list(rows), columns.index(name)].to_numpy()
+
+    return values
+
+
+def anomaly_summary(
+    data: Data, recipe: dict, target: Optional[str], frames: dict,
+    positions: dict
+) -> dict:
+    """
+    異常の検知の説明 (行の id の列, 正解の有る無し, 分割ごとの行の数) を
+    作る関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        読み込んだレシピ
+    target: Optional[str]
+        正解の列 (正解の無い表は None)
+    frames: dict
+        分割ごとの表
+    positions: dict
+        分割ごとの, 元のデータでの行の位置
+
+    Returns
+    ----------
+    summary: dict
+        id, labeled, unlabeled, rows (分割ごとの normal, presumed,
+        anomaly, unlabeled)
+    """
+    # 元の表で正解の欠けた行 (正解の無い表は全ての行)
+    columns = [str(name) for name in data.frame.columns]
+    missing = (
+        data.frame.iloc[:, columns.index(target)].isna().to_numpy()
+        if target else np.ones(len(data.frame), dtype=bool)
+    )
+
+    # 分割ごとの行の数
+    rows = {}
+    for split, frame in frames.items():
+        counts = {"normal": 0, "presumed": 0, "anomaly": 0, "unlabeled": 0}
+        if split == UNLABELED:
+            counts["unlabeled"] = int(len(frame))
+        else:
+            presumed = int(missing[positions[split]].sum())
+            anomaly = int((frame[target] == 1).sum()) if target else 0
+            counts["presumed"] = presumed
+            counts["anomaly"] = anomaly
+            counts["normal"] = int(len(frame)) - presumed - anomaly
+        rows[split] = counts
+    summary = {
+        "id": str(recipe.get("id") or ANOMALY_ID),
+        "labeled": bool(target),
+        "unlabeled": str(recipe["split"].get("unlabeled", "drop")),
+        "rows": rows,
+    }
+
+    return summary
+
+
 def first_fit(steps: list) -> int:
     """
     値を学ぶ最初の手順の位置を返す関数
@@ -964,10 +1299,18 @@ def apply_recipe(
     frame = data.frame.copy()
     frame.columns = [str(name) for name in frame.columns]
     frame[ROW_COLUMN] = np.arange(len(frame))
+    anomaly = recipe["task"] == "anomaly"
     if target:
         if target not in frame.columns:
             raise ValueError(f"目的の列 {target} がありません")
-        frame = frame[frame[target].notna()]
+        frame = (
+            anomaly_target(
+                frame, target, recipe["split"].get("unlabeled", "drop")
+            )
+            if anomaly else frame[frame[target].notna()]
+        )
+    if anomaly:
+        roles["id"] = anomaly_id(data, recipe)
     steps = recipe["steps"] if upto is None else recipe["steps"][:upto]
 
     # 分割の前の手順, 分割, 分割の後の手順. 分割に使う日時とグループの
@@ -990,7 +1333,10 @@ def apply_recipe(
         if group in frame.columns:
             frame[GROUP_COLUMN] = frame[group]
         split = {**split, "column": GROUP_COLUMN}
-    frame[SPLIT_COLUMN] = assign_splits(frame, split, split_roles)
+    frame[SPLIT_COLUMN] = (
+        anomaly_splits(frame, split, target) if anomaly
+        else assign_splits(frame, split, split_roles)
+    )
     frame = frame.drop(columns=[TIME_COLUMN, GROUP_COLUMN], errors="ignore")
     for number, spec in enumerate(steps[head:], head + 1):
         frame = run_step(
@@ -1144,8 +1490,13 @@ def prepare(
             "は, 多視点の学習の正解の形が決まってから)"
         )
 
-    # 分割と手順
+    # 分割と手順 (異常の検知は表と時系列だけ)
     recipe = load_recipe(recipe)
+    anomaly = recipe["task"] == "anomaly"
+    if anomaly and data.kind not in ANOMALY_KINDS:
+        raise ValueError(
+            f"異常の検知 (task: anomaly) は表と時系列だけです: {data.kind}"
+        )
     result, roles = apply_recipe(data, recipe)
     target = roles.get("target")
     if target and target not in result.columns:
@@ -1172,6 +1523,12 @@ def prepare(
                 f"回帰の目的の列 {target} が数値ではありません "
                 f"({result[target].dtype}). タスクを分類にするか, 型を変える"
             )
+
+    # 異常の検知の行の id (手順で落としても変えても元の値)
+    if anomaly:
+        result[roles["id"]] = id_values(
+            data, roles["id"], result[ROW_COLUMN].tolist()
+        )
     names = [n for n in SPLITS if (result[SPLIT_COLUMN] == n).any()]
     positions = {
         n: result.loc[result[SPLIT_COLUMN] == n, ROW_COLUMN].tolist()
@@ -1201,6 +1558,8 @@ def prepare(
         extra, extra_rows = unlabeled_split(
             data, recipe, target, features, list(frames["train"].columns)
         )
+        if extra_rows and anomaly:
+            extra[roles["id"]] = id_values(data, roles["id"], extra_rows)
         if extra_rows:
             frames[UNLABELED] = extra
             positions[UNLABELED] = extra_rows
@@ -1249,9 +1608,20 @@ def prepare(
     notes.extend(overlaps)
     if target and recipe["task"] == "none":
         notes.append(NO_TASK_NOTE)
+
+    # 異常の検知の説明と, 検証用とテスト用に異常の行が無い注意
+    summary = None
+    if anomaly:
+        summary = anomaly_summary(data, recipe, target, frames, positions)
+        found = sum(
+            summary["rows"].get(name, {}).get("anomaly", 0)
+            for name in ("valid", "test")
+        )
+        if target and not found:
+            notes.append(NO_ANOMALY_NOTE)
     prepared = Prepared(
         frames=frames, recipe=recipe, features=features, target=target,
-        classes=classes, notes=notes, findings=findings
+        classes=classes, notes=notes, findings=findings, anomaly=summary
     )
 
     return prepared
@@ -1784,6 +2154,8 @@ def export_dataset(
             "recipe": "recipe.yaml",
             "notes": prepared.notes,
         }
+        if prepared.anomaly is not None:
+            info["anomaly"] = to_plain(prepared.anomaly)
         finish_writing(target, final, info, parent)
     except Exception:
         drop_writing(target, parent)
@@ -1942,7 +2314,8 @@ class Dataset:
         )
         if labeled:
             dtype = (
-                np.int64 if self.info["task"] == "classification"
+                np.int64
+                if self.info["task"] in ("classification", "anomaly")
                 else np.float32
             )
             # 書き込める配列にする (PyTorch のテンソルにそのまま渡せるように)
@@ -2399,7 +2772,9 @@ def text_vocabulary(place: "DatasetPlace", info: dict) -> Optional[int]:
     return size
 
 
-def model_outputs(task: Optional[str], classes: list) -> Optional[int]:
+def model_outputs(
+    task: Optional[str], classes: list, width: int
+) -> Optional[int]:
     """
     モデルが 1 件に出す値の数を, タスクから求める関数
 
@@ -2409,11 +2784,14 @@ def model_outputs(task: Optional[str], classes: list) -> Optional[int]:
         タスク (決めていなければ None)
     classes: list
         分類のクラス
+    width: int
+        学習に使う列の数
 
     Returns
     ----------
     outputs: Optional[int]
-        分類はクラスの数, 回帰と時系列の予測は 1. 分からなければ None
+        分類はクラスの数, 回帰と時系列の予測は 1, 異常の検知は学習に使う
+        列の数 (自己符号化器が入力を作り直す). 分からなければ None
     """
     # 版 1 の説明は何期先までを持たないので, 時系列の予測も 1 行に 1 つ
     outputs = None
@@ -2421,6 +2799,8 @@ def model_outputs(task: Optional[str], classes: list) -> Optional[int]:
         outputs = len(classes)
     elif task in ("regression", "forecasting"):
         outputs = 1
+    elif task == "anomaly":
+        outputs = width
 
     return outputs
 
@@ -2744,7 +3124,9 @@ def model_inputs(
         "target": info.get("target"),
         "classes": classes if task == "classification" else None,
         "target_kind": None,
-        "outputs": model_outputs(task, classes),
+        "outputs": model_outputs(
+            task, classes, len(info.get("features") or [])
+        ),
     }
 
     return result
