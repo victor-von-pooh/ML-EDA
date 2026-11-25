@@ -4,18 +4,20 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, BinaryIO, Optional
+
+# リンクをたどらない印
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 # 開いた親の下のディレクトリを開くときの印 (リンクはたどらない)
-DIRECTORY_FLAGS = (
-    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    | getattr(os, "O_NOFOLLOW", 0)
-)
+DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | NOFOLLOW
+
+# 開いた親の下のファイルを読むときの印 (リンクはたどらず, FIFO などを
+# 待たない)
+FILE_READ_FLAGS = os.O_RDONLY | NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
 
 # 開いた親の下に写すファイルの印 (リンクはたどらず, 既にあれば誤り)
-FILE_FLAGS = (
-    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-)
+FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW
 
 # 開いた親に書くときの, 中身を書く手元の一時の場所の名前の頭
 HOLDER_PREFIX = "ml_eda-writing-"
@@ -370,3 +372,119 @@ def move_into(target: Path, parent: int, name: str, final: Path) -> None:
         raise
     finally:
         drop_holder(target)
+
+
+def open_under(parent: int, name: str, place: Any) -> BinaryIO:
+    """
+    開いた親の中のデータセットのファイルを, リンクをたどらずに開く関数
+
+    データセットのディレクトリから一段ずつ O_NOFOLLOW で開き, 最後の
+    ファイルも普通のファイルであることを開いた後に確かめる
+
+    Parameters
+    ----------
+    parent: int
+        データセットの親のディレクトリの記述子
+    name: str
+        親の中のデータセットの名前
+    place: Any
+        説明に書かれた場所 (データセットからの相対)
+
+    Returns
+    ----------
+    file: BinaryIO
+        読むために開いたファイル (閉じるのは呼ぶ側)
+
+    Raises
+    ----------
+    ValueError
+        場所が文字でないか外を指す (絶対パスや ..) 場合と, 途中か場所が
+        リンクか普通のファイルでない場合
+    FileNotFoundError
+        ファイルが無い場合
+    """
+    # 書かれた場所の文字の上での確かめ (外と空は誤り)
+    text = place if isinstance(place, str) else ""
+    normal = os.path.normpath(text) if text else ""
+    parts = [part for part in normal.split(os.sep) if part not in ("", ".")]
+    if not parts or os.path.isabs(text) or ".." in parts:
+        raise ValueError(f"データセットの外か空の場所です: {place}")
+
+    # データセットから一段ずつの, リンクをたどらない開き
+    fds: list[int] = []
+    try:
+        names = [name, *parts]
+        for index, part in enumerate(names):
+            last = index == len(parts)
+            flags = FILE_READ_FLAGS if last else DIRECTORY_FLAGS
+            where = fds[-1] if fds else parent
+            try:
+                fds.append(os.open(part, flags, dir_fd=where))
+            except FileNotFoundError as error:
+                raise FileNotFoundError(
+                    f"データセットに {text} がありません"
+                ) from error
+            except OSError as error:
+                raise ValueError(
+                    refused_reason(where, part, names[:index], last)
+                ) from error
+        if not stat.S_ISREG(os.fstat(fds[-1]).st_mode):
+            raise ValueError(
+                f"データセットの {text} は普通のファイルではありません"
+            )
+        file = os.fdopen(fds[-1], "rb")
+        fds.pop()
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+    return file
+
+
+def refused_reason(
+    where: int, part: str, before: list[str], last: bool
+) -> str:
+    """
+    開いた親の中で開けなかった場所の理由の文を返す関数
+
+    Parameters
+    ----------
+    where: int
+        開けなかった場所の親のディレクトリの記述子
+    part: str
+        開けなかった場所の名前
+    before: list[str]
+        その場所より前の名前 (先頭はデータセットの名前. データセット自体
+        なら空)
+    last: bool
+        読むファイルそのものか (False ならディレクトリのはずの場所)
+
+    Returns
+    ----------
+    reason: str
+        何がリンクか, ディレクトリでないかの文
+    """
+    # 場所の呼び方 (データセット, 途中のディレクトリ, 読むファイル)
+    if not before and not last:
+        what = f"データセットのディレクトリ {part}"
+    elif last:
+        what = f"データセットのファイル {'/'.join([*before[1:], part])}"
+    else:
+        what = (
+            f"データセットの途中のディレクトリ "
+            f"{'/'.join([*before[1:], part])}"
+        )
+
+    # リンクか, それ以外 (ディレクトリでないものなど) かの見分け
+    try:
+        mode = os.stat(part, dir_fd=where, follow_symlinks=False).st_mode
+        linked = stat.S_ISLNK(mode)
+    except OSError:
+        linked = False
+    reason = (
+        f"{what} がシンボリックリンクなので読みません" if linked
+        else f"{what} を開けないので読みません (ディレクトリでないもの"
+        "などです)"
+    )
+
+    return reason
