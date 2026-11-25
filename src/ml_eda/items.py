@@ -26,8 +26,8 @@ from ml_eda.media import (
 from ml_eda.pipeline import (
     DATASET_FORMAT_VERSION, ITEMS_FORMAT_VERSION, ITEMS_FORMAT_VERSIONS,
     ITEMS_STEPS_FORMAT_VERSION, SOURCE_NOTE, SPLITS, UNLABELED,
-    assign_splits, count_overlap, finish_writing, source_name,
-    start_writing, write_frame
+    assign_splits, count_overlap, drop_writing, finish_writing,
+    source_name, start_writing, write_frame
 )
 
 # 正解の出どころの種類
@@ -753,7 +753,8 @@ def check_entry_names(entries: dict) -> None:
 
 
 def write_items(
-    target: Path, final: Path, rows: list[dict], info: dict
+    target: Path, final: Path, rows: list[dict], info: dict,
+    parent: Optional[int] = None
 ) -> dict:
     """
     1 行 1 件の表と分割の件数と説明を書き, 書き出しを終える関数
@@ -768,6 +769,8 @@ def write_items(
         件ごとの id, split, (group), 項目の場所か値
     info: dict
         dataset.yaml の中身 (items と splits はここで入れる)
+    parent: Optional[int] = None
+        start_writing に渡した親の記述子
 
     Returns
     ----------
@@ -785,7 +788,7 @@ def write_items(
         name: {"items": int(counts[name])}
         for name in (*SPLITS, UNLABELED) if counts.get(name, 0)
     }
-    finish_writing(target, final, info)
+    finish_writing(target, final, info, parent)
 
     return info
 
@@ -898,7 +901,8 @@ def export_image_masks(
     groups: Optional[dict] = None, classes: Any = None,
     origin: Optional[dict] = None, name: Optional[str] = None,
     overwrite: bool = False, mask_suffix: str = "",
-    item_steps: Optional[dict] = None, follow_links: bool = False
+    item_steps: Optional[dict] = None, follow_links: bool = False,
+    parent: Optional[int] = None
 ) -> dict:
     """
     画像と領域の対を, 版 2 のデータセットに書き出す関数
@@ -935,6 +939,10 @@ def export_image_masks(
     follow_links: bool = False
         画像と領域のディレクトリの外を指すリンクの先も写すか (False では
         除いて notes に書く)
+    parent: Optional[int] = None
+        使う側が開いた, 書き出す場所の親のディレクトリの記述子 (渡すと
+        path の最後の部分を親の中の名前とし, 途中の場所をたどらずに書く.
+        閉じるのは使う側)
 
     Returns
     ----------
@@ -1017,7 +1025,7 @@ def export_image_masks(
         )
 
     # 1 件ずつの写しか, 手順をかけた書き込み (失敗したら一時ディレクトリを削除)
-    final, target = start_writing(path, overwrite)
+    final, target = start_writing(path, overwrite, parent)
     try:
         rows, written = [], []
         for index, (stem, image, mask) in enumerate(pairs):
@@ -1124,9 +1132,9 @@ def export_image_masks(
         }
         for key, listed_steps in steps.items():
             info["entries"][key]["steps"] = listed_steps
-        info = write_items(target, final, rows, info)
+        info = write_items(target, final, rows, info, parent)
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)
+        drop_writing(target, parent)
         raise
 
     return info
@@ -1821,7 +1829,7 @@ def export_capture_clouds(
     groups: Optional[dict] = None, origin: Optional[dict] = None,
     cloud_units: str = "meter", name: Optional[str] = None,
     overwrite: bool = False, item_steps: Optional[dict] = None,
-    follow_links: bool = False
+    follow_links: bool = False, parent: Optional[int] = None
 ) -> dict:
     """
     多視点の撮影と正解の点群の対を, 版 2 のデータセットに書き出す関数
@@ -1857,6 +1865,10 @@ def export_capture_clouds(
     follow_links: bool = False
         撮影 (中の各枚と点群も) と点群のディレクトリの外を指すリンクの先も
         写すか (False では外を指す撮影, 枚, 点群を除いて notes に書く)
+    parent: Optional[int] = None
+        使う側が開いた, 書き出す場所の親のディレクトリの記述子 (渡すと
+        path の最後の部分を親の中の名前とし, 途中の場所をたどらずに書く.
+        閉じるのは使う側)
 
     Returns
     ----------
@@ -1895,7 +1907,7 @@ def export_capture_clouds(
     notes += split_notes
 
     # 1 件ずつ, 正規化して写す (失敗したら一時ディレクトリを消す)
-    final, target = start_writing(path, overwrite)
+    final, target = start_writing(path, overwrite, parent)
     try:
         rows, frame_shapes, cloud_shapes, conventions = [], [], [], []
         # 正解の無い撮影は, 正解の付いた件の後ろに unlabeled で書く
@@ -2012,9 +2024,9 @@ def export_capture_clouds(
         }
         for key, listed_steps in steps.items():
             info["entries"][key]["steps"] = listed_steps
-        info = write_items(target, final, rows, info)
+        info = write_items(target, final, rows, info, parent)
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)
+        drop_writing(target, parent)
         raise
 
     return info
