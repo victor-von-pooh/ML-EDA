@@ -30,6 +30,7 @@ from ml_eda.trajectory import (
     TRAJECTORY_FORMAT_VERSION, Trajectory, describe_trajectory,
     load_trajectory
 )
+from ml_eda.uplift import describe_uplift
 
 __version__ = "0.1.0"
 
@@ -43,7 +44,8 @@ __all__ = [
     "describe_item_steps", "describe_reactions", "export_capture_clouds",
     "export_image_masks",
     "describe_loaders",
-    "describe_steps", "describe_trajectory", "detect", "export_dataset",
+    "describe_steps", "describe_trajectory", "describe_uplift", "detect",
+    "export_dataset",
     "export_group_rows",
     "frame_view", "load_data",
     "load_dataset", "load_items", "load_reactions", "load_recipe",

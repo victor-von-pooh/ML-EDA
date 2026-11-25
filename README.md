@@ -16,12 +16,13 @@
 - **記録した軌跡**: 強化学習の 1 歩が 1 行の軌跡 (ML-Found が評価で書くものと, 手元の CSV と Parquet) を読み, エピソードの長さ, 報酬の和, 観測と行動の値, 守りの結果, 行動を選んだ確率の列の有無と範囲を要約する
 - **並べるの反応の表**: 推薦の学習に使う 1 行が 1 つの反応の表を, ML-Quest の並べるの骨組みと同じ決まりで読み, 利用者, 品物, 反応の数, 利用者ごとの数の分布, 品物の人気の偏り, 時刻の範囲, 除いた行の数を要約する
 - **群分けの表**: 群分け (まとめる) の 1 行が 1 つの対象の表を, 分析の保存として版 2 のデータセットに書き出して読み (学習には表のファイルを渡す), 学習の前に列の特徴をそのまま k-means で分けた群 (か渡した群) の要約 (群ごとの行の数, 割合, 安定性, 列の平均と最も多い値) を, ML-Quest のまとめるの骨組みの群の要約と同じ形で返す
+- **介入の記録の表**: クーポンを無作為に配った記録のような, 処置の列と結果の列を持つ表を分析し (処置の群と対照の群の行の数, 結果の差, 特徴の釣り合い, 処置の後に決まる列などの気付き), 全ての分割に両方の群を置いて書き出す (`task: uplift`)
 
 ## どのアプリから使われるか
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs`, 群の要約 (`describe_groups`) |
+| ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs`, 群の要約 (`describe_groups`), 介入の記録の要約 (`describe_uplift`) |
 | ML-Quest (問題の設定) | データの読み方 (`Data.source`), レシピの雛形と書き戻し, ファイルの組の書き出しの設定. 手元のデータの答えの候補 |
 | ML-CreateArchitecture (モデルの作成) | `model_inputs` でモデルの定義の入力と出力をデータセットに合わせる |
 | ML-Found | `task_from_dataset` が `dataset.yaml` を読む (`ml_eda` は使わない). 評価の軌跡 (`trajectories/`) は ML-EDA が読む |
@@ -99,6 +100,29 @@ id: reading_id
 steps:
   - {op: standardize, columns: auto}
 split: {method: random, valid: 0.2, test: 0.2, seed: 0, unlabeled: normal}
+```
+
+効果を見積もる (クーポンを配ったときに顧客ごとに買う確率や額がどれだけ上がるか) は `task: uplift` で書く. 処置は無作為に配った記録を前提にする. 結果の列 (`target`) と処置の列 (`treatment`. 配ったら 1 か真, 配らなければ 0 か偽) を必ず書き, 結果の種類 (`outcome`) は `binary` (買ったかの 0 と 1) か `amount` (買った額. 書かなければ値から決める). 分割は `stratified` だけで, 処置 (`binary` は処置と結果の組) で層を作り, 全ての分割に処置の群と対照の群を置く. 処置の列は学習に使う列から除き, 全ての分割に元の値の 0 と 1 で残る (`dataset.treatment(split)`). 行の id は異常の検知と同じ. `dataset.yaml` の `uplift` に分割ごとの群の行の数, 結果の平均と差が入る.
+
+```yaml
+task: uplift
+target: bought
+treatment: coupon
+outcome: binary
+id: customer_id
+steps:
+  - {op: standardize, columns: auto}
+split: {method: stratified, valid: 0.2, test: 0.2, seed: 0}
+```
+
+```python
+from ml_eda import describe_uplift
+
+summary = describe_uplift("coupons.csv", "coupon", "bought", id="customer_id")
+summary["groups"]      # treated と control の rows と mean (結果の平均)
+summary["effect"]      # 結果の平均の差 (処置の群 - 対照の群)
+summary["balance"]     # 列ごとの標準化した平均の差 (smd) の大きい順
+summary["findings"]    # small_group, treatment_imbalance, post_treatment など
 ```
 
 ### 画像, 文, 点群, 音声
