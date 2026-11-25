@@ -12,7 +12,7 @@ import pytest
 
 from ml_eda import (
     export_capture_clouds, export_dataset, export_image_masks, load_data,
-    load_dataset, load_items
+    load_dataset, load_items, model_inputs
 )
 from ml_eda import items as items_module
 from ml_eda import pinned, pipeline
@@ -582,3 +582,106 @@ def test_holder_private(holders: Path) -> None:
     finally:
         pinned.drop_holder(target)
     assert list(holders.iterdir()) == []
+
+
+def test_parent_model_inputs(
+    tmp_path: Path, opened: tuple[Path, int]
+) -> None:
+    """
+    開いた親を渡した model_inputs が, パスで読んだ結果と同じで, 途中が
+    替わっても替わった先を読まないことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    opened: tuple[Path, int]
+        親の場所と, 開いた記述子
+
+    Returns
+    ----------
+    None
+    """
+    # 表と, 中身の配列と語彙を持つ文のデータセット
+    place, fd = opened
+    export_dataset(small_table(tmp_path), RECIPE, place / NAME, parent=fd)
+    for label, words in (("pos", "good great"), ("neg", "bad awful")):
+        (tmp_path / "reviews" / label).mkdir(parents=True)
+        for index in range(5):
+            (tmp_path / "reviews" / label / f"{index}.txt").write_text(
+                f"this is {words} {index}", encoding="utf-8"
+            )
+    recipe = {
+        "target": "label", "task": "classification",
+        "item_steps": [{"op": "vocabulary", "length": 6}],
+        "split": {"method": "stratified", "valid": 0.2},
+    }
+    export_dataset(
+        load_data(tmp_path / "reviews"), recipe, place / "text", parent=fd
+    )
+
+    # パスで読んだものと同じ (語彙と配列の型も)
+    for name in (NAME, "text"):
+        assert model_inputs(place / name, parent=fd) == model_inputs(
+            place / name
+        )
+    assert model_inputs(place / "text", parent=fd)["inputs"][0][
+        "vocabulary"
+    ] > 0
+
+    # 途中を外を指すリンクに替えた後の, 開いた親の中の読み込み (外の
+    # 偽物は読まない)
+    outside = tmp_path / "outside"
+    export_dataset(
+        small_table(tmp_path), {**RECIPE, "task": "regression"},
+        outside / "b" / NAME
+    )
+    (tmp_path / "project" / "a").rename(tmp_path / "project" / "moved")
+    (tmp_path / "project" / "a").symlink_to(outside)
+    assert model_inputs(place / NAME)["task"] == "regression"
+    assert model_inputs(place / NAME, parent=fd)["task"] == (
+        "classification"
+    )
+
+
+def test_parent_model_inputs_links(
+    tmp_path: Path, opened: tuple[Path, int]
+) -> None:
+    """
+    開いた親を渡した model_inputs が, 中のリンクと外を指す場所と,
+    follow_links との組を誤りにすることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    opened: tuple[Path, int]
+        親の場所と, 開いた記述子
+
+    Returns
+    ----------
+    None
+    """
+    # データセットそのものがリンク
+    place, fd = opened
+    export_dataset(small_table(tmp_path), RECIPE, tmp_path / "elsewhere")
+    (place / NAME).symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(ValueError, match="シンボリックリンク"):
+        model_inputs(place / NAME, parent=fd)
+
+    # 説明がリンク
+    (place / "inner").mkdir()
+    (place / "inner" / "dataset.yaml").symlink_to(
+        tmp_path / "elsewhere" / "dataset.yaml"
+    )
+    with pytest.raises(ValueError, match="シンボリックリンク"):
+        model_inputs(place / "inner", parent=fd)
+
+    # 無い説明と, follow_links との組
+    (place / "empty").mkdir()
+    with pytest.raises(FileNotFoundError, match="dataset.yaml"):
+        model_inputs(place / "empty", parent=fd)
+    with pytest.raises(ValueError, match="follow_links"):
+        model_inputs(place / "empty", follow_links=True, parent=fd)
+    with pytest.raises(ValueError, match="データセットの外"):
+        pinned.read_under(fd, "empty", "../x")

@@ -4,18 +4,20 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, BinaryIO, Optional
+
+# リンクをたどらない印
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 # 開いた親の下のディレクトリを開くときの印 (リンクはたどらない)
-DIRECTORY_FLAGS = (
-    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    | getattr(os, "O_NOFOLLOW", 0)
-)
+DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | NOFOLLOW
+
+# 開いた親の下のファイルを読むときの印 (リンクはたどらず, FIFO などを
+# 待たない)
+FILE_READ_FLAGS = os.O_RDONLY | NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
 
 # 開いた親の下に写すファイルの印 (リンクはたどらず, 既にあれば誤り)
-FILE_FLAGS = (
-    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-)
+FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW
 
 # 開いた親に書くときの, 中身を書く手元の一時の場所の名前の頭
 HOLDER_PREFIX = "ml_eda-writing-"
@@ -370,3 +372,102 @@ def move_into(target: Path, parent: int, name: str, final: Path) -> None:
         raise
     finally:
         drop_holder(target)
+
+
+def read_under(parent: int, name: str, place: Any) -> bytes:
+    """
+    開いた親の中のデータセットのファイルを, リンクをたどらずに読む関数
+
+    Parameters
+    ----------
+    parent: int
+        データセットの親のディレクトリの記述子
+    name: str
+        親の中のデータセットの名前
+    place: Any
+        説明に書かれた場所 (データセットからの相対)
+
+    Returns
+    ----------
+    data: bytes
+        ファイルの中身
+
+    Raises
+    ----------
+    ValueError
+        場所が文字でないか外を指す (絶対パスや ..) 場合と, 途中か場所が
+        リンクか普通のファイルでない場合
+    FileNotFoundError
+        ファイルが無い場合
+    """
+    # 開いたファイルの中身の全て
+    with open_under(parent, name, place) as file:
+        data = file.read()
+
+    return data
+
+
+def open_under(parent: int, name: str, place: Any) -> BinaryIO:
+    """
+    開いた親の中のデータセットのファイルを, リンクをたどらずに開く関数
+
+    データセットのディレクトリから一段ずつ O_NOFOLLOW で開き, 最後の
+    ファイルも普通のファイルであることを開いた後に確かめる
+
+    Parameters
+    ----------
+    parent: int
+        データセットの親のディレクトリの記述子
+    name: str
+        親の中のデータセットの名前
+    place: Any
+        説明に書かれた場所 (データセットからの相対)
+
+    Returns
+    ----------
+    file: BinaryIO
+        読むために開いたファイル (閉じるのは呼ぶ側)
+
+    Raises
+    ----------
+    ValueError
+        場所が文字でないか外を指す (絶対パスや ..) 場合と, 途中か場所が
+        リンクか普通のファイルでない場合
+    FileNotFoundError
+        ファイルが無い場合
+    """
+    # 書かれた場所の文字の上での確かめ (外と空は誤り)
+    text = place if isinstance(place, str) else ""
+    normal = os.path.normpath(text) if text else ""
+    parts = [part for part in normal.split(os.sep) if part not in ("", ".")]
+    if not parts or os.path.isabs(text) or ".." in parts:
+        raise ValueError(f"データセットの外か空の場所です: {place}")
+
+    # データセットから一段ずつの, リンクをたどらない開き
+    fds: list[int] = []
+    try:
+        for index, part in enumerate([name, *parts]):
+            last = index == len(parts)
+            flags = FILE_READ_FLAGS if last else DIRECTORY_FLAGS
+            where = fds[-1] if fds else parent
+            try:
+                fds.append(os.open(part, flags, dir_fd=where))
+            except FileNotFoundError as error:
+                raise FileNotFoundError(
+                    f"データセットに {text} がありません"
+                ) from error
+            except OSError as error:
+                raise ValueError(
+                    f"データセットの {text} の途中か場所がシンボリック"
+                    "リンクかディレクトリでないので読みません"
+                ) from error
+        if not stat.S_ISREG(os.fstat(fds[-1]).st_mode):
+            raise ValueError(
+                f"データセットの {text} は普通のファイルではありません"
+            )
+        file = os.fdopen(fds.pop(), "rb")
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+    return file

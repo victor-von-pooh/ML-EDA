@@ -18,7 +18,8 @@ from ml_eda.itemprep import (
 )
 from ml_eda.loaders import within
 from ml_eda.pinned import (
-    drop_holder, entry_name, entry_state, make_holder, move_into
+    drop_holder, entry_name, entry_state, make_holder, move_into,
+    open_under, read_under
 )
 from ml_eda.profile import finding, to_json
 from ml_eda.recipe import (
@@ -2314,20 +2315,16 @@ def load_dataset(
     return dataset
 
 
-def item_input(
-    root: Path, splits: dict, follow_links: bool = False
-) -> Optional[dict]:
+def item_input(place: "DatasetPlace", splits: dict) -> Optional[dict]:
     """
     画像, 文, 点群, 音声の中身の配列から, モデルの入力の形と型を求める関数
 
     Parameters
     ----------
-    root: Path
-        データセットのディレクトリ
+    place: DatasetPlace
+        データセットの場所 (読み方)
     splits: dict
         説明の splits
-    follow_links: bool = False
-        リンクをたどった後にデータセットの外を指す場所も読むか
 
     Returns
     ----------
@@ -2350,34 +2347,27 @@ def item_input(
         result = None
         return result
     item = splits[chosen[0]]
-    array = np.load(
-        within(root, item["items"], False, follow_links, FileNotFoundError),
-        allow_pickle=False, mmap_mode="r"
-    )
-    shape = list(item.get("shape") or array.shape)
+    found, dtype = place.array_header(item["items"])
+    shape = list(item.get("shape") or found)
     result = {
         "name": MODEL_INPUT,
         "shape": [None] + [int(size) for size in shape[1:]],
-        "dtype": str(array.dtype),
+        "dtype": str(dtype),
     }
 
     return result
 
 
-def text_vocabulary(
-    root: Path, info: dict, follow_links: bool = False
-) -> Optional[int]:
+def text_vocabulary(place: "DatasetPlace", info: dict) -> Optional[int]:
     """
     文のデータセットの当てはめた語彙から, 語彙の大きさを求める関数
 
     Parameters
     ----------
-    root: Path
-        データセットのディレクトリ
+    place: DatasetPlace
+        データセットの場所 (読み方)
     info: dict
         説明 (dataset.yaml)
-    follow_links: bool = False
-        リンクをたどった後にデータセットの外を指す場所も読むか
 
     Returns
     ----------
@@ -2397,10 +2387,7 @@ def text_vocabulary(
     if info.get("kind") != "text":
         return size
     recipe = yaml.safe_load(
-        within(
-            root, info.get("recipe", "recipe.yaml"), False, follow_links,
-            FileNotFoundError
-        ).read_text(encoding="utf-8")
+        place.read(info.get("recipe", "recipe.yaml")).decode("utf-8")
     ) or {}
     for step in recipe.get("item_steps") or []:
         if not isinstance(step, dict) or step.get("op") != "vocabulary":
@@ -2593,8 +2580,83 @@ def items_model_inputs(info: dict) -> dict:
     )
 
 
+@dataclass(frozen=True)
+class DatasetPlace:
+    # 書き出したデータセットのディレクトリ
+    root: Path
+    # リンクをたどった後にデータセットの外を指す場所も読むか
+    follow_links: bool = False
+    # 親のディレクトリの記述子 (渡すと, root の最後の部分を親の中の名前
+    # とし, 親に対する相対でリンクをたどらずに読む)
+    parent: Optional[int] = None
+
+    def read(self, name: Any) -> bytes:
+        """
+        データセットの中のファイルを読む関数
+
+        Parameters
+        ----------
+        name: Any
+            書かれた場所 (データセットからの相対)
+
+        Returns
+        ----------
+        data: bytes
+            ファイルの中身
+        """
+        # 開いた親に対するか, パスでの読み込み (どちらも中に限る)
+        if self.parent is not None:
+            data = read_under(self.parent, entry_name(self.root), name)
+            return data
+        data = within(
+            self.root, name, False, self.follow_links, FileNotFoundError
+        ).read_bytes()
+
+        return data
+
+    def array_header(self, name: Any) -> tuple[tuple, np.dtype]:
+        """
+        中身の配列のファイルの頭から, 形と型を読む関数
+
+        Parameters
+        ----------
+        name: Any
+            書かれた場所 (データセットからの相対)
+
+        Returns
+        ----------
+        header: tuple[tuple, np.dtype]
+            配列の形と型
+        """
+        # パスでは配列の写像, 開いた親ではファイルの頭だけの読み込み
+        if self.parent is None:
+            array = np.load(
+                within(
+                    self.root, name, False, self.follow_links,
+                    FileNotFoundError
+                ),
+                allow_pickle=False, mmap_mode="r"
+            )
+            header = (tuple(array.shape), array.dtype)
+            return header
+        with open_under(self.parent, entry_name(self.root), name) as file:
+            version = np.lib.format.read_magic(file)
+            if version == (1, 0):
+                shape, _, dtype = np.lib.format.read_array_header_1_0(file)
+            elif version == (2, 0):
+                shape, _, dtype = np.lib.format.read_array_header_2_0(file)
+            else:
+                raise ValueError(
+                    f"{name} の .npy の版 {version} は頭だけでは読めません"
+                )
+        header = (tuple(shape), dtype)
+
+        return header
+
+
 def model_inputs(
-    path: Union[str, Path], follow_links: bool = False
+    path: Union[str, Path], follow_links: bool = False,
+    parent: Optional[int] = None
 ) -> dict:
     """
     書き出したデータセットから, モデルの入力と出す値の数を求める関数
@@ -2606,6 +2668,10 @@ def model_inputs(
     follow_links: bool = False
         説明, 中身の配列, レシピのうち, リンクをたどった後にデータセットの
         外を指すものも読むか (False では誤り. load_dataset と同じ)
+    parent: Optional[int] = None
+        書き出した場所の親のディレクトリの記述子 (渡すと path の最後の
+        部分を親の中の名前とし, 親に対する相対でリンクをたどらずに読む.
+        path の途中は使わない. follow_links とは一緒に渡せない)
 
     Returns
     ----------
@@ -2626,10 +2692,14 @@ def model_inputs(
     """
     # 説明と版の確認 (分割のデータは読まない. ファイルの組は説明だけ).
     # 読む場所はデータセットの中に限る
+    if parent is not None and follow_links:
+        raise ValueError(
+            "開いた親 (parent) を渡す場合は, リンクをたどれません "
+            "(follow_links=True は渡せません)"
+        )
     root = Path(path).expanduser().absolute()
-    info = yaml.safe_load(within(
-        root, "dataset.yaml", False, follow_links, FileNotFoundError
-    ).read_text(encoding="utf-8"))
+    place = DatasetPlace(root, follow_links, parent)
+    info = yaml.safe_load(place.read("dataset.yaml").decode("utf-8"))
     version = info.get("format_version") if isinstance(info, dict) else None
     if version in ITEMS_FORMAT_VERSIONS:
         result = items_model_inputs(info)
@@ -2641,10 +2711,10 @@ def model_inputs(
         )
 
     # 入力 (画像などは中身の配列, 表は学習に使う列を並べた 1 つ)
-    single = item_input(root, info.get("splits") or {}, follow_links)
+    single = item_input(place, info.get("splits") or {})
     if single is not None:
         # 文の語の番号は, 埋め込みに要る語彙の大きさも (書き出したレシピから)
-        vocabulary = text_vocabulary(root, info, follow_links)
+        vocabulary = text_vocabulary(place, info)
         if vocabulary is not None:
             single["vocabulary"] = vocabulary
     if single is None:
