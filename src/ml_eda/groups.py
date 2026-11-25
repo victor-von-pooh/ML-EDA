@@ -241,7 +241,8 @@ def export_group_rows(
     loader: Optional[str] = None, **options: Any
 ) -> dict:
     """
-    群分け (まとめる) の表を, 版 2 のデータセットに書き出す関数
+    群分け (まとめる) の表を, 分析の保存として版 2 のデータセットに書き出す関数
+    (群分けの学習には使わず, 学習には表のファイルを渡す)
 
     Parameters
     ----------

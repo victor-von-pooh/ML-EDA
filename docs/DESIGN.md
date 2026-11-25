@@ -20,7 +20,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
 | 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
-| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
+| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む. 群分けの表 (版 2 の `role: group`) は分析の保存で, 学習には使わない. 下の「群分けの表」), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
 | データの読み方 (`Data.source` の `loader`, `options`, `size`, `modified`) | 持つ | 版を持たない (読み込みの名前と設定, 読んだときの大きさと更新時刻) | ML-Quest (問題の設定の `data` に残し, `size` と `modified` で入れた後にファイルが変わったかを確かめる), ML-Fathom. 下の「読み込み」と「データの形」の `source` |
 | 1 件の場所 (`Data.source` の `root` と `frame` の `path`) | 持つ | 版を持たない (下の形) | ML-Fathom (1 件の中身を読む前に, 読み込んだディレクトリの中かを確かめる), ML-Inference (撮影の 1 件の場所). 下の「データの形」の `source` |
 | 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の値の決まり (`convention.shift`) は, 見本の一覧の版 2 でこれと同じ向き (ML-Found の `load_samples` は逆の向きの版 1 を版 2 の意味に写して返す) |
@@ -31,7 +31,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 軌跡の要約 (`load_trajectory`, `describe_trajectory`) | 持つ | 版を持たない (下の形) | 利用者が直接呼ぶ. 下の「記録した軌跡」 |
 | 並べるの反応の表 (1 行が 1 つの反応の表のファイル 1 つ) | 読む | 版を持たない (列の名前は問題の設定の答え) | 形の出どころは ML-Quest の `docs/DESIGN.md` の「並べるの骨組み」の反応の表. ML-Quest の骨組みの学習のスクリプトと同じ決まりで読み, 除く行を数える. 下の「並べるの反応の表」 |
 | 反応の要約 (`load_reactions`, `describe_reactions`) | 持つ | 版を持たない (下の形) | 利用者が直接呼ぶ. 下の「並べるの反応の表」 |
-| 群分けの表 (版 2 の `role: group` のデータセット) | 持つ | データセットの版 2 に含む | 群分けの学習のスクリプト (`load_items` で読む), ML-Fathom (書き出し). 下の「群分けの表」 |
+| 群分けの表 (版 2 の `role: group` のデータセット) | 持つ | データセットの版 2 に含む | 分析の保存. ML-Fathom (書き出し), 利用者 (`load_items` で読み直し, `describe_groups` に渡す). 群分けの学習には使わない (学習には表のファイルを渡し, ML-Quest のまとめるの骨組みが `load_data` で読む). 下の「群分けの表」 |
 | 群の要約 (`describe_groups`) | 持つ | 版を持たない (下の形). 群の行は ML-Quest のまとめるの骨組みの `evaluations/group_summary.json` の行と同じ形 | ML-Fathom (分析の段階で群を見せる), ML-Inference (群の要約の形). 下の「群の要約」 |
 | 項目の置き方の組 (`PLACEMENTS`) | 持つ | データセットの版 2 と 3 に含む | ML-Inference (一式の項目の置き方の確かめ). 下の「公開の名前」 |
 
@@ -539,10 +539,12 @@ split:
 
 `export_group_rows(source, path, columns, id=None, split=None, name=None, overwrite=False, loader=None, **options)` は, 群分け (まとめる) の 1 行が 1 つの対象の表を版 2 のデータセットに書く. 正解が無く受け持ちが群分けなので, 版 1 (`task: none`) ではなく `role` を持つ版 2 で書く. ファイルは `dataset.yaml` と件の表 (`items.parquet` か `items.csv`) だけで, `items/` のディレクトリは作らない.
 
+書き出しは分析の保存 (群を作る列と分割を残し, 読み直して群の要約を求める) で, 群分けの学習には使わない. 学習には元の表のファイルをそのまま渡す (ML-Quest のまとめるの骨組みは, 並べるの骨組みと同じく表のファイルを `load_data` で読み, 分割も骨組みが行う).
+
 - `source` と列の決まりは「群の要約」と同じ (表のファイルか表の `Data`. 群を作る列の名前の誤りも同じ). `id` は行を見分ける列 (群を作る列に入れると誤り. 欠けか同じ値があれば誤り). 省くと行の位置 (0 から) の文字を件の `id` にする. `columns` と `id` の他の列は書かない
 - 項目: 群を作る列ごとに 1 つ (名前は列の名前の文字. `role: input`, `placement: column`). 数の列 (真偽値を除く) は `kind: value` で, `dtype` は書いた型 (`int64`, `float64` など. pandas の欠けを持てる型は `float64` にして書く). 他の列は `kind: class` で, 値を文字にし (欠けは欠けのまま), `dtype: str`. 値は件の表の同じ名前の列に置く
 - `role: group`, `target: {kind: none, entries: []}` (正解は無い. `origin` は書かない)
-- 分割: 版 2 と同じ `random` (既定. 検証用 2 割, 種 0) か `none`. `group` は誤り (グループの列を持たないため). 群分けの学習のスクリプトは検証用の行で群のまとまりを測る
+- 分割: 版 2 と同じ `random` (既定. 検証用 2 割, 種 0) か `none`. `group` は誤り (グループの列を持たないため)
 - `source`: 版 1 の「元の場所 (版 1)」と同じ畳み方 (場所は名前だけ, 読み込みの名前と設定, 大きさと更新時刻, 読んだ表の列の名前) に, 行を見分ける列の名前 `id` (無ければ None) を足す
 - `notes`: 群を作る列に欠けた値のある行の数と, 行の数の半分より多い種類の値を持つ他の列 (行を見分ける列のように群を作る力が無い)
 - 読み込み: `load_items` で読む. 1 件は `id`, `split`, `group` (None) と列ごとの値. `items.csv` では欠けた値が空の文字になるので, `load_items` は列の値の項目 (`placement: column`) のうち, `dtype` が数の型のものを数に (空と数にならない文字は欠け), 他のものを文字のまま (空は欠け) 読む. csv では欠けと空の文字を見分けられないので, 空の文字の値は欠けとして読む (parquet では空の文字のまま). `describe_groups(読んだデータセット, k=...)` で群の要約も求められる
