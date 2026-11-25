@@ -27,7 +27,7 @@ def make_readings(labels: Optional[list]) -> pd.DataFrame:
     frame: pd.DataFrame
         行の id, 2 つのセンサの値, (あれば) 正解の列を持つ表
     """
-    # 乱数を固定して列を作る
+    # 乱数を固定した表の列
     count = 200 if labels is None else len(labels)
     rng = np.random.default_rng(0)
     frame = pd.DataFrame({
@@ -60,7 +60,9 @@ def few_labels() -> list:
     return labels
 
 
-def anomaly_recipe(unlabeled: str, target: bool = True) -> dict:
+def anomaly_recipe(
+    unlabeled: str, target: bool = True, drop_id: bool = False
+) -> dict:
     """
     異常の検知のレシピを作る関数
 
@@ -70,20 +72,25 @@ def anomaly_recipe(unlabeled: str, target: bool = True) -> dict:
         正解の欠けた行の扱い
     target: bool = True
         正解の列を書くか
+    drop_id: bool = False
+        行の id の列を手順で落とすか
 
     Returns
     ----------
     recipe: dict
-        標準化して無作為に分けるレシピ
+        符号化と標準化をして無作為に分けるレシピ
     """
-    # 行の id の列は落としても元の値が残る
+    # auto の符号化と標準化 (行の id の列は役割で選ばれない)
+    steps = [
+        {"op": "one_hot", "columns": "auto"},
+        {"op": "standardize", "columns": "auto"},
+    ]
+    if drop_id:
+        steps.insert(0, {"op": "drop_columns", "columns": ["reading_id"]})
     recipe = {
         "task": "anomaly",
         "id": "reading_id",
-        "steps": [
-            {"op": "drop_columns", "columns": ["reading_id"]},
-            {"op": "standardize", "columns": "auto"},
-        ],
+        "steps": steps,
         "split": {
             "method": "random", "valid": 0.2, "test": 0.2, "seed": 0,
             "unlabeled": unlabeled,
@@ -109,7 +116,7 @@ def load_data_frame(frame: pd.DataFrame) -> Data:
     data: Data
         種類が表の Data
     """
-    # 読み込みを通さずに作る
+    # 読み込みを通さない Data
     data = Data(kind="table", frame=frame, source={})
 
     return data
@@ -131,7 +138,7 @@ def write_table(frame: pd.DataFrame, path: Path) -> Path:
     file: Path
         CSV の場所
     """
-    # 行の番号を書かない
+    # 行の番号を書かない CSV
     file = path / "readings.csv"
     frame.to_csv(file, index=False)
 
@@ -158,7 +165,7 @@ def test_few_labels_normal(tmp_path: Path) -> None:
     info = export_dataset(data, anomaly_recipe("normal"), tmp_path / "ds")
     dataset = load_dataset(tmp_path / "ds")
 
-    # 学習用は正常の行だけ, 異常の行は検証用とテスト用に分かれる
+    # 学習用は正常の行だけ, 異常の行の検証用とテスト用
     train = dataset.frames["train"]
     assert set(train["is_anomaly"]) == {0}
     valid = dataset.frames["valid"]
@@ -167,18 +174,25 @@ def test_few_labels_normal(tmp_path: Path) -> None:
     assert int(test["is_anomaly"].sum()) == 5
     assert sum(len(item) for item in dataset.frames.values()) == 200
 
-    # 行の id は元の値で, 学習に使う列ではない
+    # 元の値の行の id (手順で落とさなくても, 役割で学習に使う列から除き,
+    # auto の符号化と標準化も選ばない)
     ids = pd.concat([train, valid, test])["reading_id"]
     assert sorted(ids) == sorted(frame["reading_id"])
-    assert "reading_id" not in dataset.features
     assert dataset.features == ["temperature", "vibration"]
+    assert not any(
+        name.startswith("reading_id") for name in dataset.features
+    )
+    assert dataset.recipe["steps"][0]["state"]["columns"] == []
+    assert dataset.recipe["steps"][1]["state"]["columns"] == [
+        "temperature", "vibration"
+    ]
     anomalies = set(frame.loc[frame["is_anomaly"] == 1, "reading_id"])
     flagged = pd.concat([valid, test])
     assert set(flagged.loc[flagged["is_anomaly"] == 1, "reading_id"]) == (
         anomalies
     )
 
-    # 標準化は学習用 (正常の行) だけで当てはめる
+    # 学習用 (正常の行) だけで当てはめる標準化
     assert abs(train["temperature"].mean()) < 1e-9
 
     # 説明の行の数と, 正解の型
@@ -200,7 +214,8 @@ def test_few_labels_normal(tmp_path: Path) -> None:
 def test_few_labels_keep(tmp_path: Path) -> None:
     """
     正解の欠けた行を unlabeled に残す場合に, 学習用が正解の正常の行だけに
-    なり, unlabeled にも行の id が残ることを確かめる関数
+    なり, 手順で落とした行の id が unlabeled にも元の値で残ることを
+    確かめる関数
 
     Parameters
     ----------
@@ -214,10 +229,11 @@ def test_few_labels_keep(tmp_path: Path) -> None:
     # 書き出しと読み直し
     frame = make_readings(few_labels())
     data = load_data(write_table(frame, tmp_path))
-    info = export_dataset(data, anomaly_recipe("keep"), tmp_path / "ds")
+    recipe = anomaly_recipe("keep", drop_id=True)
+    info = export_dataset(data, recipe, tmp_path / "ds")
     dataset = load_dataset(tmp_path / "ds")
 
-    # 正解の付いた 30 行だけを分け, 欠けた 170 行は unlabeled
+    # 正解の付いた 30 行の分割と, 欠けた 170 行の unlabeled
     labeled = [dataset.frames[name] for name in ("train", "valid", "test")]
     assert sum(len(item) for item in labeled) == 30
     assert set(dataset.frames["train"]["is_anomaly"]) == {0}
@@ -245,16 +261,15 @@ def test_without_labels(tmp_path: Path) -> None:
     ----------
     None
     """
-    # 正解の列も id の列も書かない
+    # 正解の列と id の列を書かない表
     frame = make_readings(None).drop(columns=["reading_id"])
     data = load_data(write_table(frame, tmp_path))
     recipe = anomaly_recipe("drop", target=False)
     del recipe["id"]
-    recipe["steps"] = recipe["steps"][1:]
     info = export_dataset(data, recipe, tmp_path / "ds")
     dataset = load_dataset(tmp_path / "ds")
 
-    # 全ての行が分割に入り, row_id は読み込んだ表の行の位置
+    # 全ての行の分割と, 行の位置の row_id
     ids = pd.concat(
         [dataset.frames[name] for name in ("train", "valid", "test")]
     )["row_id"]
@@ -287,11 +302,64 @@ def test_no_anomaly_note() -> None:
     ----------
     None
     """
-    # 全ての正解が正常
+    # 全ての正解が正常 (検証用とテスト用の両方の注意)
     frame = make_readings([0] * 50)
-    data = load_data_frame(frame)
-    prepared = prepare(data, anomaly_recipe("drop"))
-    assert any("異常の行がありません" in note for note in prepared.notes)
+    prepared = prepare(load_data_frame(frame), anomaly_recipe("drop"))
+    assert any(note.startswith("valid に異常") for note in prepared.notes)
+    assert any(note.startswith("test に異常") for note in prepared.notes)
+
+    # 異常の行が 1 件だけ (検証用に入り, テスト用だけの注意)
+    frame = make_readings([1] + [0] * 49)
+    prepared = prepare(load_data_frame(frame), anomaly_recipe("drop"))
+    assert int(prepared.frames["valid"]["is_anomaly"].sum()) == 1
+    assert prepared.anomaly["rows"]["test"]["anomaly"] == 0
+    assert not any(note.startswith("valid に異常") for note in prepared.notes)
+    assert any(note.startswith("test に異常") for note in prepared.notes)
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [[True, False] * 10, [1.0, 0.0] * 10, [True, None] * 10]
+)
+def test_label_types(labels: list) -> None:
+    """
+    真偽値と 1.0 と 0.0 の正解が 0 と 1 の整数になることを確かめる関数
+
+    Parameters
+    ----------
+    labels: list
+        正解の並び
+
+    Returns
+    ----------
+    None
+    """
+    # 正解の欠けた行を正常と見なす前処理
+    frame = make_readings(labels)
+    prepared = prepare(load_data_frame(frame), anomaly_recipe("normal"))
+    values = pd.concat(prepared.frames.values())["is_anomaly"]
+    assert values.dtype == np.int64
+    assert set(values) == {0, 1}
+    assert int(values.sum()) == 10
+
+
+def test_kind_error() -> None:
+    """
+    表と時系列でない種類で異常の検知が誤りになることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 画像の種類の Data
+    frame = make_readings([0, 1, 0])
+    data = Data(kind="image", frame=frame, source={})
+    with pytest.raises(ValueError, match="表と時系列だけ"):
+        prepare(data, anomaly_recipe("drop"))
 
 
 def test_anomaly_counts() -> None:
@@ -360,6 +428,10 @@ def test_recipe_errors(change: dict, message: str) -> None:
         ),
         (make_readings([0, 1, 0]), "missing", "ありません"),
         (
+            make_readings([0, 1, 0]).assign(reading_id=["a", None, "b"]),
+            "reading_id", "欠け"
+        ),
+        (
             make_readings([0, 1, 0]).rename(columns={"reading_id": "row_id"}),
             None, "row_id"
         ),
@@ -384,9 +456,8 @@ def test_data_errors(
     ----------
     None
     """
-    # 前処理で止まる
+    # 前処理での誤り
     recipe = anomaly_recipe("drop")
-    recipe["steps"] = recipe["steps"][1:]
     if recipe_id is None:
         del recipe["id"]
     else:

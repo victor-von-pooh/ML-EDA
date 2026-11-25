@@ -65,10 +65,11 @@ ANOMALY_ID = "row_id"
 # 異常の検知で書き出せる種類
 ANOMALY_KINDS = ("table", "timeseries")
 
-# 異常の検知で, 検証用とテスト用に異常の行が無い場合の注意
+# 異常の検知で, 割合を書いた検証用かテスト用に異常の行が無い場合の注意
 NO_ANOMALY_NOTE = (
-    "検証用とテスト用に異常の行がありません (上位 K 件の適合率と PR-AUC "
-    "を数えられない. 異常の行を増やすか, valid か test の割合を見直す)"
+    "{split} に異常の行がありません ({split} では上位 K 件の適合率と "
+    "PR-AUC を数えられない. 異常の行を増やすか, valid と test の割合を"
+    "見直す)"
 )
 
 # 目的の列があるのにタスクを決めていない場合の注意
@@ -682,7 +683,7 @@ def anomaly_labels(values: pd.Series, target: str) -> pd.Series:
     ValueError
         真偽値でも, 0 と 1 だけの数でもない場合
     """
-    # 真偽値はそのまま, 数は 0 と 1 だけ
+    # 真偽値と, 0 と 1 だけの数
     if pd.api.types.is_bool_dtype(values):
         labels = values.astype("int64")
         return labels
@@ -737,7 +738,8 @@ def anomaly_target(
     labeled = frame[target].notna()
     labels = anomaly_labels(frame.loc[labeled, target], target)
 
-    # 欠けた行は正常と見なすか, 落とす (keep の行は後で unlabeled に)
+    # 欠けた行の扱い (normal は正常と見なす. 他は落とし, keep の行は後で
+    # unlabeled の分割)
     if unlabeled == "normal":
         values = pd.Series(0, index=frame.index, dtype="int64")
         values.loc[labeled] = labels
@@ -774,7 +776,7 @@ def anomaly_counts(count: int, valid: float, test: float) -> tuple[int, int]:
     ValueError
         異常の行があるのに, 検証用とテスト用の割合が共に 0 の場合
     """
-    # 割合の比で四捨五入 (0.5 は切り上げ)
+    # 割合の比での四捨五入 (0.5 は切り上げ)
     if count and valid + test <= 0:
         raise ValueError(
             "異常の行を置く検証用かテスト用が要ります (valid か test の割合を"
@@ -834,7 +836,7 @@ def anomaly_splits(
     assigned = pd.Series("train", index=frame.index, dtype=object)
     assigned.loc[normal] = label_by_position(normal, order, n_valid, n_test)
 
-    # 異常の行は検証用とテスト用だけ
+    # 異常の行の検証用とテスト用への配り
     anomaly = frame.index[anomalous]
     a_valid, a_test = anomaly_counts(len(anomaly), valid, test)
     order = rng.permutation(len(anomaly))
@@ -865,7 +867,7 @@ def anomaly_id(data: Data, recipe: dict) -> str:
         書いた列が無いか, 欠けか同じ値がある場合と, id を書かずに表に
         row_id の列がある場合
     """
-    # レシピに無ければ行の位置 (同じ名前の列があれば取り違えるので誤り)
+    # レシピに無い場合の行の位置 (同じ名前の列は取り違えるので誤り)
     columns = [str(name) for name in data.frame.columns]
     name = recipe.get("id")
     if not name:
@@ -876,7 +878,7 @@ def anomaly_id(data: Data, recipe: dict) -> str:
             )
         return ANOMALY_ID
 
-    # 書いた列は 1 つだけあり, 欠けも同じ値も無いこと
+    # 書いた列の確かめ (1 つだけで, 欠けと同じ値が無い)
     if columns.count(name) != 1:
         raise ValueError(f"行の id の列 {name} がありません (か 2 つ以上)")
     values = data.frame.iloc[:, columns.index(name)]
@@ -978,6 +980,43 @@ def anomaly_summary(
     }
 
     return summary
+
+
+def anomaly_notes(
+    split: dict, target: Optional[str], summary: dict
+) -> list[str]:
+    """
+    割合を書いた検証用かテスト用に異常の行が無いことを, 分割ごとに注意に
+    する関数
+
+    Parameters
+    ----------
+    split: dict
+        レシピの分割 (valid, test)
+    target: Optional[str]
+        正解の列 (正解の無い表は None で, 注意を出さない)
+    summary: dict
+        異常の検知の説明 (anomaly_summary の値)
+
+    Returns
+    ----------
+    notes: list[str]
+        異常の行が無い分割ごとの注意
+    """
+    # 正解の無い表は異常の行を持たないので出さない
+    notes: list[str] = []
+    if not target:
+        return notes
+
+    # 割合が 0 より大きい分割の異常の行の数 (分割が無い場合は 0)
+    ratios = {"valid": float(split.get("valid", 0.2)),
+              "test": float(split.get("test", 0.0))}
+    for name, ratio in ratios.items():
+        found = summary["rows"].get(name, {}).get("anomaly", 0)
+        if ratio > 0 and not found:
+            notes.append(NO_ANOMALY_NOTE.format(split=name))
+
+    return notes
 
 
 def first_fit(steps: list) -> int:
@@ -1609,16 +1648,12 @@ def prepare(
     if target and recipe["task"] == "none":
         notes.append(NO_TASK_NOTE)
 
-    # 異常の検知の説明と, 検証用とテスト用に異常の行が無い注意
+    # 異常の検知の説明と, 割合を書いた検証用かテスト用ごとの, 異常の行が
+    # 無い注意
     summary = None
     if anomaly:
         summary = anomaly_summary(data, recipe, target, frames, positions)
-        found = sum(
-            summary["rows"].get(name, {}).get("anomaly", 0)
-            for name in ("valid", "test")
-        )
-        if target and not found:
-            notes.append(NO_ANOMALY_NOTE)
+        notes.extend(anomaly_notes(recipe["split"], target, summary))
     prepared = Prepared(
         frames=frames, recipe=recipe, features=features, target=target,
         classes=classes, notes=notes, findings=findings, anomaly=summary
