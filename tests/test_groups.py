@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -135,7 +135,8 @@ def test_summary_rows_like_the_skeleton(tmp_path: Path) -> None:
 
     # 安定性とまとまり, 欠けの気付き
     assert summary["stability"] == {
-        "method": "seed", "repeats": 5, "ari": 1.0, "ari_min": 1.0
+        "method": "seed", "repeats": 5, "fraction": None, "ari": 1.0,
+        "ari_min": 1.0
     }
     assert summary["silhouette"] > 0.5
     assert any("欠けた値のある行が 2 行" in note
@@ -214,6 +215,26 @@ def test_describe_errors() -> None:
         describe_groups(data, ["x"], k=4)
     with pytest.raises(ValueError, match="repeats"):
         describe_groups(data, ["x"], k=2, repeats=0)
+    for method in ("bootstrap", "Seed", None):
+        with pytest.raises(ValueError, match="数え方 stability"):
+            describe_groups(data, ["x"], k=2, stability=method)
+    for fraction in (0, 1.5, -0.1, True, "0.5", float("nan")):
+        with pytest.raises(ValueError, match="fraction"):
+            describe_groups(data, ["x"], k=2, stability="sample",
+                            fraction=fraction)
+
+    # seed では割合を確かめない. labels でも数え方と割合を確かめる
+    assert describe_groups(
+        data, ["x"], k=2, fraction=None
+    )["stability"]["fraction"] is None
+    with pytest.raises(ValueError, match="数え方 stability"):
+        describe_groups(data, ["x"], labels=[0, 1, 1], stability="bogus")
+    with pytest.raises(ValueError, match="fraction"):
+        describe_groups(data, ["x"], labels=[0, 1, 1], stability="sample",
+                        fraction=0)
+    given = describe_groups(data, ["x"], labels=[0, 1, 1],
+                            stability="sample", fraction=0.5)
+    assert given["stability"] is None
     wide = table(pd.DataFrame({"name": [str(i) for i in range(
         MAX_WIDTH + 1
     )]}))
@@ -464,6 +485,103 @@ def test_same_values_as_the_skeleton() -> None:
         0.5271238485158649
     )
     assert summary["silhouette"] == pytest.approx(0.36390241512137544)
+
+
+def test_sample_stability_like_the_skeleton() -> None:
+    """
+    標本を変える数え方 (sample) で, ML-Quest の骨組みの安定性と同じ値に
+    なるかを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 期待値は骨組みの stability (group.stability: sample, 5 回, 学習用の
+    # 行は全ての行, 種 0) に同じ表を渡して求めた値
+    frame = pd.DataFrame({
+        "x": [6.4, 2.7, 0.4, 0.2, 8.1, 9.1, 6.1, 7.3, 5.4, 9.4, 8.2, 0.0],
+        "y": [8.6, 0.3, 7.3, 1.8, 8.6, 5.4, 3.0, 4.2, 0.3, 1.2, 6.7, 6.5],
+        "c": ["a", "b", None, "b", "b", None, None, None, "b", None, None,
+              "b"],
+    })
+    expected = {
+        0.8: (0.47111697896895705, 0.11310190369540872,
+              [0.7666666666666667, 0.58, 0.6464285714285715]),
+        0.5: (0.33987565850181384, 0.11310190369540872,
+              [0.55, 0.48, 0.6409523809523809]),
+    }
+    for fraction, (ari, ari_min, jaccard) in expected.items():
+        summary = describe_groups(table(frame), ["x", "y", "c"], k=3,
+                                  stability="sample", fraction=fraction)
+        assert summary["stability"] == {
+            "method": "sample", "repeats": 5, "fraction": fraction,
+            "ari": pytest.approx(ari), "ari_min": pytest.approx(ari_min),
+        }
+        assert [row["stability"] for row in summary["groups"]] == [
+            *map(pytest.approx, jaccard), None
+        ]
+
+    # 群と行の要約, まとまりは数え方で変わらない
+    seed = describe_groups(table(frame), ["x", "y", "c"], k=3)
+    sample = describe_groups(table(frame), ["x", "y", "c"], k=3,
+                             stability="sample")
+    assert ([{**row, "stability": None} for row in seed["groups"]]
+            == [{**row, "stability": None} for row in sample["groups"]])
+    assert seed["silhouette"] == sample["silhouette"]
+
+
+def test_sample_sizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    標本を変える数え方で, 引く行の数が群の数より少なくならず, 割合 1 と
+    行の数が群の数と同じ場合も数えられるかを確かめる関数
+
+    Parameters
+    ----------
+    monkeypatch: pytest.MonkeyPatch
+        k-means に渡す行の数を記録するための差し替え
+
+    Returns
+    ----------
+    None
+    """
+    # k-means に渡した点の数を記録する
+    sizes: list = []
+    original = groups.kmeans
+
+    def record(points: np.ndarray, k: int, rng: np.random.Generator,
+               *args: Any) -> np.ndarray:
+        sizes.append(len(points))
+        return original(points, k, rng, *args)
+
+    monkeypatch.setattr(groups, "kmeans", record)
+    frame = pd.DataFrame({"x": [float(i % 4) for i in range(12)],
+                          "y": [float(i) for i in range(12)]})
+
+    # int(12 × 0.1) = 1 は群の数 3 に上げる (1 回目は元の群で全ての行)
+    summary = describe_groups(table(frame), ["x", "y"], k=3,
+                              stability="sample", fraction=0.1, repeats=4)
+    assert sizes == [12, 3, 3, 3, 3]
+    assert summary["stability"]["fraction"] == 0.1
+    assert -1 <= summary["stability"]["ari_min"] <= 1
+
+    # 割合 1 は全ての行を引く (並びが変わるだけ)
+    sizes.clear()
+    whole = describe_groups(table(frame), ["x", "y"], k=3,
+                            stability="sample", fraction=1.0, repeats=2)
+    assert sizes == [12, 12, 12]
+    assert whole["stability"]["fraction"] == 1.0
+
+    # 行の数と群の数が同じ (どの行も 1 つの群で, 作り直しても同じ)
+    sizes.clear()
+    small = describe_groups(table(frame.head(3)), ["x", "y"], k=3,
+                            stability="sample")
+    assert sizes == [3] * 6
+    assert small["stability"]["ari"] == 1.0
+    assert all(row["stability"] == 1.0 for row in small["groups"][:-1])
 
 
 def test_width_limit_with_labels() -> None:

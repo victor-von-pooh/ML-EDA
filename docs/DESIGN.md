@@ -50,7 +50,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 - `load_trajectory(path)`, `describe_trajectory(trajectory)`, `Trajectory`: 記録した軌跡を読み, 要約する. 形は下の「記録した軌跡」
 - `load_reactions(source, user, item, time, reaction=None, loader=None, **options)`, `describe_reactions(reactions)`, `Reactions`: 並べるの反応の表を読んで約束を確かめ, 要約する. 形は下の「並べるの反応の表」
 - `export_group_rows(source, path, columns, id=None, split=None, name=None, overwrite=False, loader=None, **options)`: 群分けの表を版 2 で書き出す. 形は下の「群分けの表」
-- `describe_groups(source, columns=None, k=None, labels=None, seed=0, repeats=5, loader=None, **options)`: 学習に通さず群の要約を返す. 形は下の「群の要約」
+- `describe_groups(source, columns=None, k=None, labels=None, seed=0, repeats=5, stability="seed", fraction=0.8, loader=None, **options)`: 学習に通さず群の要約を返す. 形は下の「群の要約」
 - `read_image(path)`: ファイル 1 つの画像を numpy の配列にする低い層. 形は (高さ, 幅) か (高さ, 幅, チャンネル), 型は `uint8`, 書き込める写し. EXIF の向きを直し, パレットなどは RGB (透明があれば RGBA), 16 ビットと浮動小数は 0 から 255 に縮めた 1 チャンネル, 2 値は 0 と 255 にそろえる. 版 2 の書き出しと `load_item` の画像と同じ読み方
 
 ## 3. 用語
@@ -312,11 +312,14 @@ AR の端末などで物体の周りを撮った 1 回の撮影を 1 件とす�
 
 群分け (まとめる) で, 学習に通さずに分析の段階で群を作り, 群の要約を返す. 群の行の形は ML-Quest のまとめるの骨組みが `evaluations/group_summary.json` に書く行と同じにする (画面で学習の前と後の群を同じ表で見せられるように). 群は, 骨組みと同じ符号化をかけた列の特徴を, そのまま k-means で分けたもの (骨組みの比べる相手「列の特徴をそのまま k-means で分けた群」と同じ作り方).
 
-- `describe_groups(source, columns=None, k=None, labels=None, seed=0, repeats=5, loader=None, **options)`: `source` は表のファイル (`load_data(source, loader=loader, **options)` で読む), `load_data` で読んだ表の `Data` (`loader` と `options` を渡すと誤り), `export_group_rows` で書き出して `load_items` で読んだデータセット (受け持ちが `group` でなければ誤り. 全ての分割の件を表の順に使う) のどれか. `columns` は群を作る列 (問題の設定で答えた列. データセットでは省くと入力の項目の全て). 表と時系列でないデータは誤り
+- `describe_groups(source, columns=None, k=None, labels=None, seed=0, repeats=5, stability="seed", fraction=0.8, loader=None, **options)`: `source` は表のファイル (`load_data(source, loader=loader, **options)` で読む), `load_data` で読んだ表の `Data` (`loader` と `options` を渡すと誤り), `export_group_rows` で書き出して `load_items` で読んだデータセット (受け持ちが `group` でなければ誤り. 全ての分割の件を表の順に使う) のどれか. `columns` は群を作る列 (問題の設定で答えた列. データセットでは省くと入力の項目の全て). 表と時系列でないデータは誤り
 - **列**: 列が無い, 同じ列を 2 回渡した, 表に同じ名前の列が 2 つ以上ある, 名前が群の要約の鍵 (`group`, `rows`, `share`, `stability`) か 1 件の鍵 (`id`, `split`) と同じ場合は誤り (骨組みも群の要約の鍵と同じ名前の列で止まる)
 - **符号化**: 骨組みと同じ. 数の列 (真偽値を除く) は平均と標準偏差 (母の標準偏差. 散らばりが無ければ 1) で標準化し, 欠けた値は 0. 他の列は値ごとの 0 と 1 の列 (値は文字にし, 欠けた値も `(欠損)` という 1 つの値. 値は初めて出た順). 骨組みは学習用の行で符号化を決めるが, ここは分割しないので全ての行で決める. 符号化した行の幅 (数の列の数と, 種類の列ごとの値の数の和) が 1000 を超えれば, 符号化の表を作る前に誤り (値の多い種類の列を外すよう案内する. `labels` を渡した場合も同じ)
 - **群**: `labels` を省くと, k-means++ で中心を置いて Lloyd 法 (100 回まで) で求めることを置き方を変えて 5 回繰り返し, 二乗距離の和の最も小さいものを使う (乱数は `seed`). `k` は 2 以上の整数で行の数まで (`labels` を省くと要り, 渡すと誤り). `labels` に行ごとの群の並びか表の群の列の名前を渡すと, その群を使う (ML-Quest の骨組みの `group_assignments.csv` の `group` など. 長さが行の数と違うか欠けがあれば誤り. 群の値の小さい順に並べる)
-- **安定性**: k-means で作った群だけ, 種を変えて (`seed + 1 + 回の番号`) `repeats` 回作り直し, 全ての行の割り当ての調整ランド指数と, 群ごとに作り直した群のうち最も重なる群との Jaccard 係数を数える (骨組みの `group.stability: seed` と同じ数え方)
+- **安定性**: k-means で作った群だけ, `repeats` 回 (1 以上の整数) 作り直し, 全ての行の割り当ての調整ランド指数と, 群ごとに作り直した群のうち最も重なる群との Jaccard 係数を数える. 数え方 `stability` は ML-Quest の問題の設定の答え `group.stability` と同じ値で, 骨組みが学習の後に数える数え方と同じ. 他の値は誤り (`labels` を渡した場合も確かめる. `labels` では安定性を数えないので `stability` と `fraction` は使わない)
+  - `seed` (既定): 作り直すたびに種を変え (`seed + 1 + 回の番号`), 全ての行で k-means をかけ直す
+  - `sample`: 作り直すたびに種を変えた乱数 (`seed + 1 + 回の番号`) で, 全ての行から `fraction` の割合 (`max(k, int(行の数 × fraction))` 行. 戻さずに引く) を引き直し, その行で k-means をかけ, 全ての行を近い中心に割り当てる. 引く行と中心の置き方は同じ乱数から続けて取る. 骨組みは学習用の行から引くが, ここは分割しないので全ての行から引く. `fraction` は 0 より大きく 1 以下の数で, 他は誤り (骨組みの `group.fraction` の既定と同じ 0.8). `seed` では使わず, 確かめない (None でもよい)
+  - どちらも調整ランド指数と Jaccard 係数は引いた行だけでなく全ての行の割り当てで比べる
 - **まとまり**: 全ての行 (2000 行より多ければ無作為に選んだ行. 選ぶ乱数は `seed` から作り直す. 骨組みと同じ) の, 符号化した空間でのシルエット係数. 群が 1 つなら 0
 
 JSON にできる辞書を返す (nan と無限大は None). 鍵は次のとおり.
@@ -329,7 +332,7 @@ JSON にできる辞書を返す (nan と無限大は None). 鍵は次のとお�
 | `width` | 符号化した行の幅 |
 | `seed` | k-means の乱数の種 (`labels` では None) |
 | `groups` | 群の要約の行の並び (下) |
-| `stability` | `method` (`seed`), `repeats`, `ari` (調整ランド指数の平均), `ari_min` (最も低い値). `labels` では None |
+| `stability` | `method` (数え方の `seed` か `sample`), `repeats`, `fraction` (`sample` で引く割合. `seed` では None), `ari` (調整ランド指数の平均), `ari_min` (最も低い値). `labels` では None |
 | `silhouette` | シルエット係数 |
 | `source` | 読み込んだ場所と読み方 (`Data.source`. データセットでは説明の `source`) |
 | `notes` | 気付きの日本語の文 (欠けた値のある行の数, 行の数の半分より多い種類の値を持つ列, 行の無い群, 群が 1 つだけ) |

@@ -245,8 +245,9 @@ from ml_eda import describe_groups, export_group_rows, load_items
 columns = ["spend", "visits", "region"]
 summary = describe_groups("customers.csv", columns, k=3)  # JSON にできる辞書
 summary["groups"]                     # 群ごとの rows, share, stability と列の平均か最も多い値. 最後は「全体」
-summary["stability"]                  # 種を変えて作り直した群との一致 (ari, ari_min)
+summary["stability"]                  # 数え方 (method) で作り直した群との一致 (ari, ari_min)
 summary["silhouette"]                 # 群のまとまり
+describe_groups("customers.csv", columns, k=3, stability="sample")  # 既定の seed は種を変える. sample は行の 8 割を引き直して作り直す数え方
 
 # 版 2 のデータセットに書き出して読む (受け持ちは group, 正解は無い)
 export_group_rows("customers.csv", "datasets/customers", columns, id="cid")
@@ -255,7 +256,7 @@ dataset.split("train")[0]             # {"id", "split", "group", "spend", "visit
 describe_groups(dataset, k=3)         # 書き出したデータセットからも同じ要約
 ```
 
-群は ML-Quest のまとめるの骨組みと同じ符号化 (数の列は標準化, 他の列は値ごとの 0 と 1) をかけた列の特徴を, そのまま k-means で分けたもの (骨組みの比べる相手と同じ作り方). `labels` に行ごとの群か群の列の名前を渡すと, その群を要約する. 群の要約の行は骨組みの `evaluations/group_summary.json` の行と同じ形. 決まりは [docs/DESIGN.md](docs/DESIGN.md) の「群の要約」と「群分けの表」.
+群は ML-Quest のまとめるの骨組みと同じ符号化 (数の列は標準化, 他の列は値ごとの 0 と 1) をかけた列の特徴を, そのまま k-means で分けたもの (骨組みの比べる相手と同じ作り方). 安定性の数え方 `stability` は ML-Quest の問題の設定の答え `group.stability` と同じ `seed` (種を変える. 既定) か `sample` (行を引き直す. 引く割合は `fraction`) で, 骨組みが学習の後に数える数え方と同じ. `labels` に行ごとの群か群の列の名前を渡すと, その群を要約する. 群の要約の行は骨組みの `evaluations/group_summary.json` の行と同じ形. 決まりは [docs/DESIGN.md](docs/DESIGN.md) の「群の要約」と「群分けの表」.
 
 ## 文書
 
