@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 import ml_eda
 from ml_eda import (
@@ -404,3 +405,35 @@ def test_random_shapes(tmp_path: Path) -> None:
         write_shape_captures(tmp_path / "e", count=0)
     with pytest.raises(ValueError, match="整数"):
         write_shape_captures(tmp_path / "f", count=2.5)  # type: ignore
+
+
+def test_capture_notices(tmp_path: Path) -> None:
+    """
+    組にならない撮影と点群を書き出すと, 結果に種類と数の印が文と並んで
+    返り, dataset.yaml の notes は文のままであることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 点群を 1 つ消すと, 点群の無い撮影が 1 件
+    made = write_shape_captures(tmp_path / "raw", views=4, points=200)
+    clouds = sorted(Path(made["clouds"]).iterdir())
+    clouds[0].unlink()
+    info = export_capture_clouds(
+        made["captures"], made["clouds"], tmp_path / "ds",
+        split={"method": "none"}
+    )
+    found = {item["code"]: item for item in info["notices"]}
+    assert found["unpaired"]["count"] == 1
+    assert found["unpaired"]["label"] == "撮影"
+    assert [item["message"] for item in info["notices"]] == info["notes"]
+    written = yaml.safe_load(
+        (tmp_path / "ds" / "dataset.yaml").read_text(encoding="utf-8")
+    )
+    assert written["notes"] == info["notes"] and "notices" not in written

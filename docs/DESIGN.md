@@ -805,6 +805,26 @@ split:
 
 `task` は書かない. `task` は列の正解 (分類, 回帰, 予測, 正解なし) だけのもので, 版 2 の種類は `role` と `target.kind` で表す.
 
+**書き出しの注意の印**: `export_image_masks` と `export_capture_clouds` (と `normalize_capture` の要約) は, 返す辞書に `notes` の文と同じ順の注意の印の並び `notices` を足す. 印は `code` (種類), `count` (数), `message` (`notes` の文と同じ) と, 種類ごとの添え (`label` はファイルの呼び名 (画像, 領域, 撮影, 点群), `split` は分割の名前, `groups` はまたがったグループの数) の辞書. `dataset.yaml` には `notices` を書かず, `notes` は文のまま (約束の版を変えない. 読む側は今までどおり文を読める). 使う側 (ML-Fathom) は文の言い回しでなく `code` で見分ける (言い回しを直しても見分け方が変わらないように). 同じ種類の印は何度も出ることがある (`outside_links` と `unpaired` は呼び名ごと, `dropped_frames`, `cloud_missing`, `cloud_unreadable` は撮影ごと) ので, 使う側は種類で 1 つに引かず並びを見る. 種類は `NOTICE_CODES` で, 公開の名前:
+
+| `code` | 何の注意か | `count` |
+| --- | --- | --- |
+| `outside_links` | 読み込んだディレクトリの外を指すリンクのファイルを除いた (`follow_links` が偽) | 除いたファイルの数 |
+| `unpaired` | 組の片方しか無いファイルを除いた | 除いた数 |
+| `unlabeled` | 正解の無い入力を `unlabeled` の分割に書いた | 書いた数 |
+| `group_overlap` | 同じグループが複数の分割にまたがる | またがった件の数 (`groups` はグループの数) |
+| `empty_split` | 割合を書いた分割が 0 件になった | 0 |
+| `many_values` | 領域の値の種類が多く, 説明の `values` を省いた | 値の種類の数 |
+| `unnamed_values` | `classes` に名前の無い領域の値がある | 名前の無い値の数 |
+| `jpeg_masks` | JPEG の領域がある | JPEG の領域の数 |
+| `unreadable_captures` | 読めない撮影を除いた | 除いた数 |
+| `capped_captures` | 撮影が上限を超え, 先頭だけを読んだ | 読んだ撮影の数 (読めなかった撮影も含む) |
+| `dropped_frames` | 撮影の, 画像の無いか外を指すリンクの枚を除いた | 除いた枚の数 |
+| `cloud_missing` | 撮影の点群が無いか外を指すので除いた | 1 |
+| `cloud_unreadable` | 撮影の点群を読めず除いた | 1 |
+| `mixed_conventions` | 撮影ごとに座標の決まりが違う | 先頭と違う撮影の数 |
+| `default_depth` | 座標の決まりに深度の測り方か画素の中心が無く, 既定にした | その撮影の数 |
+
 項目 (`entries.<名前>`) の欄.
 
 | 欄 | 中身 |

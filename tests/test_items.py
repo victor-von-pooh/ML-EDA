@@ -93,7 +93,13 @@ def test_image_masks(tmp_path: Path) -> None:
     written = yaml.safe_load(
         (tmp_path / "ds" / "dataset.yaml").read_text(encoding="utf-8")
     )
-    assert written == info
+    assert written == {k: v for k, v in info.items() if k != "notices"}
+
+    # 注意の印 (種類と数) は返す結果だけで, 文は notes と同じ順
+    assert [item["message"] for item in info["notices"]] == info["notes"]
+    assert info["notices"][0]["code"] == "unpaired"
+    assert info["notices"][0]["count"] == 1
+    assert info["notices"][0]["label"] == "画像"
 
     # 読み込み: 配列と場所. 領域は元の値のまま
     dataset = load_items(tmp_path / "ds")

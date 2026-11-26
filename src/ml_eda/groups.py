@@ -8,7 +8,8 @@ import pandas as pd
 
 from ml_eda.data import Data
 from ml_eda.items import (
-    ItemDataset, RESERVED, check_entry_names, split_items, write_items
+    ItemDataset, RESERVED, check_entry_names, messages, split_items,
+    write_items
 )
 from ml_eda.loaders import load_data
 from ml_eda.pipeline import (
@@ -300,7 +301,8 @@ def export_group_rows(
             "群分けの表の分割は random か none にしてください (グループの"
             "列を持たないため)"
         )
-    labels, split_info, notes = split_items(ids, None, split)
+    labels, split_info, notices = split_items(ids, None, split)
+    notes = messages(notices)
     split_info.pop("unlabeled", None)
     notes = column_notes(frame) + notes
 
