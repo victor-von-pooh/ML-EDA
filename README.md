@@ -17,12 +17,13 @@
 - **並べるの反応の表**: 推薦の学習に使う 1 行が 1 つの反応の表を, ML-Quest の並べるの骨組みと同じ決まりで読み, 利用者, 品物, 反応の数, 利用者ごとの数の分布, 品物の人気の偏り, 時刻の範囲, 除いた行の数を要約する
 - **群分けの表**: 群分け (まとめる) の 1 行が 1 つの対象の表を, 分析の保存として版 2 のデータセットに書き出して読み (学習には表のファイルを渡す), 学習の前に列の特徴をそのまま k-means で分けた群 (か渡した群) の要約 (群ごとの行の数, 割合, 安定性, 列の平均と最も多い値) を, ML-Quest のまとめるの骨組みの群の要約と同じ形で返す
 - **介入の記録の表**: クーポンを無作為に配った記録のような, 処置の列と結果の列を持つ表を分析し (処置の群と対照の群の行の数, 結果の差, 特徴の釣り合い, 処置の後に決まる列などの気付き), 全ての分割に両方の群を置いて書き出す (`task: uplift`)
+- **値段を変えた記録の表**: 試しに値段を変えた売れ行きの記録 (商品の特徴, 値段, 売れた数, 原価) を分析し (値段の幅と数, 値段と売れた数の関わり, 商品ごとの試した値段, 値段と他の列の関わりなどの気付き), 値段を入力に入れて売れた数を予測する学習のために, 値段が分割ごとに偏らないように書き出す (`task: price`)
 
 ## どのアプリから使われるか
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs`, 群の要約 (`describe_groups`), 介入の記録の要約 (`describe_uplift`) |
+| ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs`, 群の要約 (`describe_groups`), 介入の記録の要約 (`describe_uplift`), 値段を変えた記録の要約 (`describe_price`) |
 | ML-Quest (問題の設定) | データの読み方 (`Data.source`), レシピの雛形と書き戻し, ファイルの組の書き出しの設定. 手元のデータの答えの候補 |
 | ML-CreateArchitecture (モデルの作成) | `model_inputs` でモデルの定義の入力と出力をデータセットに合わせる |
 | ML-Found | `task_from_dataset` が `dataset.yaml` を読む (`ml_eda` は使わない). 評価の軌跡 (`trajectories/`) は ML-EDA が読む |
@@ -123,6 +124,34 @@ summary["groups"]      # treated と control の rows と mean (結果の平均)
 summary["effect"]      # 結果の平均の差 (処置の群 - 対照の群)
 summary["balance"]     # 列ごとの標準化した平均の差 (smd) の大きい順
 summary["findings"]    # small_group, treatment_imbalance, post_treatment など
+```
+
+値段を変える判断 (値段を変えたときの売れた数を予測し, 候補の中から利益の大きい値段を選ぶ) は `task: price` で書く. 値段は試しに変えた記録 (無作為に近い) を前提にする. 売れた数の列 (`target`) と値段の列 (`price`) を必ず書き, 原価の列 (`cost`) と商品の id の列 (`product`) は任意. 値段の列は学習に使う列の最後に入り, 値段の列を変えられる手順は `clip`, `log`, `standardize`, `minmax` だけ. 全ての分割に手順の前の値段 (`price_raw`. `dataset.price(split)`), 原価 (`dataset.cost(split)`), 商品の id が元の値で残る. 分割は `stratified` だけで, 値段の順位で 5 つに分けた段で層を作る. 候補の値段での入力は `dataset.price_inputs(split, prices)` で得る (値段の列だけを, 学習用で当てはめた手順をかけた候補に置き換える). 行の id は異常の検知と同じ. `dataset.yaml` の `price` に分割ごとの値段の範囲, 売れた数と原価の平均が入る.
+
+```yaml
+task: price
+target: units
+price: price
+cost: unit_cost
+product: product_id
+steps:
+  - {op: log, columns: [price]}
+  - {op: standardize, columns: auto}
+split: {method: stratified, valid: 0.2, test: 0.2, seed: 0}
+```
+
+```python
+from ml_eda import describe_price, load_dataset
+
+summary = describe_price("sales.csv", "price", "units", cost="unit_cost",
+                         product="product_id")
+summary["price_stats"]  # 値段の範囲, 種類の数, 幅
+summary["relation"]     # 順位の相関, 弾力性の目安, 値段の段ごとの売れた数
+summary["products"]     # 商品ごとの試した値段の数と範囲
+summary["findings"]     # single_price_products, narrow_price_range など
+
+dataset = load_dataset("datasets/sales")
+x = dataset.price_inputs("test", dataset.price("test") * 1.1)  # 1 割上げた値段
 ```
 
 ### 画像, 文, 点群, 音声

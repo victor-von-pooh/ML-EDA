@@ -20,6 +20,7 @@ from ml_eda.pipeline import (
     export_dataset, frame_view, load_dataset, model_inputs, prepare, preview,
     preview_items
 )
+from ml_eda.price import describe_price
 from ml_eda.profile import profile
 from ml_eda.reactions import Reactions, describe_reactions, load_reactions
 from ml_eda.recipe import (
@@ -43,7 +44,7 @@ __all__ = [
     "compare_tokenizers", "describe_groups",
     "describe_item_steps", "describe_reactions", "export_capture_clouds",
     "export_image_masks",
-    "describe_loaders",
+    "describe_loaders", "describe_price",
     "describe_steps", "describe_trajectory", "describe_uplift", "detect",
     "export_dataset",
     "export_group_rows",

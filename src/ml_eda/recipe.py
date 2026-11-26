@@ -16,7 +16,7 @@ FORMAT_VERSION = 1
 # タスクの種類
 TASKS = (
     "classification", "regression", "forecasting", "anomaly", "uplift",
-    "none"
+    "price", "none"
 )
 
 # 分割のしかた
@@ -39,7 +39,22 @@ UPLIFT_METHODS = ("stratified",)
 OUTCOME_KINDS = ("binary", "amount")
 
 # 行の id の列 (レシピの id) を書けるタスク
-ID_TASKS = ("anomaly", "uplift")
+ID_TASKS = ("anomaly", "uplift", "price")
+
+# 値段を変える判断の分割のしかた (値段の段で層を作る)
+PRICE_METHODS = ("stratified",)
+
+# 値段を変える判断だけで書ける鍵 (値段, 原価, 商品の id の列)
+PRICE_KEYS = ("price", "cost", "product")
+
+# 値段の列を変えられる手順 (列ごとに値を変え, 列の名前を変えない手順)
+PRICE_STEPS = ("clip", "log", "standardize", "minmax")
+
+# 手順で変えられず, 落とす drop_columns だけを書ける役割の列 (書き出しには
+# 元の値)
+FIXED_ROLES = {
+    "treatment": "処置の列", "cost": "原価の列", "product": "商品の id の列"
+}
 
 
 @dataclass
@@ -167,24 +182,25 @@ def resolve_columns(
     Raises
     ----------
     ValueError
-        無い列を指定した場合と, 効果を見積もるの処置の列を指定した場合
+        無い列を指定した場合と, 処置, 原価, 商品の id の列を指定した場合
     """
-    # 名前の指定はそのまま (無い列と, 処置の列は誤り)
+    # 名前の指定はそのまま (無い列と, 処置, 原価, 商品の id の列は誤り)
     reserved = {
-        roles.get("target"), roles.get("time"), roles.get("id"),
-        roles.get("text"), roles.get("treatment")
+        roles.get(role)
+        for role in ("target", "time", "id", "text", "price", *FIXED_ROLES)
     }
     if spec not in (None, "auto"):
         names = [spec] if isinstance(spec, str) else list(spec)
         missing = [name for name in names if name not in frame.columns]
         if missing:
             raise ValueError(f"列がありません: {', '.join(missing)}")
-        treatment = roles.get("treatment")
-        if treatment is not None and treatment in names:
-            raise ValueError(
-                f"処置の列 {treatment} は手順で変えられません (書き出しには"
-                "元の値の 0 と 1 を置くため. 落とす drop_columns は使える)"
-            )
+        for role, label in FIXED_ROLES.items():
+            fixed = roles.get(role)
+            if fixed is not None and fixed in names:
+                raise ValueError(
+                    f"{label} {fixed} は手順で変えられません (書き出しには"
+                    "元の値を置くため. 落とす drop_columns は使える)"
+                )
         return names
 
     # auto は型で選ぶ
@@ -1480,9 +1496,9 @@ def check_anomaly_recipe(
     Raises
     ----------
     ValueError
-        異常の検知と効果を見積もるでないのに id を書いた場合, 異常の
-        検知でないのに normal を書いた場合, 異常の検知で
-        分割のしかたが random でない場合, id が文字でない場合
+        異常の検知, 効果を見積もる, 値段を変える判断でないのに id を
+        書いた場合, 異常の検知でないのに normal を書いた場合, 異常の
+        検知で分割のしかたが random でない場合, id が文字でない場合
     """
     # 異常の検知だけの書き方
     anomaly = task == "anomaly"
@@ -1493,8 +1509,9 @@ def check_anomaly_recipe(
         )
     if task not in ID_TASKS and "id" in recipe:
         raise ValueError(
-            "レシピの id (行の id の列) は異常の検知 (task: anomaly) と効果を"
-            "見積もる (task: uplift) だけで書けます"
+            "レシピの id (行の id の列) は異常の検知 (task: anomaly), 効果を"
+            "見積もる (task: uplift) と値段を変える判断 (task: price) だけで"
+            "書けます"
         )
     name = recipe.get("id")
     if "id" in recipe and (not isinstance(name, str) or not name):
@@ -1580,6 +1597,78 @@ def check_uplift_recipe(recipe: dict, task: str, method: str) -> None:
         )
 
 
+def check_price_recipe(recipe: dict, task: str, method: str) -> None:
+    """
+    値段を変える判断だけの書き方 (price, cost, product) と, 値段を変える
+    判断の売れた数の列, 値段の列, 分割のしかたを確かめる関数
+
+    Parameters
+    ----------
+    recipe: dict
+        読み込んだレシピ
+    task: str
+        タスク
+    method: str
+        分割のしかた
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        値段を変える判断でないのに price, cost, product を書いた場合, 値段を
+        変える判断で売れた数の列か値段の列が無い場合, 列の名前が文字でない
+        場合, 役割の列が重なる場合, 分割のしかたが stratified でない場合
+    """
+    # 値段を変える判断だけの書き方
+    price = task == "price"
+    for key in PRICE_KEYS:
+        if not price and key in recipe:
+            raise ValueError(
+                f"レシピの {key} は値段を変える判断 (task: price) だけで"
+                "書けます"
+            )
+    if not price:
+        return
+
+    # 売れた数の列, 値段の列, 原価と商品の id の列 (書いた場合)
+    target = recipe.get("target")
+    if not isinstance(target, str) or not target:
+        raise ValueError(
+            "値段を変える判断 (task: price) には売れた数の列 (target) が"
+            "要ります"
+        )
+    if not isinstance(recipe.get("price"), str) or not recipe["price"]:
+        raise ValueError(
+            "値段を変える判断 (task: price) には値段の列 (price) の名前 "
+            f"(文字) が要ります: {recipe.get('price')}"
+        )
+    for key in ("cost", "product"):
+        name = recipe.get(key)
+        if key in recipe and (not isinstance(name, str) or not name):
+            raise ValueError(
+                f"レシピの {key} は列の名前 (文字) にしてください: {name}"
+            )
+    names = [target] + [
+        recipe[key] for key in ("price", "cost", "product", "id")
+        if key in recipe
+    ]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            "売れた数, 値段, 原価, 商品の id, 行の id の列は違う列にして"
+            f"ください: {', '.join(names)}"
+        )
+
+    # 分割のしかた (値段の段で層を作る)
+    if method not in PRICE_METHODS:
+        raise ValueError(
+            "値段を変える判断の分割のしかたは stratified だけです (値段の段"
+            f"で層を作り, 値段が分割ごとに偏らないようにする): {method}"
+        )
+
+
 def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     """
     レシピを読み込み, 形を確かめる関数
@@ -1599,7 +1688,8 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     ValueError
         新しい版, 知らない手順, 手順と中身の手順の知らない引数と空 (None)
         の引数, 形の誤りの場合と, 目的の列の無いレシピで split.unlabeled
-        が keep の場合, 異常の検知と効果を見積もるの決まりに合わない場合
+        が keep の場合, 異常の検知, 効果を見積もる, 値段を変える判断の
+        決まりに合わない場合
     """
     # ファイルなら読み込み
     if isinstance(recipe, (str, Path)):
@@ -1645,6 +1735,7 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
         )
     check_anomaly_recipe(loaded, task, method, unlabeled)
     check_uplift_recipe(loaded, task, method)
+    check_price_recipe(loaded, task, method)
 
     # keep は目的の列を書いたレシピだけ (読み込んだ時点で分かるように.
     # 書かないと前と後の様子と書き出しの全てで誤りになるため)
