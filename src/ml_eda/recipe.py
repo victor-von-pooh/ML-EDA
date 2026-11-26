@@ -1719,6 +1719,62 @@ def column_key(recipe: dict, key: str, label: str) -> str:
     return name
 
 
+def check_demand_lags(steps: list, product: str, date: str) -> None:
+    """
+    需要の予測の lag が, 1 以上の整数のずらし幅で, 商品ごと (by) に日付
+    (time) でずらすことを確かめる関数
+
+    Parameters
+    ----------
+    steps: list
+        レシピの手順
+    product: str
+        商品の id の列
+    date: str
+        日付の列
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        ずらし幅が 1 以上の整数でない場合, by に商品の id の列が無い場合,
+        time が日付の列でない場合
+    """
+    # ずらし幅が 0 以下だと発注を決める日か先の日の売れた数 (目的の値) を
+    # 読み, by と time が無いと別の商品の値か並びの順の値を読むため
+    for number, spec in enumerate(steps, 1):
+        if not isinstance(spec, dict) or spec.get("op") != "lag":
+            continue
+        lags = spec.get("lags", [1])
+        valid = isinstance(lags, list) and all(
+            isinstance(lag, int) and not isinstance(lag, bool) and lag >= 1
+            for lag in lags
+        )
+        if not valid:
+            raise ValueError(
+                f"手順 {number} (lag): 需要の予測 (task: demand) の lags は 1 "
+                f"以上の整数の並びにしてください: {lags} (0 以下は発注を"
+                "決める日か先の日の売れた数で, 目的の値が入るため)"
+            )
+        by = spec.get("by")
+        by = [by] if isinstance(by, str) else list(by or [])
+        if product not in by:
+            raise ValueError(
+                f"手順 {number} (lag): 需要の予測 (task: demand) の lag には "
+                f"by に商品の id の列 {product} を書いてください (別の商品の"
+                "売れた数を読まないように)"
+            )
+        if spec.get("time") != date:
+            raise ValueError(
+                f"手順 {number} (lag): 需要の予測 (task: demand) の lag には "
+                f"time に日付の列 {date} を書いてください (表の並びに依らず"
+                "前の日の値を読むように)"
+            )
+
+
 def check_demand_recipe(recipe: dict, task: str, method: str) -> None:
     """
     需要の予測だけの書き方 (date, stock, horizon, interval) と, 需要の予測
@@ -1743,7 +1799,8 @@ def check_demand_recipe(recipe: dict, task: str, method: str) -> None:
         需要の予測でないのに date, stock, horizon, interval を書いた場合,
         需要の予測で売れた数, 商品の id, 日付の列が無い場合, 列の名前が
         文字でない場合, 役割の列が重なる場合, 期間が 1 以上の整数でない
-        場合, 分割のしかたが time でない場合
+        場合, lag の書き方が決まりに合わない場合, 分割のしかたが time で
+        ない場合
     """
     # 需要の予測だけの書き方
     demand = task == "demand"
@@ -1781,6 +1838,9 @@ def check_demand_recipe(recipe: dict, task: str, method: str) -> None:
                 f"レシピの {key} は 1 以上の整数 (日数) にしてください: "
                 f"{value}"
             )
+
+    # 過去の売れた数の列 (lag) の書き方
+    check_demand_lags(recipe["steps"], recipe["product"], recipe["date"])
 
     # 分割のしかた (発注を決める日の時刻の順)
     if method not in DEMAND_METHODS:

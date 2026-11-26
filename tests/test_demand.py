@@ -524,6 +524,43 @@ def test_demand_keys_other_task(key: str) -> None:
         load_recipe(recipe)
 
 
+@pytest.mark.parametrize(("change", "message"), [
+    ({"lags": [0]}, "lags は 1 以上の整数"),
+    ({"lags": [1, -1]}, "lags は 1 以上の整数"),
+    ({"lags": [1.5]}, "lags は 1 以上の整数"),
+    ({"lags": 1}, "lags は 1 以上の整数"),
+    ({"by": None}, "by に商品の id の列 product_id"),
+    ({"by": ["size"]}, "by に商品の id の列 product_id"),
+    ({"time": None}, "time に日付の列 date"),
+])
+def test_lag_errors(change: dict, message: str) -> None:
+    """
+    需要の予測の lag のずらし幅, by, time の誤りを load_recipe が止める
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    change: dict
+        lag の手順に上書きする引数 (None は消す)
+    message: str
+        誤りの文の一部
+
+    Returns
+    ----------
+    None
+    """
+    # lag の手順の書き換え
+    recipe = demand_recipe()
+    lag = recipe["steps"][0]
+    for key, value in change.items():
+        if value is None:
+            del lag[key]
+        else:
+            lag[key] = value
+    with pytest.raises(ValueError, match=message):
+        load_recipe(recipe)
+
+
 def test_lag_after_fit() -> None:
     """
     値を学ぶ手順より後の lag で書き出しが止まることを確かめる関数
