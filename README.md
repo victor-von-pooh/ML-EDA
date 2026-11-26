@@ -60,7 +60,7 @@ for item in result["findings"]:       # 気付き
     print(item["severity"], item["code"], item["message"])
 ```
 
-`profile` の結果は `overview` (行数, 重複など), `columns` (列ごとの型と統計), `correlations` (数値の列の相関), `associations` (カテゴリの列の関連), `target` (目的の列の分布と, 各列との関連の強さの順位), `timeseries` (時系列の間隔, 抜け, 周期の候補), `findings` (気付き).
+`profile` の結果は `overview` (行数, 重複など), `columns` (列ごとの型と統計), `correlations` (数値の列の相関), `associations` (カテゴリの列の関連), `target` (目的の列の分布と, 各列との関連の強さの順位), `timeseries` (時系列の間隔, 抜け, 周期の候補), `anomaly` (`task="anomaly"` の場合の, 異常の正解の付いた行と異常の行の数と割合), `findings` (気付き).
 
 日時の列を持つ表は時系列として読み, 時刻の順に並べる (`time_column` で列を指定, `kind="table"` で時系列にしない). 読み込みの設定は `load_data(path, sep=";", encoding="cp932")` のように渡す. 画像, 文, 点群, 撮影, 音声のディレクトリの中の, 読み込んだディレクトリの外を指すシンボリックリンクは既定で読まず, 理由を表の `error` に残す (共有の保存先へのリンクを読むには `load_data(path, follow_links=True)`. 版 2 の書き出しと `normalize_capture` も既定で外を写さず, 引数 `follow_links=True` でたどる).
 

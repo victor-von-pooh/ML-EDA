@@ -28,7 +28,7 @@ from ml_eda.price import (
     PRICE_KINDS, RAW_PRICE, cost_values, price_layers, price_values,
     product_values, units_values
 )
-from ml_eda.profile import finding, to_json
+from ml_eda.profile import finding, invalid_anomaly_labels, to_json
 from ml_eda.recipe import (
     FIXED_ROLES, HIDDEN, PRICE_STEPS, STEPS, WANT, category_key,
     check_recipe_steps, load_recipe, resolve_columns, to_plain
@@ -709,23 +709,13 @@ def anomaly_labels(values: pd.Series, target: str) -> pd.Series:
     ValueError
         真偽値でも, 0 と 1 だけの数でもない場合
     """
-    # 真偽値と, 0 と 1 だけの数
-    if pd.api.types.is_bool_dtype(values):
-        labels = values.astype("int64")
-        return labels
-    numeric = (
-        pd.api.types.is_numeric_dtype(values)
-        or values.map(lambda value: isinstance(value, bool)).all()
-    )
-    others = [] if not numeric else [
-        value for value in values.unique().tolist()
-        if value not in (0, 1)
-    ]
-    if not numeric or others:
-        examples = (
-            [str(value) for value in others[:3]] if numeric
-            else values.astype(str).unique().tolist()[:3]
-        )
+    # 0 と 1 (か真偽値) に収まらない値 (分析の気付き label_invalid と同じ
+    # 決まり)
+    invalid = invalid_anomaly_labels(values)
+    if invalid.any():
+        examples = [
+            str(value) for value in values[invalid].drop_duplicates()[:3]
+        ]
         raise ValueError(
             f"異常の検知の正解の列 {target} は, 異常を 1 か真, 正常を 0 か偽"
             f"にしてください (他の値: {', '.join(examples)})"

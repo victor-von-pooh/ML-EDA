@@ -7,7 +7,7 @@ import pytest
 
 from ml_eda import (
     export_dataset, load_data, load_dataset, load_recipe, model_inputs,
-    prepare
+    prepare, profile
 )
 from ml_eda.data import Data
 from ml_eda.pipeline import anomaly_counts
@@ -464,3 +464,180 @@ def test_data_errors(
         recipe["id"] = recipe_id
     with pytest.raises(ValueError, match=message):
         prepare(load_data_frame(frame), recipe)
+
+
+def codes(result: dict) -> set:
+    """
+    分析の結果の気付きの名前を集める関数
+
+    Parameters
+    ----------
+    result: dict
+        分析の結果
+
+    Returns
+    ----------
+    names: set
+        気付きの code の集まり
+    """
+    # 気付きの code
+    names = {item["code"] for item in result["findings"]}
+
+    return names
+
+
+def test_profile_few_labels() -> None:
+    """
+    正解が少しある表の分析で, 数と割合が返ることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 異常 10 行, 正常 20 行, 欠け 170 行
+    frame = make_readings(few_labels())
+    result = profile(load_data_frame(frame), "is_anomaly", task="anomaly")
+    anomaly = result["anomaly"]
+    assert anomaly["column"] == "is_anomaly"
+    assert anomaly["labeled"] is True
+    assert anomaly["rows"] == 200
+    assert anomaly["labeled_rows"] == 30
+    assert anomaly["missing"] == 170
+    assert anomaly["presumed"] == 0
+    assert anomaly["normal"] == 20
+    assert anomaly["anomaly"] == 10
+    assert anomaly["ratio"] == pytest.approx(10 / 30)
+    assert anomaly["presumed_ratio"] == pytest.approx(10 / 200)
+    assert anomaly["valid"] is True
+    assert anomaly["invalid"] == 0
+    assert anomaly["invalid_examples"] == []
+
+    # 偏りと欠けは異常の検知の前提なので出さない
+    assert not codes(result) & {
+        "few_anomalies", "label_invalid", "class_imbalance",
+        "target_missing",
+    }
+
+    # タスクを渡さない分析には数を返さない
+    assert profile(load_data_frame(frame), "is_anomaly")["anomaly"] is None
+
+
+@pytest.mark.parametrize("labels", [[0] * 50, [1] + [0] * 49, [False] * 50])
+def test_profile_all_normal(labels: list) -> None:
+    """
+    異常の行が 2 行未満の表の分析で, 気付きが出ることを確かめる関数
+
+    Parameters
+    ----------
+    labels: list
+        正解の並び
+
+    Returns
+    ----------
+    None
+    """
+    # 異常の行が少なすぎる
+    frame = make_readings(labels)
+    result = profile(load_data_frame(frame), "is_anomaly", task="anomaly")
+    anomaly = result["anomaly"]
+    assert anomaly["anomaly"] == sum(labels)
+    assert anomaly["normal"] == 50 - sum(labels)
+    assert anomaly["ratio"] == pytest.approx(sum(labels) / 50)
+    assert anomaly["valid"] is True
+    assert "few_anomalies" in codes(result)
+    assert "label_invalid" not in codes(result)
+
+
+@pytest.mark.parametrize(
+    "labels, invalid, examples",
+    [
+        ([0, 2, 1, 1, 0, 2], 2, ["2"]),
+        ([0, 1, "異常", 1, 2, None], 2, ["異常", "2"]),
+        (["0", "1", "1"], 3, ["0", "1"]),
+    ]
+)
+def test_profile_invalid_labels(
+    labels: list, invalid: int, examples: list
+) -> None:
+    """
+    正解の値に 2 や文字の混ざる表の分析で, 収まらない値と気付きが返る
+    ことを確かめる関数
+
+    Parameters
+    ----------
+    labels: list
+        正解の並び
+    invalid: int
+        収まらない値の行の数
+    examples: list
+        収まらない値の例
+
+    Returns
+    ----------
+    None
+    """
+    # 収まらない値は異常と正常のどちらにも数えない
+    frame = make_readings(labels)
+    result = profile(load_data_frame(frame), "is_anomaly", task="anomaly")
+    anomaly = result["anomaly"]
+    assert anomaly["valid"] is False
+    assert anomaly["invalid"] == invalid
+    assert anomaly["invalid_examples"] == examples
+    assert anomaly["labeled_rows"] == anomaly["normal"] + anomaly[
+        "anomaly"] + invalid
+    assert "label_invalid" in codes(result)
+
+    # 前処理も同じ決まりで誤りにする
+    with pytest.raises(ValueError, match="1 か真"):
+        prepare(load_data_frame(frame), anomaly_recipe("drop"))
+
+
+def test_profile_without_labels() -> None:
+    """
+    正解の列の無い表の分析で, 全ての行を正常と見なすことが返ることを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 正解の列を渡さない
+    frame = make_readings(None)
+    result = profile(load_data_frame(frame), task="anomaly")
+    anomaly = result["anomaly"]
+    assert anomaly["column"] is None
+    assert anomaly["labeled"] is False
+    assert anomaly["presumed"] == 200
+    assert anomaly["anomaly"] == 0
+    assert anomaly["ratio"] is None
+    assert anomaly["presumed_ratio"] == 0.0
+    assert not codes(result) & {"few_anomalies", "label_invalid"}
+
+
+def test_profile_task_errors() -> None:
+    """
+    分析で数えられないタスクとデータの種類の誤りを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 知らないタスクと, 表と時系列でないデータ
+    data = load_data_frame(make_readings([0, 1, 0]))
+    with pytest.raises(ValueError, match="anomaly だけ"):
+        profile(data, "is_anomaly", task="uplift")
+    data.kind = "text"
+    with pytest.raises(ValueError, match="表と時系列だけ"):
+        profile(data, "is_anomaly", task="anomaly")

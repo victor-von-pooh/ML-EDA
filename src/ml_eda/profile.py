@@ -1,4 +1,5 @@
 import math
+import numbers
 import re
 import unicodedata
 from typing import Any, Optional
@@ -28,9 +29,19 @@ CATEGORY_LIMIT = 10
 # 文とみなす平均の文字数
 TEXT_LENGTH = 40
 
+# 異常の検知を分析できるデータの種類
+ANOMALY_KINDS = ("table", "timeseries")
+
+# 検証用とテスト用の両方に配るのに要る異常の行の数
+MIN_ANOMALIES = 2
+
+# 正解の列の収まらない値の例を返す数
+INVALID_EXAMPLES = 5
+
 
 def profile(
-    data: Data, target: Optional[str] = None, seed: int = 0
+    data: Data, target: Optional[str] = None, seed: int = 0,
+    task: Optional[str] = None
 ) -> dict:
     """
     データを分析し, 概要, 列ごとの結果, 列の間の関係, 気付きを返す関数
@@ -43,13 +54,29 @@ def profile(
         目的の列, None の場合は data.roles の target (無ければ目的無し)
     seed: int = 0
         見本を選ぶ乱数のシード
+    task: Optional[str] = None
+        anomaly の場合は目的の列を異常の正解として数える (None は数えない)
 
     Returns
     ----------
     result: dict
         JSON にできる分析の結果 (overview, columns, correlations,
-        associations, target, timeseries, findings)
+        associations, target, timeseries, anomaly, findings)
+
+    Raises
+    ----------
+    ValueError
+        目的の列が無い場合, task が None と anomaly のどちらでもない場合,
+        異常の検知を表と時系列でないデータに求めた場合
     """
+    # 求めたタスクの確認
+    if task not in (None, "anomaly"):
+        raise ValueError(f"分析で数えるタスクは anomaly だけです: {task}")
+    if task == "anomaly" and data.kind not in ANOMALY_KINDS:
+        raise ValueError(
+            f"異常の検知 (task: anomaly) は表と時系列だけです: {data.kind}"
+        )
+
     # 列の名前を重ならない文字にそろえる
     frame = data.frame.copy(deep=False)
     frame.columns = unique_names(list(frame.columns))
@@ -100,6 +127,13 @@ def profile(
         if data.kind == "timeseries" else None
     )
 
+    # 異常の正解の数 (異常の行は少ないので, 見本ではなく全ての行で数える)
+    anomaly = None
+    if task == "anomaly":
+        whole = data.frame.copy(deep=False)
+        whole.columns = unique_names(list(whole.columns))
+        anomaly = describe_anomaly(whole, target)
+
     # 概要と気付き
     overview = describe_overview(data, frame, sampled)
     result = {
@@ -109,6 +143,7 @@ def profile(
         "associations": associations,
         "target": target_result,
         "timeseries": series,
+        "anomaly": anomaly,
     }
     result["findings"] = find_issues(result, target)
     if data.item_loader is not None:
@@ -916,6 +951,139 @@ def finding(
     return item
 
 
+def invalid_anomaly_labels(values: pd.Series) -> pd.Series:
+    """
+    異常の検知の正解の値のうち, 0 と 1 (か真偽値) に収まらない行を求める
+    関数
+
+    Parameters
+    ----------
+    values: pd.Series
+        欠けの無い正解の列の値
+
+    Returns
+    ----------
+    invalid: pd.Series
+        収まらない行が True の印
+    """
+    # 真偽値の列と数の列はまとめて, 他は値ごとに (文字の "1" は収まらない)
+    if pd.api.types.is_bool_dtype(values):
+        invalid = pd.Series(False, index=values.index)
+    elif pd.api.types.is_numeric_dtype(values):
+        invalid = ~values.isin([0, 1])
+    else:
+        invalid = ~values.map(
+            lambda value: isinstance(value, (bool, np.bool_)) or (
+                isinstance(value, numbers.Real) and value in (0, 1)
+            )
+        ).astype(bool)
+
+    return invalid
+
+
+def describe_anomaly(frame: pd.DataFrame, target: Optional[str]) -> dict:
+    """
+    異常の検知の正解の付いた行, 欠けた行, 異常の行の数と割合, 収まらない
+    値を数える関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        全ての行の表
+    target: Optional[str]
+        異常の正解の列 (None は正解の無い表で, 全ての行を正常と見なす)
+
+    Returns
+    ----------
+    result: dict
+        column, labeled, rows, labeled_rows, missing, presumed, normal,
+        anomaly, ratio, presumed_ratio, valid, invalid, invalid_examples
+    """
+    # 正解の無い表 (全ての行を正常と見なす)
+    rows = int(len(frame))
+    result: dict = {
+        "column": target, "labeled": bool(target), "rows": rows,
+        "labeled_rows": 0, "missing": 0, "presumed": rows, "normal": 0,
+        "anomaly": 0, "ratio": None, "presumed_ratio": 0.0 if rows else None,
+        "valid": True, "invalid": 0, "invalid_examples": [],
+    }
+    if not target:
+        return result
+
+    # 正解の付いた行と, 収まらない値
+    values = frame[target].dropna()
+    invalid = invalid_anomaly_labels(values)
+    good = values[~invalid]
+    anomaly = int((good == 1).sum())
+    normal = int(len(good)) - anomaly
+    examples = [
+        str(value) for value in values[invalid].drop_duplicates().tolist()
+    ]
+
+    # 割合 (正解が正常か異常の行に対してと, 欠けた行も正常と見なして)
+    counted = normal + anomaly
+    presumed = rows - int(invalid.sum())
+    result.update({
+        "labeled_rows": int(len(values)),
+        "missing": rows - int(len(values)),
+        "presumed": 0,
+        "normal": normal,
+        "anomaly": anomaly,
+        "ratio": anomaly / counted if counted else None,
+        "presumed_ratio": anomaly / presumed if presumed else None,
+        "valid": not bool(invalid.any()),
+        "invalid": int(invalid.sum()),
+        "invalid_examples": examples[:INVALID_EXAMPLES],
+    })
+
+    return result
+
+
+def anomaly_issues(anomaly: dict) -> list:
+    """
+    異常の正解の気付き (異常の行が少なすぎる, 収まらない値) を集める関数
+
+    Parameters
+    ----------
+    anomaly: dict
+        異常の正解の数 (describe_anomaly の値)
+
+    Returns
+    ----------
+    findings: list
+        気付きの並び
+    """
+    # 正解の無い表は異常の行を数えないので出さない
+    findings: list = []
+    target = anomaly["column"]
+    if not anomaly["labeled"]:
+        return findings
+
+    # 0 と 1 (か真偽値) に収まらない値
+    if not anomaly["valid"]:
+        findings.append(finding(
+            "warning", "label_invalid",
+            f"異常の正解の列 {target} に, 0 と 1 (か真偽値) でない値の行が "
+            f"{anomaly['invalid']} 行あります (例: "
+            f"{', '.join(anomaly['invalid_examples'])}). このままでは前処理"
+            "で誤りになるので, 異常を 1 か真, 正常を 0 か偽にしてください",
+            [target]
+        ))
+
+    # 検証用とテスト用の両方に配れない異常の行の数
+    if anomaly["anomaly"] < MIN_ANOMALIES:
+        findings.append(finding(
+            "warning", "few_anomalies",
+            f"異常の正解の行が {anomaly['anomaly']} 行で, 検証用とテスト用の"
+            f"両方には配れません ({MIN_ANOMALIES} 行以上で両方に 1 行以上). "
+            "異常の行の無い分割では上位 K 件の適合率と PR-AUC を数えられない"
+            "ので, 異常の行に正解を足すか, 度合いの分布で確かめることを検討"
+            "してください", [target]
+        ))
+
+    return findings
+
+
 def find_issues(result: dict, target: Optional[str]) -> list[dict]:
     """
     分析の結果から, 学習の前に確かめた方がよいことを集める関数
@@ -965,9 +1133,17 @@ def find_issues(result: dict, target: Optional[str]) -> list[dict]:
     # 強く相関する数値の列の組
     findings.extend(correlation_issues(result["correlations"], target))
 
-    # 目的の列
+    # 目的の列 (異常の検知は偏りと欠けが前提なので, 偏りと欠けの代わりに
+    # 異常の正解の気付き)
+    anomaly = result.get("anomaly")
     if result["target"]:
-        findings.extend(target_issues(result, target))
+        skipped = {"class_imbalance", "target_missing"} if anomaly else set()
+        findings.extend(
+            item for item in target_issues(result, target)
+            if item["code"] not in skipped
+        )
+    if anomaly:
+        findings.extend(anomaly_issues(anomaly))
 
     # 複数の系列と, 時系列の間隔
     series = result["timeseries"]
