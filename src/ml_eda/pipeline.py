@@ -21,10 +21,14 @@ from ml_eda.pinned import (
     drop_holder, entry_name, entry_state, make_holder, move_into,
     open_under
 )
+from ml_eda.price import (
+    PRICE_KINDS, RAW_PRICE, cost_values, price_layers, price_values,
+    product_values, units_values
+)
 from ml_eda.profile import finding, to_json
 from ml_eda.recipe import (
-    HIDDEN, STEPS, WANT, category_key, check_recipe_steps, load_recipe,
-    resolve_columns, to_plain
+    FIXED_ROLES, HIDDEN, PRICE_STEPS, STEPS, WANT, category_key,
+    check_recipe_steps, load_recipe, resolve_columns, to_plain
 )
 from ml_eda.uplift import (
     UPLIFT_KINDS, choose_outcome_kind, outcome_values, treatment_values
@@ -61,12 +65,12 @@ STRATA_LIMIT = 20
 # グループでまとめる分割のしかた (分割の件数が割合から外れうる)
 GROUP_METHODS = ("group", "group_time", "stratified_group")
 
-# 異常の検知と効果を見積もるで, レシピに id が無い場合の行の id の列
-# (読み込んだ表の行の位置)
+# 異常の検知, 効果を見積もる, 値段を変える判断で, レシピに id が無い
+# 場合の行の id の列 (読み込んだ表の行の位置)
 ANOMALY_ID = "row_id"
 
 # 行の id の列を置くタスク
-ID_TASKS = ("anomaly", "uplift")
+ID_TASKS = ("anomaly", "uplift", "price")
 
 # 異常の検知で書き出せる種類
 ANOMALY_KINDS = ("table", "timeseries")
@@ -134,6 +138,9 @@ class Prepared:
     # 効果を見積もるの説明 (行の id の列, 処置の列, 結果の種類, 分割ごとの
     # 群の行の数と結果の平均. 効果を見積もるでなければ None)
     uplift: Optional[dict] = None
+    # 値段を変える判断の説明 (役割の列, 値段の手順, 分割ごとの値段の範囲と
+    # 売れた数の平均. 値段を変える判断でなければ None)
+    price: Optional[dict] = None
 
 
 def split_counts(count: int, valid: float, test: float) -> tuple[int, int]:
@@ -856,7 +863,8 @@ def anomaly_splits(
 
 def row_id_name(data: Data, recipe: dict) -> str:
     """
-    異常の検知と効果を見積もるの行の id の列を確かめて名前を返す関数
+    異常の検知, 効果を見積もる, 値段を変える判断の行の id の列を確かめて
+    名前を返す関数
 
     Parameters
     ----------
@@ -1151,6 +1159,79 @@ def uplift_target(
     return result
 
 
+def split_ratios(split: dict) -> tuple[float, float]:
+    """
+    分割の検証用とテスト用の割合を確かめて返す関数
+
+    Parameters
+    ----------
+    split: dict
+        valid, test (割合)
+
+    Returns
+    ----------
+    valid: float
+        検証用の割合
+    test: float
+        テスト用の割合
+
+    Raises
+    ----------
+    ValueError
+        割合が負か, 合計が 1 以上の場合
+    """
+    # 0 以上で, 合計が 1 未満
+    valid = float(split.get("valid", 0.2))
+    test = float(split.get("test", 0.0))
+    if valid < 0 or test < 0 or valid + test >= 1:
+        raise ValueError("valid と test の割合は 0 以上で, 合計を 1 未満に")
+
+    return valid, test
+
+
+def layer_splits(
+    keys: np.ndarray, valid: float, test: float, rng: np.random.Generator
+) -> np.ndarray:
+    """
+    行の数に割合をかけた検証用とテスト用の数を, 層の行の数に比例して配る
+    関数 (最大剰余法. 層の中は無作為)
+
+    Parameters
+    ----------
+    keys: np.ndarray
+        行ごとの層の値
+    valid: float
+        検証用の割合
+    test: float
+        テスト用の割合
+    rng: np.random.Generator
+        層の中の順の乱数 (層の値の順に続けて使う)
+
+    Returns
+    ----------
+    assigned: np.ndarray
+        行ごとの分割の名前
+    """
+    # 層ごとの比例配分 (層化の分割と同じ)
+    n_valid, n_test = split_counts(len(keys), valid, test)
+    layers = sorted(set(keys))
+    members = [np.flatnonzero(keys == layer) for layer in layers]
+    sizes = [len(rows) for rows in members]
+    valid_shares = allocate(sizes, n_valid)
+    test_shares = allocate(
+        [size - share for size, share in zip(sizes, valid_shares)], n_test
+    )
+    assigned = np.array(["train"] * len(keys), dtype=object)
+    for rows, v_count, t_count in zip(members, valid_shares, test_shares):
+        order = rng.permutation(len(rows))
+        labels = label_by_position(
+            pd.RangeIndex(len(rows)), order, v_count, t_count
+        )
+        assigned[rows] = labels.to_numpy()
+
+    return assigned
+
+
 def move_one(
     assigned: np.ndarray, members: np.ndarray, keys: np.ndarray,
     donor: str, name: str, rng: np.random.Generator
@@ -1221,31 +1302,14 @@ def uplift_splits(
         割合の誤りの場合と, 群の行が置く分割の数より少ない場合
     """
     # 割合の確認と層 (binary は処置と結果の組)
-    valid = float(split.get("valid", 0.2))
-    test = float(split.get("test", 0.0))
-    if valid < 0 or test < 0 or valid + test >= 1:
-        raise ValueError("valid と test の割合は 0 以上で, 合計を 1 未満に")
+    valid, test = split_ratios(split)
     rng = np.random.default_rng(int(split.get("seed", 0)))
-    n_valid, n_test = split_counts(len(frame), valid, test)
     keys = np.where(treated, "1", "0").astype(object)
     if kind == "binary":
         keys = keys + "/" + frame[target].astype(str).to_numpy()
 
     # 層ごとの比例配分 (層化の分割と同じ)
-    layers = sorted(set(keys))
-    members = [np.flatnonzero(keys == layer) for layer in layers]
-    sizes = [len(rows) for rows in members]
-    valid_shares = allocate(sizes, n_valid)
-    test_shares = allocate(
-        [size - share for size, share in zip(sizes, valid_shares)], n_test
-    )
-    assigned = np.array(["train"] * len(frame), dtype=object)
-    for rows, v_count, t_count in zip(members, valid_shares, test_shares):
-        order = rng.permutation(len(rows))
-        labels = label_by_position(
-            pd.RangeIndex(len(rows)), order, v_count, t_count
-        )
-        assigned[rows] = labels.to_numpy()
+    assigned = layer_splits(keys, valid, test, rng)
 
     # 置く分割の全てに, 処置の群と対照の群の行を 1 つ以上
     needed = ["train"] + [
@@ -1368,6 +1432,270 @@ def uplift_summary(
     }
 
     return summary
+
+
+def role_column(data: Data, name: str, label: str) -> pd.Series:
+    """
+    読み込んだ表に役割の列が 1 つだけあることを確かめて返す関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    name: str
+        列の名前
+    label: str
+        列の呼び名 (誤りの文に使う)
+
+    Returns
+    ----------
+    column: pd.Series
+        その列の全ての行 (元の値)
+
+    Raises
+    ----------
+    ValueError
+        列が無いか 2 つ以上ある場合
+    """
+    # 1 つだけある列 (同じ名前の列は取り違えるので誤り)
+    columns = [str(column) for column in data.frame.columns]
+    if columns.count(name) != 1:
+        raise ValueError(f"{label} {name} がありません (か 2 つ以上)")
+    column = data.frame.iloc[:, columns.index(name)]
+
+    return column
+
+
+def price_roles(data: Data, recipe: dict) -> dict:
+    """
+    値段を変える判断の値段, 原価, 商品の id の列を, 読み込んだ表の全ての
+    行で確かめて役割の名前を返す関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        読み込んだレシピ (price, cost, product)
+
+    Returns
+    ----------
+    roles: dict
+        price と, 書いた場合の cost と product の列の名前
+
+    Raises
+    ----------
+    ValueError
+        列が無い場合, 値が決まりに合わない場合, 表に元の値段の列
+        (price_raw) と同じ名前の列がある場合
+    """
+    # 元の値段の列の名前の空き
+    columns = [str(column) for column in data.frame.columns]
+    if RAW_PRICE in columns:
+        raise ValueError(
+            f"表に {RAW_PRICE} の列があります. 書き出しの元の値段の列と"
+            "重なるので, 列の名前を変えてください"
+        )
+
+    # 値段, 原価, 商品の id の値 (欠けと値の誤りは全ての行で)
+    roles = {"price": str(recipe["price"])}
+    price_values(
+        role_column(data, roles["price"], "値段の列"), roles["price"]
+    )
+    if recipe.get("cost"):
+        roles["cost"] = str(recipe["cost"])
+        cost_values(role_column(data, roles["cost"], "原価の列"), roles["cost"])
+    if recipe.get("product"):
+        roles["product"] = str(recipe["product"])
+        product_values(
+            role_column(data, roles["product"], "商品の id の列"),
+            roles["product"]
+        )
+
+    return roles
+
+
+def original_values(data: Data, name: str, rows: list[int]) -> np.ndarray:
+    """
+    役割の列の, 元の表での値を返す関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    name: str
+        列の名前 (表にあるもの)
+    rows: list[int]
+        元のデータでの行の位置
+
+    Returns
+    ----------
+    values: np.ndarray
+        行ごとの元の値
+    """
+    # 行の位置の元の値
+    columns = [str(column) for column in data.frame.columns]
+    values = data.frame.iloc[list(rows), columns.index(name)].to_numpy()
+
+    return values
+
+
+def price_target(frame: pd.DataFrame, target: str) -> pd.DataFrame:
+    """
+    値段を変える判断の売れた数の欠けた行を落とし, 値を確かめる関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        読み込んだ表
+    target: str
+        売れた数の列
+
+    Returns
+    ----------
+    result: pd.DataFrame
+        売れた数の分かる行の表
+
+    Raises
+    ----------
+    ValueError
+        売れた数が数でない場合と, 負か無限大の値がある場合
+    """
+    # 欠けた行の除去 (keep の行は後で unlabeled の分割)
+    labeled = frame[target].notna()
+    units_values(frame.loc[labeled, target], target)
+    result = frame[labeled]
+
+    return result
+
+
+def price_splits(
+    frame: pd.DataFrame, split: dict, prices: np.ndarray
+) -> pd.Series:
+    """
+    値段を変える判断の分割 (値段の段で層を作る) をする関数
+
+    Parameters
+    ----------
+    frame: pd.DataFrame
+        売れた数の分かる行の表
+    split: dict
+        valid, test (割合), seed
+    prices: np.ndarray
+        行ごとの元の値段
+
+    Returns
+    ----------
+    assigned: pd.Series
+        行ごとの分割の名前
+
+    Raises
+    ----------
+    ValueError
+        割合の誤りの場合
+    """
+    # 値段の段ごとの比例配分
+    valid, test = split_ratios(split)
+    rng = np.random.default_rng(int(split.get("seed", 0)))
+    assigned = layer_splits(price_layers(prices), valid, test, rng)
+    result = pd.Series(assigned, index=frame.index, dtype=object)
+
+    return result
+
+
+def price_summary(recipe: dict, roles: dict, frames: dict) -> dict:
+    """
+    値段を変える判断の説明 (役割の列, 値段の手順, 分割ごとの値段の範囲と
+    売れた数の平均) を作る関数
+
+    Parameters
+    ----------
+    recipe: dict
+        当てはめた値を含むレシピ
+    roles: dict
+        列の役割 (target, price, id と, 書いた場合の cost, product)
+    frames: dict
+        分割ごとの表 (元の値段の列 price_raw を持つ)
+
+    Returns
+    ----------
+    summary: dict
+        id, price, raw, cost, product, unlabeled, steps, splits (分割ごとの
+        rows, products, price_min, price_max, prices, units_mean, cost_mean)
+    """
+    # 分割ごとの値段の範囲と売れた数の平均 (unlabeled は売れた数を除く)
+    cost = roles.get("cost")
+    product = roles.get("product")
+    splits = {}
+    for name, frame in frames.items():
+        raw = frame[RAW_PRICE].to_numpy(dtype=float)
+        splits[name] = {
+            "rows": int(len(frame)),
+            "products": int(frame[product].nunique()) if product else None,
+            "price_min": float(raw.min()),
+            "price_max": float(raw.max()),
+            "prices": int(len(np.unique(raw))),
+            "units_mean": None if name == UNLABELED else float(
+                frame[roles["target"]].to_numpy(dtype=float).mean()
+            ),
+            "cost_mean": float(
+                frame[cost].to_numpy(dtype=float).mean()
+            ) if cost else None,
+        }
+
+    # 値段の列にかけた値段の手順 (順のとおり)
+    steps = [
+        spec["op"] for spec in recipe["steps"]
+        if spec["op"] in PRICE_STEPS
+        and roles["price"] in spec.get("state", {}).get("columns", [])
+    ]
+    summary = {
+        "id": str(roles["id"]),
+        "price": roles["price"],
+        "raw": RAW_PRICE,
+        "cost": cost,
+        "product": product,
+        "unlabeled": str(recipe["split"].get("unlabeled", "drop")),
+        "steps": steps,
+        "splits": splits,
+    }
+
+    return summary
+
+
+def price_frame(
+    data: Data, roles: dict, frame: pd.DataFrame, rows: list[int]
+) -> None:
+    """
+    表に元の値段, 原価, 商品の id の元の値を置く関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    roles: dict
+        列の役割 (price と, 書いた場合の cost, product)
+    frame: pd.DataFrame
+        置く表 (書き換える)
+    rows: list[int]
+        表の行の, 元のデータでの位置
+
+    Returns
+    ----------
+    None
+    """
+    # 元の値段と原価は float64, 商品の id は元の値
+    frame[RAW_PRICE] = original_values(
+        data, roles["price"], rows
+    ).astype("float64")
+    if roles.get("cost"):
+        frame[roles["cost"]] = original_values(
+            data, roles["cost"], rows
+        ).astype("float64")
+    if roles.get("product"):
+        frame[roles["product"]] = original_values(
+            data, roles["product"], rows
+        )
 
 
 def first_fit(steps: list) -> int:
@@ -1624,15 +1952,25 @@ def run_step(
         ):
             # 時系列の予測では目的の列の過去の値が最も大事な手がかりなので,
             # lag の auto は目的の列も選ぶ (ずらすので未来の値は使わない)
-            # 処置の列は落とす手順だけで指定可 (書き出しには元の値)
+            # 処置, 原価, 商品の id の列は落とす手順だけで指定可 (書き出し
+            # には元の値). 値段の列は値段の手順だけで選択
             dropped = {"target"} if spec["op"] == "lag" else set()
             if spec["op"] == "drop_columns":
-                dropped.add("treatment")
+                dropped.update(FIXED_ROLES)
+            if spec["op"] in PRICE_STEPS:
+                dropped.add("price")
             chosen = {k: v for k, v in roles.items() if k not in dropped}
             params["columns"] = resolve_columns(
                 frame, params.get("columns"), chosen,
                 WANT.get(spec["op"], "numeric")
             )
+            price = roles.get("price")
+            if price in params["columns"] and spec["op"] not in PRICE_STEPS:
+                raise ValueError(
+                    f"値段の列 {price} を変えられるのは値段の手順 "
+                    f"({', '.join(PRICE_STEPS)}) だけです (値段の列は学習に"
+                    "使う列に残し, 候補の値段にも同じ手順をかけ直すため)"
+                )
             # 文の列は中身として読むので, 表の手順で書き換えても配列に
             # 届かない (中身の手順で変える)
             text = roles.get("text")
@@ -1693,6 +2031,7 @@ def apply_recipe(
     frame[ROW_COLUMN] = np.arange(len(frame))
     anomaly = recipe["task"] == "anomaly"
     uplift = recipe["task"] == "uplift"
+    priced = recipe["task"] == "price"
     if target:
         if target not in frame.columns:
             raise ValueError(f"目的の列 {target} がありません")
@@ -1707,6 +2046,10 @@ def apply_recipe(
             )
             kind = uplift_kind(data, recipe)
             frame = uplift_target(frame, target, kind)
+        elif priced:
+            # 値段, 原価, 商品の id の確かめ (売れた数の欠けた行を落とす前)
+            roles.update(price_roles(data, recipe))
+            frame = price_target(frame, target)
         else:
             frame = frame[frame[target].notna()]
     if recipe["task"] in ID_TASKS:
@@ -1745,6 +2088,12 @@ def apply_recipe(
         frame[SPLIT_COLUMN] = uplift_splits(
             frame, split, target, kind, treated
         )
+    elif priced:
+        # 元の値段の段 (分割の前の手順で落とした行は除く)
+        prices = original_values(
+            data, roles["price"], frame[ROW_COLUMN].tolist()
+        ).astype(float)
+        frame[SPLIT_COLUMN] = price_splits(frame, split, prices)
     else:
         frame[SPLIT_COLUMN] = assign_splits(frame, split, split_roles)
     frame = frame.drop(columns=[TIME_COLUMN, GROUP_COLUMN], errors="ignore")
@@ -1904,6 +2253,7 @@ def prepare(
     recipe = load_recipe(recipe)
     anomaly = recipe["task"] == "anomaly"
     uplift = recipe["task"] == "uplift"
+    priced = recipe["task"] == "price"
     if anomaly and data.kind not in ANOMALY_KINDS:
         raise ValueError(
             f"異常の検知 (task: anomaly) は表と時系列だけです: {data.kind}"
@@ -1911,6 +2261,10 @@ def prepare(
     if uplift and data.kind not in UPLIFT_KINDS:
         raise ValueError(
             f"効果を見積もる (task: uplift) は表と時系列だけです: {data.kind}"
+        )
+    if priced and data.kind not in PRICE_KINDS:
+        raise ValueError(
+            f"値段を変える判断 (task: price) は表と時系列だけです: {data.kind}"
         )
     result, roles = apply_recipe(data, recipe)
     target = roles.get("target")
@@ -1948,6 +2302,10 @@ def prepare(
         result[roles["treatment"]] = original_treatment(
             data, roles["treatment"], result[ROW_COLUMN].tolist()
         ).to_numpy()
+    if priced:
+        if roles["price"] not in result.columns:
+            raise ValueError(f"値段の列 {roles['price']} が手順で消えました")
+        price_frame(data, roles, result, result[ROW_COLUMN].tolist())
     names = [n for n in SPLITS if (result[SPLIT_COLUMN] == n).any()]
     positions = {
         n: result.loc[result[SPLIT_COLUMN] == n, ROW_COLUMN].tolist()
@@ -1966,14 +2324,20 @@ def prepare(
     overlaps += split_notes(recipe["split"], result)
 
     # 学習に使う列 (画像などは中身の配列を使うので無し. 役割の列を除く)
+    # (値段を変える判断の値段の列は学習に使う列の最後)
     reserved = {
         target, roles.get("id"), roles.get("time"), roles.get("treatment"),
-        SPLIT_COLUMN
+        roles.get("cost"), roles.get("product"), SPLIT_COLUMN
     }
+    if priced:
+        reserved.add(RAW_PRICE)
     features = [] if data.item_loader is not None else [
         name for name in result.columns
         if name not in reserved and name not in HIDDEN_COLUMNS
     ]
+    if priced:
+        features = [n for n in features if n != roles["price"]]
+        features.append(roles["price"])
 
     # 目的の列の欠けた行の, 学習用で当てはめた値での unlabeled の分割
     if keep:
@@ -1986,6 +2350,8 @@ def prepare(
             extra[roles["treatment"]] = original_treatment(
                 data, roles["treatment"], extra_rows
             ).to_numpy()
+        if extra_rows and priced:
+            price_frame(data, roles, extra, extra_rows)
         if extra_rows:
             frames[UNLABELED] = extra
             positions[UNLABELED] = extra_rows
@@ -2049,10 +2415,13 @@ def prepare(
         effects = uplift_summary(
             recipe, roles, uplift_kind(data, recipe), frames
         )
+
+    # 値段を変える判断の説明 (分割ごとの値段の範囲と売れた数の平均)
+    prices = price_summary(recipe, roles, frames) if priced else None
     prepared = Prepared(
         frames=frames, recipe=recipe, features=features, target=target,
         classes=classes, notes=notes, findings=findings, anomaly=summary,
-        uplift=effects
+        uplift=effects, price=prices
     )
 
     return prepared
@@ -2589,6 +2958,8 @@ def export_dataset(
             info["anomaly"] = to_plain(prepared.anomaly)
         if prepared.uplift is not None:
             info["uplift"] = to_plain(prepared.uplift)
+        if prepared.price is not None:
+            info["price"] = to_plain(prepared.price)
         finish_writing(target, final, info, parent)
     except Exception:
         drop_writing(target, parent)
@@ -2660,6 +3031,35 @@ def without_column(state: dict, name: str) -> dict:
             result[key] = [c for c in value if c != name]
         elif isinstance(value, dict):
             result[key] = {k: v for k, v in value.items() if k != name}
+        else:
+            result[key] = value
+
+    return result
+
+
+def only_column(state: dict, name: str) -> dict:
+    """
+    当てはめた値を 1 つの列だけにする関数
+
+    Parameters
+    ----------
+    state: dict
+        手順の当てはめた値 (columns と, 列ごとの値の辞書)
+    name: str
+        残す列の名前
+
+    Returns
+    ----------
+    result: dict
+        name だけの写し
+    """
+    # 列の並びと, 列の名前を鍵にした辞書 (values, bounds)
+    result = {}
+    for key, value in state.items():
+        if key == "columns":
+            result[key] = [c for c in value if c == name]
+        elif isinstance(value, dict):
+            result[key] = {k: v for k, v in value.items() if k == name}
         else:
             result[key] = value
 
@@ -3081,6 +3481,150 @@ class Dataset:
 
         return values
 
+    def price_info(self) -> dict:
+        """
+        値段を変える判断の説明を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        info: dict
+            説明の price
+
+        Raises
+        ----------
+        ValueError
+            値段を変える判断 (task: price) のデータセットでない場合
+        """
+        # 説明の price
+        info = self.info.get("price")
+        if self.info.get("task") != "price" or not info:
+            raise ValueError(
+                "値段は値段を変える判断 (task: price) のデータセットだけに"
+                "あります"
+            )
+
+        return info
+
+    def price(self, split: str) -> np.ndarray:
+        """
+        分割の元の値段 (手順をかける前) を返す関数
+
+        Parameters
+        ----------
+        split: str
+            train, valid, test, unlabeled のどれか
+
+        Returns
+        ----------
+        values: np.ndarray
+            行ごとの float64 の値段 (arrays の行と同じ順)
+
+        Raises
+        ----------
+        ValueError
+            値段を変える判断 (task: price) のデータセットでない場合
+        """
+        # 元の値段の列
+        info = self.price_info()
+        values = self.frames[split][info["raw"]].to_numpy(
+            dtype=np.float64, copy=True
+        )
+
+        return values
+
+    def cost(self, split: str) -> Optional[np.ndarray]:
+        """
+        分割の原価を返す関数
+
+        Parameters
+        ----------
+        split: str
+            train, valid, test, unlabeled のどれか
+
+        Returns
+        ----------
+        values: Optional[np.ndarray]
+            行ごとの float64 の原価 (arrays の行と同じ順). 原価の列が
+            無ければ None
+
+        Raises
+        ----------
+        ValueError
+            値段を変える判断 (task: price) のデータセットでない場合
+        """
+        # 原価の列 (無ければ None)
+        info = self.price_info()
+        if not info.get("cost"):
+            return None
+        values = self.frames[split][info["cost"]].to_numpy(
+            dtype=np.float64, copy=True
+        )
+
+        return values
+
+    def price_inputs(self, split: str, prices: Any) -> np.ndarray:
+        """
+        分割の入力の値段の列だけを, 候補の値段に値段の手順をかけた値に
+        置き換えて返す関数
+
+        Parameters
+        ----------
+        split: str
+            train, valid, test, unlabeled のどれか
+        prices: Any
+            元の値段の候補 (1 つの数か, 行ごとの値の並び)
+
+        Returns
+        ----------
+        x: np.ndarray
+            (件数, 列の数) の float32 の配列 (arrays の x の写し)
+
+        Raises
+        ----------
+        ValueError
+            値段を変える判断のデータセットでない場合, 候補の数が行の数と
+            違う場合, 候補が 0 より大きい有限の数でない場合
+        """
+        # 候補の値段の確かめ (1 つの数は全ての行に)
+        info = self.price_info()
+        x, _ = self.arrays(split)
+        values = np.asarray(prices, dtype=np.float64)
+        if values.ndim == 0:
+            values = np.full(len(x), float(values))
+        if values.shape != (len(x),):
+            raise ValueError(
+                f"候補の値段は 1 つの数か, {split} の行の数 ({len(x)}) の並び"
+                f"にしてください: {values.shape}"
+            )
+        if not np.isfinite(values).all() or (values <= 0).any():
+            raise ValueError("候補の値段は 0 より大きい有限の数にしてください")
+
+        # 当てはめた値のままの値段の手順と, 値段の列の置き換え
+        name = info["price"]
+        frame = pd.DataFrame({name: values})
+        for spec in self.recipe["steps"]:
+            state = spec.get("state", {})
+            if spec["op"] not in PRICE_STEPS or name not in state.get(
+                "columns", []
+            ):
+                continue
+            params = {
+                k: v for k, v in spec.items() if k not in ("op", "state")
+            }
+            params["columns"] = [name]
+            frame = STEPS[spec["op"]].apply(
+                frame, params, only_column(state, name)
+            )
+        x[:, self.features.index(name)] = frame[name].to_numpy(
+            dtype=np.float32
+        )
+
+        return x
+
 
 def load_dataset(
     path: Union[str, Path], follow_links: bool = False
@@ -3263,7 +3807,8 @@ def model_outputs(
     outputs: Optional[int]
         分類はクラスの数, 回帰と時系列の予測は 1, 異常の検知は学習に使う
         列の数 (自己符号化器が入力を作り直す), 効果を見積もるは 1 (処置
-        したときとしないときの予測のそれぞれ). 分からなければ None
+        したときとしないときの予測のそれぞれ), 値段を変える判断は 1 (売れた
+        数の予測). 分からなければ None
     """
     # 版 1 の説明は何期先までを持たないので, 時系列の予測も 1 行に 1 つ
     outputs = None
@@ -3273,7 +3818,7 @@ def model_outputs(
         outputs = 1
     elif task == "anomaly":
         outputs = width
-    elif task == "uplift":
+    elif task in ("uplift", "price"):
         outputs = 1
 
     return outputs

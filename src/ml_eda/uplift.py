@@ -193,10 +193,12 @@ def outcome_values(values: pd.Series, kind: str) -> pd.Series:
 
 
 def uplift_table(
-    source: Union[str, Path, Data], loader: Optional[str], options: dict
+    source: Union[str, Path, Data], loader: Optional[str], options: dict,
+    label: str = "介入の記録"
 ) -> Data:
     """
-    介入の記録の表を load_data で読むか, 読んだデータを使う関数
+    介入の記録 (や値段を変えた記録) の表を load_data で読むか, 読んだ
+    データを使う関数
 
     Parameters
     ----------
@@ -206,6 +208,8 @@ def uplift_table(
         読み込みの名前 (None は推定)
     options: dict
         読み込みの設定
+    label: str = "介入の記録"
+        記録の呼び名 (誤りの文に使う)
 
     Returns
     ----------
@@ -229,7 +233,7 @@ def uplift_table(
         data = load_data(source, loader=loader, **options)
     if data.kind not in UPLIFT_KINDS:
         raise ValueError(
-            f"介入の記録は表にしてください ({data.kind} のデータです)"
+            f"{label}は表にしてください ({data.kind} のデータです)"
         )
 
     return data
