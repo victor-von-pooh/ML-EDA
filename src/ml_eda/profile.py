@@ -66,8 +66,9 @@ def profile(
     Raises
     ----------
     ValueError
-        目的の列が無い場合, task が None と anomaly のどちらでもない場合,
+        task が None と anomaly のどちらでもない場合,
         異常の検知を表と時系列でないデータに求めた場合
+        (目的の列が無い場合は誤りにせず, 正解の無い表として返す)
     """
     # 求めたタスクの確認
     if task not in (None, "anomaly"):

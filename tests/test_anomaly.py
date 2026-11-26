@@ -343,6 +343,34 @@ def test_label_types(labels: list) -> None:
     assert int(values.sum()) == 10
 
 
+@pytest.mark.parametrize("kind", ["object", "bool"])
+def test_label_column_dtypes(kind: str) -> None:
+    """
+    0 と 1 だけの object の列と真偽値の列で前処理が通り, 値が 0 と 1 になることを確かめる関数
+
+    Parameters
+    ----------
+    kind: str
+        正解の列の型 (object か bool)
+
+    Returns
+    ----------
+    None
+    """
+    # 正解の列を指定の型にして前処理に通す
+    frame = make_readings([1] * 10 + [0] * 40)
+    if kind == "object":
+        frame["is_anomaly"] = pd.Series(
+            frame["is_anomaly"].tolist(), dtype=object
+        )
+    else:
+        frame["is_anomaly"] = frame["is_anomaly"].astype(bool)
+    prepared = prepare(load_data_frame(frame), anomaly_recipe("drop"))
+    values = pd.concat(prepared.frames.values())["is_anomaly"]
+    assert set(values) == {0, 1}
+    assert int(values.sum()) == 10
+
+
 def test_kind_error() -> None:
     """
     表と時系列でない種類で異常の検知が誤りになることを確かめる関数
