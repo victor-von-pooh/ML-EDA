@@ -16,7 +16,7 @@ FORMAT_VERSION = 1
 # タスクの種類
 TASKS = (
     "classification", "regression", "forecasting", "anomaly", "uplift",
-    "price", "none"
+    "price", "demand", "none"
 )
 
 # 分割のしかた
@@ -39,13 +39,23 @@ UPLIFT_METHODS = ("stratified",)
 OUTCOME_KINDS = ("binary", "amount")
 
 # 行の id の列 (レシピの id) を書けるタスク
-ID_TASKS = ("anomaly", "uplift", "price")
+ID_TASKS = ("anomaly", "uplift", "price", "demand")
 
 # 値段を変える判断の分割のしかた (値段の段で層を作る)
 PRICE_METHODS = ("stratified",)
 
-# 値段を変える判断だけで書ける鍵 (値段, 原価, 商品の id の列)
-PRICE_KEYS = ("price", "cost", "product")
+# 値段を変える判断だけで書ける鍵 (値段と原価の列)
+PRICE_KEYS = ("price", "cost")
+
+# 商品の id の列 (レシピの product) を書けるタスク
+PRODUCT_TASKS = ("price", "demand")
+
+# 需要の予測の分割のしかた (発注を決める日の時刻の順)
+DEMAND_METHODS = ("time",)
+
+# 需要の予測だけで書ける鍵 (日付と在庫の数の列, 先の期間の日数, 発注を
+# 決める日の間隔)
+DEMAND_KEYS = ("date", "stock", "horizon", "interval")
 
 # 値段の列を変えられる手順 (列ごとに値を変え, 列の名前を変えない手順)
 PRICE_STEPS = ("clip", "log", "standardize", "minmax")
@@ -53,7 +63,8 @@ PRICE_STEPS = ("clip", "log", "standardize", "minmax")
 # 手順で変えられず, 落とす drop_columns だけを書ける役割の列 (書き出しには
 # 元の値)
 FIXED_ROLES = {
-    "treatment": "処置の列", "cost": "原価の列", "product": "商品の id の列"
+    "treatment": "処置の列", "cost": "原価の列", "product": "商品の id の列",
+    "stock": "在庫の数の列"
 }
 
 
@@ -1496,8 +1507,8 @@ def check_anomaly_recipe(
     Raises
     ----------
     ValueError
-        異常の検知, 効果を見積もる, 値段を変える判断でないのに id を
-        書いた場合, 異常の検知でないのに normal を書いた場合, 異常の
+        異常の検知, 効果を見積もる, 値段を変える判断, 需要の予測でないのに
+        id を書いた場合, 異常の検知でないのに normal を書いた場合, 異常の
         検知で分割のしかたが random でない場合, id が文字でない場合
     """
     # 異常の検知だけの書き方
@@ -1510,8 +1521,8 @@ def check_anomaly_recipe(
     if task not in ID_TASKS and "id" in recipe:
         raise ValueError(
             "レシピの id (行の id の列) は異常の検知 (task: anomaly), 効果を"
-            "見積もる (task: uplift) と値段を変える判断 (task: price) だけで"
-            "書けます"
+            "見積もる (task: uplift), 値段を変える判断 (task: price) と需要の"
+            "予測 (task: demand) だけで書けます"
         )
     name = recipe.get("id")
     if "id" in recipe and (not isinstance(name, str) or not name):
@@ -1622,7 +1633,7 @@ def check_price_recipe(recipe: dict, task: str, method: str) -> None:
         変える判断で売れた数の列か値段の列が無い場合, 列の名前が文字でない
         場合, 役割の列が重なる場合, 分割のしかたが stratified でない場合
     """
-    # 値段を変える判断だけの書き方
+    # 値段を変える判断だけの書き方 (商品の id は需要の予測でも書ける)
     price = task == "price"
     for key in PRICE_KEYS:
         if not price and key in recipe:
@@ -1630,6 +1641,11 @@ def check_price_recipe(recipe: dict, task: str, method: str) -> None:
                 f"レシピの {key} は値段を変える判断 (task: price) だけで"
                 "書けます"
             )
+    if task not in PRODUCT_TASKS and "product" in recipe:
+        raise ValueError(
+            "レシピの product は値段を変える判断 (task: price) と需要の予測 "
+            "(task: demand) だけで書けます"
+        )
     if not price:
         return
 
@@ -1669,6 +1685,111 @@ def check_price_recipe(recipe: dict, task: str, method: str) -> None:
         )
 
 
+def column_key(recipe: dict, key: str, label: str) -> str:
+    """
+    レシピの列の名前の鍵が文字であることを確かめて返す関数
+
+    Parameters
+    ----------
+    recipe: dict
+        読み込んだレシピ
+    key: str
+        鍵
+    label: str
+        列の呼び名 (誤りの文に使う)
+
+    Returns
+    ----------
+    name: str
+        列の名前
+
+    Raises
+    ----------
+    ValueError
+        列の名前が文字でないか空の場合
+    """
+    # 空でない文字
+    name = recipe.get(key)
+    if not isinstance(name, str) or not name:
+        raise ValueError(
+            f"需要の予測 (task: demand) には{label} ({key}) の名前 (文字) が"
+            f"要ります: {name}"
+        )
+
+    return name
+
+
+def check_demand_recipe(recipe: dict, task: str, method: str) -> None:
+    """
+    需要の予測だけの書き方 (date, stock, horizon, interval) と, 需要の予測
+    の売れた数, 商品の id, 日付の列, 期間, 分割のしかたを確かめる関数
+
+    Parameters
+    ----------
+    recipe: dict
+        読み込んだレシピ
+    task: str
+        タスク
+    method: str
+        分割のしかた
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        需要の予測でないのに date, stock, horizon, interval を書いた場合,
+        需要の予測で売れた数, 商品の id, 日付の列が無い場合, 列の名前が
+        文字でない場合, 役割の列が重なる場合, 期間が 1 以上の整数でない
+        場合, 分割のしかたが time でない場合
+    """
+    # 需要の予測だけの書き方
+    demand = task == "demand"
+    for key in DEMAND_KEYS:
+        if not demand and key in recipe:
+            raise ValueError(
+                f"レシピの {key} は需要の予測 (task: demand) だけで書けます"
+            )
+    if not demand:
+        return
+
+    # 売れた数, 商品の id, 日付の列と, 在庫の数の列 (書いた場合)
+    names = [
+        column_key(recipe, "target", "日ごとの売れた数の列"),
+        column_key(recipe, "product", "商品の id の列"),
+        column_key(recipe, "date", "日付の列"),
+    ]
+    if "stock" in recipe:
+        names.append(column_key(recipe, "stock", "在庫の数の列"))
+    if "id" in recipe:
+        names.append(recipe["id"])
+    if len(set(names)) != len(names):
+        raise ValueError(
+            "売れた数, 商品の id, 日付, 在庫の数, 行の id の列は違う列にして"
+            f"ください: {', '.join(map(str, names))}"
+        )
+
+    # 先の期間の日数と発注を決める日の間隔 (1 以上の整数)
+    for key in ("horizon", "interval"):
+        value = recipe.get(key, 1)
+        if isinstance(value, bool) or not isinstance(value, int) or (
+            value < 1
+        ):
+            raise ValueError(
+                f"レシピの {key} は 1 以上の整数 (日数) にしてください: "
+                f"{value}"
+            )
+
+    # 分割のしかた (発注を決める日の時刻の順)
+    if method not in DEMAND_METHODS:
+        raise ValueError(
+            "需要の予測の分割のしかたは time だけです (発注を決める日の時刻の"
+            f"順に分け, 先の期間が後の分割に入らないようにする): {method}"
+        )
+
+
 def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     """
     レシピを読み込み, 形を確かめる関数
@@ -1688,8 +1809,8 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     ValueError
         新しい版, 知らない手順, 手順と中身の手順の知らない引数と空 (None)
         の引数, 形の誤りの場合と, 目的の列の無いレシピで split.unlabeled
-        が keep の場合, 異常の検知, 効果を見積もる, 値段を変える判断の
-        決まりに合わない場合
+        が keep の場合, 異常の検知, 効果を見積もる, 値段を変える判断,
+        需要の予測の決まりに合わない場合
     """
     # ファイルなら読み込み
     if isinstance(recipe, (str, Path)):
@@ -1736,6 +1857,7 @@ def load_recipe(recipe: Union[str, Path, dict]) -> dict:
     check_anomaly_recipe(loaded, task, method, unlabeled)
     check_uplift_recipe(loaded, task, method)
     check_price_recipe(loaded, task, method)
+    check_demand_recipe(loaded, task, method)
 
     # keep は目的の列を書いたレシピだけ (読み込んだ時点で分かるように.
     # 書かないと前と後の様子と書き出しの全てで誤りになるため)

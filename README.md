@@ -18,12 +18,13 @@
 - **群分けの表**: 群分け (まとめる) の 1 行が 1 つの対象の表を, 分析の保存として版 2 のデータセットに書き出して読み (学習には表のファイルを渡す), 学習の前に列の特徴をそのまま k-means で分けた群 (か渡した群) の要約 (群ごとの行の数, 割合, 安定性, 列の平均と最も多い値) を, ML-Quest のまとめるの骨組みの群の要約と同じ形で返す
 - **介入の記録の表**: クーポンを無作為に配った記録のような, 処置の列と結果の列を持つ表を分析し (処置の群と対照の群の行の数, 結果の差, 特徴の釣り合い, 処置の後に決まる列などの気付き), 全ての分割に両方の群を置いて書き出す (`task: uplift`)
 - **値段を変えた記録の表**: 試しに値段を変えた売れ行きの記録 (商品の特徴, 値段, 売れた数, 原価) を分析し (値段の幅と数, 値段と売れた数の関わり, 商品ごとの試した値段, 値段と他の列の関わりなどの気付き), 値段を入力に入れて売れた数を予測する学習のために, 値段が分割ごとに偏らないように書き出す (`task: price`)
+- **需要の記録の表**: 商品ごとの日ごとの売れた数の記録 (商品の id, 日付, 売れた数, 商品の特徴, 在庫の数) を分析し (日付の範囲, 曜日ごとの売れた数, 商品ごとの記録の日数と抜けの日, 在庫が 0 の日などの気付き), 先の期間の需要を分位点で予測する学習のために, (商品, 発注を決める日) の行を, 先の期間が分割の境目をまたがないように書き出す (`task: demand`)
 
 ## どのアプリから使われるか
 
 | 相手 | 使うもの |
 | --- | --- |
-| ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs`, 群の要約 (`describe_groups`), 介入の記録の要約 (`describe_uplift`), 値段を変えた記録の要約 (`describe_price`) |
+| ML-Fathom (データの分析) | 読み込み, 分析, 前処理のレシピ, 書き出し, 表の 1 ページ (`frame_view`), 書き出したデータセットの一覧と `model_inputs`, 群の要約 (`describe_groups`), 介入の記録の要約 (`describe_uplift`), 値段を変えた記録の要約 (`describe_price`), 需要の記録の要約 (`describe_demand`) |
 | ML-Quest (問題の設定) | データの読み方 (`Data.source`), レシピの雛形と書き戻し, ファイルの組の書き出しの設定. 手元のデータの答えの候補 |
 | ML-CreateArchitecture (モデルの作成) | `model_inputs` でモデルの定義の入力と出力をデータセットに合わせる |
 | ML-Found | `task_from_dataset` が `dataset.yaml` を読む (`ml_eda` は使わない). 評価の軌跡 (`trajectories/`) は ML-EDA が読む |
@@ -152,6 +153,38 @@ summary["findings"]     # single_price_products, narrow_price_range など
 
 dataset = load_dataset("datasets/sales")
 x = dataset.price_inputs("test", dataset.price("test") * 1.1)  # 1 割上げた値段
+```
+
+需要の予測 (先の期間の需要を分位点で予測し, 損の比から決まる分位点で発注の数を決める) は `task: demand` で書く. 日ごとの売れた数の列 (`target`), 商品の id の列 (`product`), 日付の列 (`date`) を必ず書き, 在庫の数の列 (`stock`) は任意. 書き出す 1 行は (商品, 発注を決める日) で, 発注を決める日は最も早い日から `interval` 日ごと (既定は `horizon`). 目的の値は発注を決める日から `horizon` 日 (既定 7) の売れた数の合計 `demand`, 比べる相手は前の `horizon` 日の合計 `demand_previous` (`dataset.previous(split)`). 抜けの日を含む期間は合計を作らない. 在庫の数は発注を決める日の値が残る (`dataset.stock(split)`). 過去の売れた数は値を学ぶ手順より前の `lag` で日ごとの行から作る. 分割は `time` だけで, 先の期間が分割の境目をまたぐ行は落とす. `dataset.yaml` の `demand` に分割ごとの日の範囲, 合計の平均, 先の期間に在庫が 0 の日を含む行の数が入る.
+
+```yaml
+task: demand
+target: units
+product: product_id
+date: date
+stock: stock
+horizon: 7
+steps:
+  - {op: lag, columns: [units], lags: [1, 7], windows: [7, 28],
+     by: [product_id], time: date, freq: 1D}
+  - {op: datetime_parts, columns: [date], parts: [weekday, month]}
+  - {op: standardize, columns: auto}
+split: {method: time, valid: 0.2, test: 0.2}
+```
+
+```python
+from ml_eda import describe_demand, load_dataset
+
+summary = describe_demand("daily_sales.csv", "product_id", "date", "units",
+                          stock="stock", horizon=7)
+summary["weekdays"]  # 曜日ごとの売れた数の平均
+summary["products"]  # 商品ごとの記録の日数, 抜けの日, 在庫が 0 の日
+summary["findings"]  # date_gaps, short_history, stockout_days など
+
+dataset = load_dataset("datasets/daily_sales")
+x, y = dataset.arrays("test")         # y は先の期間の売れた数の合計
+baseline = dataset.previous("test")   # 前の期間と同じ数を発注する決め方
+stock = dataset.stock("test")         # 発注を決める日の在庫の数
 ```
 
 ### 画像, 文, 点群, 音声

@@ -12,6 +12,9 @@ import pandas as pd
 import yaml
 
 from ml_eda.data import Data
+from ml_eda.demand import (
+    DEMAND, DEMAND_KINDS, PREVIOUS, check_demand_values, demand_periods
+)
 from ml_eda.itemprep import (
     apply_steps, check_item_steps, fit_item_steps, item_notes,
     run_item_steps, to_array
@@ -65,12 +68,12 @@ STRATA_LIMIT = 20
 # グループでまとめる分割のしかた (分割の件数が割合から外れうる)
 GROUP_METHODS = ("group", "group_time", "stratified_group")
 
-# 異常の検知, 効果を見積もる, 値段を変える判断で, レシピに id が無い
-# 場合の行の id の列 (読み込んだ表の行の位置)
+# 異常の検知, 効果を見積もる, 値段を変える判断, 需要の予測で, レシピに
+# id が無い場合の行の id の列 (読み込んだ表の行の位置)
 ANOMALY_ID = "row_id"
 
 # 行の id の列を置くタスク
-ID_TASKS = ("anomaly", "uplift", "price")
+ID_TASKS = ("anomaly", "uplift", "price", "demand")
 
 # 異常の検知で書き出せる種類
 ANOMALY_KINDS = ("table", "timeseries")
@@ -101,6 +104,10 @@ ITEM_TARGET_POINTS = 1024
 
 # 目的の列の欠けた行を残す分割の名前 (split.unlabeled: keep の場合)
 UNLABELED = "unlabeled"
+
+# 需要の予測で, 先の期間が分割の境目をまたぐため落とす行の, 処理の間
+# だけの分割の名前
+BOUNDARY = "__boundary__"
 
 # 書き出しの source に添える, 元の場所の書き方
 SOURCE_NOTE = (
@@ -141,6 +148,9 @@ class Prepared:
     # 値段を変える判断の説明 (役割の列, 値段の手順, 分割ごとの値段の範囲と
     # 売れた数の平均. 値段を変える判断でなければ None)
     price: Optional[dict] = None
+    # 需要の予測の説明 (役割の列, 期間, 分割ごとの発注を決める日の範囲と
+    # 合計の平均. 需要の予測でなければ None)
+    demand: Optional[dict] = None
 
 
 def split_counts(count: int, valid: float, test: float) -> tuple[int, int]:
@@ -1698,6 +1708,296 @@ def price_frame(
         )
 
 
+def demand_roles(data: Data, recipe: dict) -> tuple[dict, pd.DataFrame]:
+    """
+    需要の予測の商品の id, 日付, 売れた数, 在庫の数の列を, 読み込んだ表の
+    全ての行で確かめ, 役割の名前と行ごとの期間の合計を返す関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    recipe: dict
+        読み込んだレシピ (target, product, date, stock, horizon, interval)
+
+    Returns
+    ----------
+    roles: dict
+        product, time (日付の列) と, 書いた場合の stock の列の名前
+    windows: pd.DataFrame
+        読み込んだ表の行の位置の順の demand, previous, decision,
+        stockout, day
+
+    Raises
+    ----------
+    ValueError
+        列が無い場合, 値が決まりに合わない場合, 表に先の期間と前の期間の
+        合計の列と同じ名前の列がある場合
+    """
+    # 先の期間と前の期間の合計の列の名前の空き
+    columns = [str(column) for column in data.frame.columns]
+    for name in (DEMAND, PREVIOUS):
+        if name in columns:
+            raise ValueError(
+                f"表に {name} の列があります. 書き出しの期間の合計の列と"
+                "重なるので, 列の名前を変えてください"
+            )
+
+    # 役割の列 (同じ名前の列が 2 つ以上なら誤り) と期間の合計
+    roles = {
+        "product": str(recipe["product"]), "time": str(recipe["date"])
+    }
+    if recipe.get("stock"):
+        roles["stock"] = str(recipe["stock"])
+    frame = data.frame.copy(deep=False)
+    frame.columns = columns
+    horizon, interval = demand_periods(recipe)
+    windows = check_demand_values(
+        frame, {**roles, "target": str(recipe["target"]),
+                "date": roles["time"]}, horizon, interval
+    )
+
+    return roles, windows
+
+
+def check_demand_steps(steps: list) -> None:
+    """
+    需要の予測の過去の値の列 (lag) が値を学ぶ最初の手順より前にあることを
+    確かめる関数
+
+    Parameters
+    ----------
+    steps: list
+        レシピの手順
+
+    Returns
+    ----------
+    None
+
+    Raises
+    ----------
+    ValueError
+        値を学ぶ手順より後に lag がある場合
+    """
+    # 分割の前の手順は日ごとの全ての行にかける (後の手順は発注を決める日
+    # の行だけ)
+    head = first_fit(steps)
+    late = [
+        number for number, spec in enumerate(steps, 1)
+        if spec["op"] == "lag" and number > head
+    ]
+    if late:
+        raise ValueError(
+            "需要の予測 (task: demand) の lag は, 値を学ぶ最初の手順より前に"
+            f"置いてください (手順 {', '.join(map(str, late))}). 過去の"
+            "売れた数は日ごとの全ての行でずらし, 発注を決める日の行に"
+            "絞るのはその後のため"
+        )
+
+
+def demand_splits(
+    days: pd.Series, split: dict, horizon: int
+) -> pd.Series:
+    """
+    需要の予測の分割 (発注を決める日の時刻の順) をし, 先の期間が後の
+    分割の最初の日に届く行に境目の印を付ける関数
+
+    Parameters
+    ----------
+    days: pd.Series
+        発注を決める日の行ごとの日
+    split: dict
+        valid, test (割合)
+    horizon: int
+        先の期間の日数
+
+    Returns
+    ----------
+    assigned: pd.Series
+        行ごとの分割の名前 (境目をまたぐ行は BOUNDARY)
+
+    Raises
+    ----------
+    ValueError
+        割合の誤りの場合
+    """
+    # 時刻の順の分割 (同じ日の行は後ろの分割にそろえる)
+    split_ratios(split)
+    frame = pd.DataFrame({TIME_COLUMN: days})
+    assigned = assign_splits(
+        frame, {**split, "method": "time"}, {"time": TIME_COLUMN}
+    ).astype(object)
+
+    # 先の期間 (その日から horizon 日) が後の分割の最初の日に届く行
+    reach = days + pd.Timedelta(days=horizon - 1)
+    for position, name in enumerate(SPLITS[:-1]):
+        later = days[assigned.isin(SPLITS[position + 1:])]
+        if later.empty:
+            continue
+        crossing = (assigned == name) & (reach >= later.min())
+        assigned[crossing] = BOUNDARY
+
+    return assigned
+
+
+def demand_frame(
+    data: Data, roles: dict, windows: pd.DataFrame, frame: pd.DataFrame,
+    rows: list[int]
+) -> None:
+    """
+    表に先の期間と前の期間の合計, 日付, 商品の id, 在庫の数の元の値を
+    置き, 日ごとの売れた数の列を落とす関数
+
+    Parameters
+    ----------
+    data: Data
+        読み込んだデータ
+    roles: dict
+        列の役割 (target, product, time と, 書いた場合の stock)
+    windows: pd.DataFrame
+        行ごとの期間の合計 (demand_roles)
+    frame: pd.DataFrame
+        置く表 (書き換える)
+    rows: list[int]
+        表の行の, 元のデータでの位置
+
+    Returns
+    ----------
+    None
+    """
+    # 合計は float64, 日付は日ごとの日時, 商品の id は元の値
+    picked = windows.iloc[list(rows)]
+    if roles["target"] in frame.columns:
+        del frame[roles["target"]]
+    frame[DEMAND] = picked["demand"].to_numpy(dtype="float64")
+    frame[PREVIOUS] = picked["previous"].to_numpy(dtype="float64")
+    frame[roles["time"]] = picked["day"].to_numpy()
+    frame[roles["product"]] = original_values(data, roles["product"], rows)
+    if roles.get("stock"):
+        frame[roles["stock"]] = original_values(
+            data, roles["stock"], rows
+        ).astype("float64")
+
+
+def demand_pending(windows: pd.DataFrame) -> np.ndarray:
+    """
+    発注を決める日の行のうち, 先の期間の売れた数が揃わない行 (記録の終わり
+    の行など) の印を返す関数
+
+    Parameters
+    ----------
+    windows: pd.DataFrame
+        行ごとの期間の合計 (demand_roles)
+
+    Returns
+    ----------
+    pending: np.ndarray
+        読み込んだ表の行の位置の順の印
+    """
+    # 前の期間は揃い, 先の期間の合計が無い行
+    pending = (windows["decision"] & windows["demand"].isna()).to_numpy()
+
+    return pending
+
+
+def demand_skipped(windows: pd.DataFrame, result: pd.DataFrame) -> dict:
+    """
+    発注を決める日の行のうち, 前の期間が揃わない行と, 先の期間が分割の
+    境目をまたぐ行の数を数える関数
+
+    Parameters
+    ----------
+    windows: pd.DataFrame
+        行ごとの期間の合計 (demand_roles)
+    result: pd.DataFrame
+        分割の列を持つ, 手順をかけた表
+
+    Returns
+    ----------
+    skipped: dict
+        previous (前の期間が揃わない行), boundary (境目をまたぐ行)
+    """
+    # 発注を決める日のうち前の期間の無い行と, 境目の印の行
+    lacking = windows["scheduled"] & ~windows["decision"]
+    skipped = {
+        "previous": int(lacking.sum()),
+        "boundary": int((result[SPLIT_COLUMN] == BOUNDARY).sum()),
+    }
+
+    return skipped
+
+
+def demand_summary(
+    recipe: dict, roles: dict, windows: pd.DataFrame, frames: dict,
+    positions: dict, skipped: dict
+) -> dict:
+    """
+    需要の予測の説明 (役割の列, 期間, 分割ごとの発注を決める日の範囲と
+    合計の平均) を作る関数
+
+    Parameters
+    ----------
+    recipe: dict
+        当てはめた値を含むレシピ
+    roles: dict
+        列の役割 (target, product, time, id と, 書いた場合の stock)
+    windows: pd.DataFrame
+        行ごとの期間の合計 (demand_roles)
+    frames: dict
+        分割ごとの表 (先の期間と前の期間の合計の列を持つ)
+    positions: dict
+        分割ごとの行の, 元のデータでの位置
+    skipped: dict
+        落とした行の数 (previous, boundary)
+
+    Returns
+    ----------
+    summary: dict
+        id, product, date, units, stock, target, previous, horizon,
+        interval, unlabeled, skipped, splits (分割ごとの rows, products,
+        date_min, date_max, demand_mean, previous_mean, stockout)
+    """
+    # 分割ごとの発注を決める日の範囲と合計の平均 (unlabeled は先の期間の
+    # 合計を除く)
+    horizon, interval = demand_periods(recipe)
+    stock = roles.get("stock")
+    splits = {}
+    for name, frame in frames.items():
+        days = pd.to_datetime(frame[roles["time"]])
+        picked = windows.iloc[positions[name]]
+        splits[name] = {
+            "rows": int(len(frame)),
+            "products": int(frame[roles["product"]].nunique()),
+            "date_min": days.min().strftime("%Y-%m-%d"),
+            "date_max": days.max().strftime("%Y-%m-%d"),
+            "demand_mean": None if name == UNLABELED else float(
+                frame[DEMAND].to_numpy(dtype=float).mean()
+            ),
+            "previous_mean": float(
+                frame[PREVIOUS].to_numpy(dtype=float).mean()
+            ),
+            "stockout": int(
+                (picked["stockout"].to_numpy() > 0).sum()
+            ) if stock else None,
+        }
+    summary = {
+        "id": str(roles["id"]),
+        "product": roles["product"],
+        "date": roles["time"],
+        "units": roles["target"],
+        "stock": stock,
+        "target": DEMAND,
+        "previous": PREVIOUS,
+        "horizon": horizon,
+        "interval": interval,
+        "unlabeled": str(recipe["split"].get("unlabeled", "drop")),
+        "skipped": skipped,
+        "splits": splits,
+    }
+
+    return summary
+
+
 def first_fit(steps: list) -> int:
     """
     値を学ぶ最初の手順の位置を返す関数
@@ -2032,6 +2332,7 @@ def apply_recipe(
     anomaly = recipe["task"] == "anomaly"
     uplift = recipe["task"] == "uplift"
     priced = recipe["task"] == "price"
+    demanded = recipe["task"] == "demand"
     if target:
         if target not in frame.columns:
             raise ValueError(f"目的の列 {target} がありません")
@@ -2050,6 +2351,12 @@ def apply_recipe(
             # 値段, 原価, 商品の id の確かめ (売れた数の欠けた行を落とす前)
             roles.update(price_roles(data, recipe))
             frame = price_target(frame, target)
+        elif demanded:
+            # 商品の id, 日付, 売れた数, 在庫の数の確かめと期間の合計 (売れた
+            # 数の欠けた日も, 過去の値の列のために残す)
+            check_demand_steps(recipe["steps"])
+            found, windows = demand_roles(data, recipe)
+            roles.update(found)
         else:
             frame = frame[frame[target].notna()]
     if recipe["task"] in ID_TASKS:
@@ -2069,6 +2376,16 @@ def apply_recipe(
     head = first_fit(steps)
     for number, spec in enumerate(steps[:head], 1):
         frame = run_step(frame, spec, roles, number, None)
+    if demanded:
+        # 発注を決める日の, 先の期間の合計が分かる行 (unlabeled は後で)
+        picked = windows.iloc[frame[ROW_COLUMN].tolist()]
+        labeled = (picked["decision"] & picked["demand"].notna()).to_numpy()
+        frame = frame[labeled]
+        if frame.empty:
+            raise ValueError(
+                "発注を決める日の行がありません (前の期間と先の期間の売れた"
+                "数が揃う日が無い. 記録の短い商品と抜けの日を確かめる)"
+            )
     if frame.empty:
         raise ValueError("手順の後に行が残りませんでした")
     split_roles = {**roles, "time": TIME_COLUMN} if time else roles
@@ -2094,6 +2411,15 @@ def apply_recipe(
             data, roles["price"], frame[ROW_COLUMN].tolist()
         ).astype(float)
         frame[SPLIT_COLUMN] = price_splits(frame, split, prices)
+    elif demanded:
+        # 発注を決める日の時刻の順 (先の期間が境目をまたぐ行に印)
+        days = pd.Series(
+            windows["day"].to_numpy()[frame[ROW_COLUMN].to_numpy()],
+            index=frame.index
+        )
+        frame[SPLIT_COLUMN] = demand_splits(
+            days, split, demand_periods(recipe)[0]
+        )
     else:
         frame[SPLIT_COLUMN] = assign_splits(frame, split, split_roles)
     frame = frame.drop(columns=[TIME_COLUMN, GROUP_COLUMN], errors="ignore")
@@ -2133,7 +2459,7 @@ def sorted_classes(values: pd.Series) -> list[str]:
 
 def unlabeled_split(
     data: Data, recipe: dict, target: str, features: list[str],
-    columns: list[str]
+    columns: list[str], missing: Optional[np.ndarray] = None
 ) -> tuple[pd.DataFrame, list[int]]:
     """
     目的の列の欠けた行に, 学習用で当てはめた前処理をかける関数
@@ -2153,6 +2479,9 @@ def unlabeled_split(
         学習に使う列 (画像などは空)
     columns: list[str]
         学習用の分割の表の列 (同じ並びにそろえる)
+    missing: Optional[np.ndarray] = None
+        目的の値の分からない行の印 (None は目的の列の欠けた行. 需要の
+        予測は先の期間の売れた数が揃わない発注を決める日の行)
 
     Returns
     ----------
@@ -2169,7 +2498,8 @@ def unlabeled_split(
     # 目的の列の欠けた行の位置
     source = data.frame.copy(deep=False)
     source.columns = [str(name) for name in source.columns]
-    missing = source[target].isna().to_numpy()
+    if missing is None:
+        missing = source[target].isna().to_numpy()
     if not missing.any():
         frame = pd.DataFrame(columns=columns)
         rows: list[int] = []
@@ -2254,6 +2584,7 @@ def prepare(
     anomaly = recipe["task"] == "anomaly"
     uplift = recipe["task"] == "uplift"
     priced = recipe["task"] == "price"
+    demanded = recipe["task"] == "demand"
     if anomaly and data.kind not in ANOMALY_KINDS:
         raise ValueError(
             f"異常の検知 (task: anomaly) は表と時系列だけです: {data.kind}"
@@ -2266,8 +2597,22 @@ def prepare(
         raise ValueError(
             f"値段を変える判断 (task: price) は表と時系列だけです: {data.kind}"
         )
+    if demanded and data.kind not in DEMAND_KINDS:
+        raise ValueError(
+            f"需要の予測 (task: demand) は表と時系列だけです: {data.kind}"
+        )
     result, roles = apply_recipe(data, recipe)
     target = roles.get("target")
+    skipped = None
+    if demanded:
+        # 境目をまたぐ行を落とし, 目的の値を先の期間の合計の列にする
+        _, windows = demand_roles(data, recipe)
+        skipped = demand_skipped(windows, result)
+        result = result[result[SPLIT_COLUMN] != BOUNDARY].copy()
+        demand_frame(
+            data, roles, windows, result, result[ROW_COLUMN].tolist()
+        )
+        target = DEMAND
     if target and target not in result.columns:
         raise ValueError(f"目的の列 {target} が手順で消えました")
     if not (result[SPLIT_COLUMN] == "train").any():
@@ -2327,10 +2672,13 @@ def prepare(
     # (値段を変える判断の値段の列は学習に使う列の最後)
     reserved = {
         target, roles.get("id"), roles.get("time"), roles.get("treatment"),
-        roles.get("cost"), roles.get("product"), SPLIT_COLUMN
+        roles.get("cost"), roles.get("product"), roles.get("stock"),
+        SPLIT_COLUMN
     }
     if priced:
         reserved.add(RAW_PRICE)
+    if demanded:
+        reserved.add(PREVIOUS)
     features = [] if data.item_loader is not None else [
         name for name in result.columns
         if name not in reserved and name not in HIDDEN_COLUMNS
@@ -2342,7 +2690,8 @@ def prepare(
     # 目的の列の欠けた行の, 学習用で当てはめた値での unlabeled の分割
     if keep:
         extra, extra_rows = unlabeled_split(
-            data, recipe, target, features, list(frames["train"].columns)
+            data, recipe, target, features, list(frames["train"].columns),
+            demand_pending(windows) if demanded else None
         )
         if extra_rows and recipe["task"] in ID_TASKS:
             extra[roles["id"]] = id_values(data, roles["id"], extra_rows)
@@ -2352,6 +2701,8 @@ def prepare(
             ).to_numpy()
         if extra_rows and priced:
             price_frame(data, roles, extra, extra_rows)
+        if extra_rows and demanded:
+            demand_frame(data, roles, windows, extra, extra_rows)
         if extra_rows:
             frames[UNLABELED] = extra
             positions[UNLABELED] = extra_rows
@@ -2418,10 +2769,24 @@ def prepare(
 
     # 値段を変える判断の説明 (分割ごとの値段の範囲と売れた数の平均)
     prices = price_summary(recipe, roles, frames) if priced else None
+
+    # 需要の予測の説明 (分割ごとの発注を決める日の範囲と合計の平均) と,
+    # 境目をまたいで落とした行の注意
+    demands = None
+    if demanded:
+        demands = demand_summary(
+            recipe, roles, windows, frames, positions, skipped
+        )
+        if skipped["boundary"]:
+            notes.append(
+                f"先の期間が分割の境目をまたぐ {skipped['boundary']} 行を"
+                "落としました (先の期間の売れた数が後の分割の日に入らない"
+                "ように. interval を horizon 以上にすると落ちません)"
+            )
     prepared = Prepared(
         frames=frames, recipe=recipe, features=features, target=target,
         classes=classes, notes=notes, findings=findings, anomaly=summary,
-        uplift=effects, price=prices
+        uplift=effects, price=prices, demand=demands
     )
 
     return prepared
@@ -2960,6 +3325,8 @@ def export_dataset(
             info["uplift"] = to_plain(prepared.uplift)
         if prepared.price is not None:
             info["price"] = to_plain(prepared.price)
+        if prepared.demand is not None:
+            info["demand"] = to_plain(prepared.demand)
         finish_writing(target, final, info, parent)
     except Exception:
         drop_writing(target, parent)
@@ -3625,6 +3992,91 @@ class Dataset:
 
         return x
 
+    def demand_info(self) -> dict:
+        """
+        需要の予測の説明を返す関数
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ----------
+        info: dict
+            説明の demand
+
+        Raises
+        ----------
+        ValueError
+            需要の予測 (task: demand) のデータセットでない場合
+        """
+        # 説明の demand
+        info = self.info.get("demand")
+        if self.info.get("task") != "demand" or not info:
+            raise ValueError(
+                "期間の合計と在庫の数は需要の予測 (task: demand) のデータ"
+                "セットだけにあります"
+            )
+
+        return info
+
+    def previous(self, split: str) -> np.ndarray:
+        """
+        分割の前の期間の売れた数の合計 (比べる相手) を返す関数
+
+        Parameters
+        ----------
+        split: str
+            train, valid, test, unlabeled のどれか
+
+        Returns
+        ----------
+        values: np.ndarray
+            行ごとの float64 の合計 (arrays の行と同じ順)
+
+        Raises
+        ----------
+        ValueError
+            需要の予測 (task: demand) のデータセットでない場合
+        """
+        # 前の期間の合計の列
+        info = self.demand_info()
+        values = self.frames[split][info["previous"]].to_numpy(
+            dtype=np.float64, copy=True
+        )
+
+        return values
+
+    def stock(self, split: str) -> Optional[np.ndarray]:
+        """
+        分割の発注を決める日の在庫の数を返す関数
+
+        Parameters
+        ----------
+        split: str
+            train, valid, test, unlabeled のどれか
+
+        Returns
+        ----------
+        values: Optional[np.ndarray]
+            行ごとの float64 の在庫の数 (arrays の行と同じ順). 在庫の数の
+            列が無ければ None
+
+        Raises
+        ----------
+        ValueError
+            需要の予測 (task: demand) のデータセットでない場合
+        """
+        # 在庫の数の列 (無ければ None)
+        info = self.demand_info()
+        if not info.get("stock"):
+            return None
+        values = self.frames[split][info["stock"]].to_numpy(
+            dtype=np.float64, copy=True
+        )
+
+        return values
+
 
 def load_dataset(
     path: Union[str, Path], follow_links: bool = False
@@ -3808,7 +4260,8 @@ def model_outputs(
         分類はクラスの数, 回帰と時系列の予測は 1, 異常の検知は学習に使う
         列の数 (自己符号化器が入力を作り直す), 効果を見積もるは 1 (処置
         したときとしないときの予測のそれぞれ), 値段を変える判断は 1 (売れた
-        数の予測). 分からなければ None
+        数の予測), 需要の予測は 1 (分位点の水準 1 つあたり). 分からなければ
+        None
     """
     # 版 1 の説明は何期先までを持たないので, 時系列の予測も 1 行に 1 つ
     outputs = None
@@ -3818,7 +4271,7 @@ def model_outputs(
         outputs = 1
     elif task == "anomaly":
         outputs = width
-    elif task in ("uplift", "price"):
+    elif task in ("uplift", "price", "demand"):
         outputs = 1
 
     return outputs
