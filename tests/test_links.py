@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from ml_eda import (
     capture_shift, describe_loaders, detect, export_capture_clouds,
@@ -545,6 +546,18 @@ def test_export_image_masks_links(tmp_path: Path) -> None:
     assert "領域のディレクトリの外を指すリンクが 1 件" in notes
     assert "follow_links=True にしてください" in notes
     assert len(load_items(tmp_path / "ds").items) == 2
+
+    # 注意の印: 外を指すリンクの種類と数と呼び名 (文は notes と同じ)
+    outside = [item for item in info["notices"]
+               if item["code"] == "outside_links"]
+    assert [(item["label"], item["count"]) for item in outside] == [
+        ("画像", 1), ("領域", 1)
+    ]
+    assert [item["message"] for item in info["notices"]] == info["notes"]
+    written = yaml.safe_load(
+        (tmp_path / "ds" / "dataset.yaml").read_text(encoding="utf-8")
+    )
+    assert written["notes"] == info["notes"] and "notices" not in written
 
     # 文字の "false" と "0" は読まない側
     for flag in ("false", "0"):

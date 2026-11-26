@@ -8,9 +8,9 @@ from ml_eda.demand import describe_demand
 from ml_eda.groups import describe_groups, export_group_rows
 from ml_eda.itemprep import ITEM_STEPS, describe_item_steps
 from ml_eda.items import (
-    PLACEMENTS, ItemDataset, ItemSplit, capture_shift, export_capture_clouds,
-    export_image_masks, load_items, normalize_capture, read_capture,
-    transform_entry
+    NOTICE_CODES, PLACEMENTS, ItemDataset, ItemSplit, capture_shift,
+    export_capture_clouds, export_image_masks, load_items, normalize_capture,
+    read_capture, transform_entry
 )
 from ml_eda.loaders import (
     LOADERS, Loader, describe_loaders, detect, load_data, register_loader
@@ -38,7 +38,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DATASET_FORMAT_VERSION", "ITEMS_FORMAT_VERSIONS", "ITEM_STEPS",
-    "KINDS", "LOADERS", "PLACEMENTS", "STEPS", "TRAJECTORY_FORMAT_VERSION",
+    "KINDS", "LOADERS", "NOTICE_CODES", "PLACEMENTS", "STEPS",
+    "TRAJECTORY_FORMAT_VERSION",
     "Data", "Dataset", "ItemDataset", "ItemSplit", "Loader",
     "Prepared", "Reactions", "Step", "Trajectory", "capture_layout",
     "capture_shift",

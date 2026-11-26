@@ -60,6 +60,15 @@ CLOUD_UNITS = {"meter": 1.0, "centimeter": 0.01, "millimeter": 0.001}
 # 注意に挙げる例の数
 EXAMPLES = 3
 
+# ファイルの組の書き出しの注意の種類 (書き出しの結果の notices の code)
+NOTICE_CODES = (
+    "outside_links", "unpaired", "unlabeled", "group_overlap",
+    "empty_split", "many_values", "unnamed_values", "jpeg_masks",
+    "unreadable_captures", "capped_captures", "dropped_frames",
+    "cloud_missing", "cloud_unreadable", "mixed_conventions",
+    "default_depth",
+)
+
 # 撮影の 1 枚が指すファイルの欄
 FRAME_FILES = (
     "file_path", "raw_depth_file_path", "depth_file_path",
@@ -87,6 +96,54 @@ INTRINSICS = ("fl_x", "fl_y", "cx", "cy", "w", "h")
 
 # 16 bit の領域の値の上限
 MASK_MAX = 65535
+
+
+def notice(code: str, count: int, message: str, **detail: Any) -> dict:
+    """
+    書き出しの注意の印 (種類, 数, 文) を作る関数
+
+    Parameters
+    ----------
+    code: str
+        注意の種類 (NOTICE_CODES のどれか)
+    count: int
+        数 (除いた件, またがるグループの件など)
+    message: str
+        dataset.yaml の notes に書く文
+    **detail: Any
+        種類ごとの添え (label: ファイルの呼び名, split: 分割の名前)
+
+    Returns
+    ----------
+    found: dict
+        code, count, message と添え
+    """
+    # 知らない種類は作らない (使う側が種類で見分けるため)
+    if code not in NOTICE_CODES:
+        raise ValueError(f"知らない注意の種類です: {code}")
+    found = {"code": code, "count": int(count), "message": message, **detail}
+
+    return found
+
+
+def messages(notices: list[dict]) -> list[str]:
+    """
+    注意の印の並びから, dataset.yaml の notes に書く文の並びを作る関数
+
+    Parameters
+    ----------
+    notices: list[dict]
+        注意の印
+
+    Returns
+    ----------
+    notes: list[str]
+        印の順の文
+    """
+    # 文だけ
+    notes = [str(item["message"]) for item in notices]
+
+    return notes
 
 
 def check_origin(origin: Optional[dict]) -> dict:
@@ -223,7 +280,7 @@ def unlabeled_mode(split: Optional[dict]) -> bool:
 
 def split_items(
     ids: list[str], groups: Optional[dict], split: Optional[dict]
-) -> tuple[list[str], dict, list[str]]:
+) -> tuple[list[str], dict, list[dict]]:
     """
     件を学習用, 検証用, テスト用に割り当てる関数
 
@@ -238,7 +295,7 @@ def split_items(
 
     Returns
     ----------
-    result: tuple[list[str], dict, list[str]]
+    result: tuple[list[str], dict, list[dict]]
         件ごとの分割の名前, 説明に書く分割のしかた, 注意
 
     Raises
@@ -282,19 +339,22 @@ def split_items(
     if groups and method != "group":
         overlap = count_overlap(frame["group"], labels.reset_index(drop=True))
         if overlap["values"]:
-            notes.append(
+            notes.append(notice(
+                "group_overlap", overlap["rows"],
                 f"同じグループが {overlap['values']} 個 (計 "
                 f"{overlap['rows']} 件) 複数の分割にまたがります (例: "
                 f"{', '.join(overlap['examples'])}). 新しい物や現場に"
-                "当てはめる力を甘く測るので, 分割を group にしてください"
-            )
+                "当てはめる力を甘く測るので, 分割を group にしてください",
+                groups=int(overlap["values"])
+            ))
     for name in ("valid", "test"):
         if float(conf[name]) > 0 and not (labels == name).any():
-            notes.append(
+            notes.append(notice(
+                "empty_split", 0,
                 f"{name} の割合を {conf[name]} にしましたが, 0 件になりました"
                 " (グループが大きく割合に収まらないか, 件が少ないため). "
-                "グループを細かくするか割合を上げてください"
-            )
+                "グループを細かくするか割合を上げてください", split=name
+            ))
     result = ([str(label) for label in labels], conf, notes)
 
     return result
@@ -329,7 +389,7 @@ def links_followed(follow_links: Any) -> bool:
 
 def drop_outside(
     files: list[Path], base: Path, label: str, follow_links: bool
-) -> tuple[list[Path], list[str]]:
+) -> tuple[list[Path], list[dict]]:
     """
     読み込んだディレクトリの外を指すリンクのファイルを除く関数
 
@@ -346,22 +406,23 @@ def drop_outside(
 
     Returns
     ----------
-    result: tuple[list[Path], list[str]]
-        残したファイルと, 除いたものの注意
+    result: tuple[list[Path], list[dict]]
+        残したファイルと, 除いたものの注意の印 (outside_links)
     """
     # たどった後の場所で比べる. 除いた件は数と例と, 読む案内を注意に
-    notes: list[str] = []
+    notes: list[dict] = []
     if links_followed(follow_links):
         result = (files, notes)
         return result
     outside = [file for file in files if points_outside(base, file)]
     if outside:
         names = [file.relative_to(base).as_posix() for file in outside]
-        notes.append(
+        notes.append(notice(
+            "outside_links", len(outside),
             f"{label}のディレクトリの外を指すリンクが {len(outside)} 件あり, "
             f"除きました (例: {', '.join(names[:EXAMPLES])}. 読むには "
-            f"{ARGUMENT_HINT} にしてください)"
-        )
+            f"{ARGUMENT_HINT} にしてください)", label=label
+        ))
     result = ([file for file in files if file not in outside], notes)
 
     return result
@@ -412,7 +473,7 @@ def index_by_stem(
 def pair_files(
     left: dict[str, Path], right: dict[str, Path], labels: tuple[str, str],
     keep: bool = False
-) -> tuple[list[tuple[str, Path, Optional[Path]]], list[str]]:
+) -> tuple[list[tuple[str, Path, Optional[Path]]], list[dict]]:
     """
     2 つの stem の索引を組にする関数
 
@@ -429,9 +490,10 @@ def pair_files(
 
     Returns
     ----------
-    result: tuple[list[tuple[str, Path, Optional[Path]]], list[str]]
+    result: tuple[list[tuple[str, Path, Optional[Path]]], list[dict]]
         stem の順の組 (stem, 入力, 正解. keep なら正解の無い入力が
-        stem の順で後ろに続く) と, 片方にしか無いものの注意
+        stem の順で後ろに続く) と, 片方にしか無いものの注意の印
+        (unpaired か, 正解の無い入力を残した unlabeled)
     """
     # 両方にある stem の組. 片方だけのものは数と例を注意に
     pairs: list = [(stem, left[stem], right[stem])
@@ -446,13 +508,14 @@ def pair_files(
             continue
         if keep and own is left:
             pairs += [(stem, left[stem], None) for stem in alone]
-            done = f"{UNLABELED} の分割に書きました"
+            done, code = f"{UNLABELED} の分割に書きました", "unlabeled"
         else:
-            done = "除きました"
-        notes.append(
+            done, code = "除きました", "unpaired"
+        notes.append(notice(
+            code, len(alone),
             f"{partner}の無い{label}が {len(alone)} 件あり, {done} "
-            f"(例: {', '.join(alone[:EXAMPLES])})"
-        )
+            f"(例: {', '.join(alone[:EXAMPLES])})", label=label
+        ))
     result = (pairs, notes)
 
     return result
@@ -1007,23 +1070,28 @@ def export_image_masks(
     listed: Optional[list[int]] = [int(value) for value in values]
     if len(values) > MAX_VALUES:
         listed = None
-        notes.append(
+        notes.append(notice(
+            "many_values", len(values),
             f"領域の値が {len(values)} 種類あり, 説明の values を省きました"
-        )
+        ))
     if named is not None:
         unnamed = sorted(
             set(int(v) for v in values) - {entry["value"] for entry in named}
         )
         if unnamed:
-            notes.append(
+            notes.append(notice(
+                "unnamed_values", len(unnamed),
                 f"classes に名前の無い領域の値があります: "
                 f"{', '.join(str(v) for v in unnamed[:EXAMPLES])}"
-            )
-    if any(mask.suffix.lower() in (".jpg", ".jpeg") for _, _, mask in pairs):
-        notes.append(
+            ))
+    jpeg = [mask for _, _, mask in pairs
+            if mask.suffix.lower() in (".jpg", ".jpeg")]
+    if jpeg:
+        notes.append(notice(
+            "jpeg_masks", len(jpeg),
             "JPEG の領域があります. 圧縮で境目の値が崩れるので, PNG を"
             "勧めます"
-        )
+        ))
 
     # 1 件ずつの写しか, 手順をかけた書き込み (失敗したら一時ディレクトリを削除)
     final, target = start_writing(path, overwrite, parent)
@@ -1129,7 +1197,7 @@ def export_image_masks(
                 "masks": source_name(mask_dir), "mask_suffix": mask_suffix,
                 "paths": "name_only", "note": SOURCE_NOTE,
             },
-            "notes": notes,
+            "notes": messages(notes),
         }
         for key, listed_steps in steps.items():
             info["entries"][key]["steps"] = listed_steps
@@ -1137,6 +1205,7 @@ def export_image_masks(
     except Exception:
         drop_writing(target, parent)
         raise
+    info = {**info, "notices": notes}
 
     return info
 
@@ -1426,10 +1495,11 @@ def normalize_capture(
     shift = frames_shift(frames, source.name)
     notes = []
     if dropped:
-        notes.append(
+        notes.append(notice(
+            "dropped_frames", dropped,
             f"{source.name} の撮影の, 画像の無い (か外を指すリンクの) "
             f"{dropped} 枚を除きました"
-        )
+        ))
 
     # 各ファイルを同じ相対の場所に写す. 撮影の外を指す場所 (リンクを
     # たどった後に外のものも) と無いファイルの欄は除く
@@ -1467,7 +1537,7 @@ def normalize_capture(
         "shift": shift, "frames": len(frames),
         "height": copied.get("h"), "width": copied.get("w"),
         "convention": transforms.get("coordinate_convention") or {},
-        "notes": notes,
+        "notes": messages(notes), "notices": notes,
     }
 
     return summary
@@ -1690,19 +1760,20 @@ def copy_capture_cloud(
 
     Returns
     ----------
-    notes: list[str]
-        除いた点群の注意
+    notes: list[dict]
+        除いた点群の注意の印 (cloud_missing か cloud_unreadable)
     """
     # 書かれていなければ何もしない
-    notes: list[str] = []
+    notes: list[dict] = []
     if not isinstance(described, dict) or not described.get("file_path"):
         return notes
     cloud = inside(source, described.get("file_path"), base)
     if cloud is None:
-        notes.append(
+        notes.append(notice(
+            "cloud_missing", 1,
             f"{source.name} の撮影の点群 ({described.get('file_path')}) が"
             "無いか撮影の外を指す (リンクの先が外のものも) ので, 除きました"
-        )
+        ))
         return notes
 
     # 読めた点群だけ PLY で写す
@@ -1712,16 +1783,17 @@ def copy_capture_cloud(
         write_ply(target / "point_cloud.ply", points)
         copied["point_cloud"] = {**described, "file_path": "point_cloud.ply"}
     except (OSError, ValueError, KeyError, IndexError) as error:
-        notes.append(
+        notes.append(notice(
+            "cloud_unreadable", 1,
             f"{source.name} の撮影の点群を読めず, 除きました ({error})"
-        )
+        ))
 
     return notes
 
 
 def find_clouds(
     path: Path, follow_links: bool = False
-) -> tuple[dict[str, Path], list[str]]:
+) -> tuple[dict[str, Path], list[dict]]:
     """
     点群のファイルを stem で引けるようにする関数
 
@@ -1736,7 +1808,7 @@ def find_clouds(
 
     Returns
     ----------
-    result: tuple[dict[str, Path], list[str]]
+    result: tuple[dict[str, Path], list[dict]]
         stem から点群のファイルと, 外を指すリンクを除いた注意
 
     Raises
@@ -1761,7 +1833,7 @@ def find_clouds(
 def capture_pairs(
     captures: Union[str, Path], clouds: Union[str, Path], keep: bool = False,
     follow_links: bool = False
-) -> tuple[Any, list[tuple[str, int, Optional[Path]]], list[str]]:
+) -> tuple[Any, list[tuple[str, int, Optional[Path]]], list[dict]]:
     """
     撮影と点群を, 撮影のディレクトリの名前と点群の stem で組にする関数
 
@@ -1779,7 +1851,7 @@ def capture_pairs(
 
     Returns
     ----------
-    result: tuple[Any, list[tuple[str, int, Optional[Path]]], list[str]]
+    result: tuple[Any, list[tuple[str, int, Optional[Path]]], list[dict]]
         読み込んだ撮影のデータ, 組 (名前, 撮影の行の位置, 点群), 注意
 
     Raises
@@ -1810,9 +1882,13 @@ def capture_pairs(
     pairs, notes = pair_files(named, cloud_files, ("撮影", "点群"), keep)
     notes = cloud_notes + notes
     if data.source.get("capped"):
-        notes.insert(0, "撮影が上限を超えたので, 先頭だけを読みました")
+        notes.insert(0, notice(
+            "capped_captures", len(named) + len(unreadable),
+            "撮影が上限を超えたので, 先頭だけを読みました"
+        ))
     if unreadable:
-        notes.insert(0, (
+        notes.insert(0, notice(
+            "unreadable_captures", len(unreadable),
             f"読めない撮影が {len(unreadable)} 件あり, 除きました (例: "
             f"{', '.join(unreadable[:EXAMPLES])})"
         ))
@@ -1920,7 +1996,7 @@ def export_capture_clouds(
                 steps.get("capture"), follow_links, base
             )
             shift = summary["shift"]
-            notes += summary["notes"]
+            notes += summary["notices"]
             lone = cloud_path is None
             row = {"id": stem, "split": UNLABELED if lone else labels[index]}
             if groups:
@@ -1950,21 +2026,24 @@ def export_capture_clouds(
         filled = [with_depth_convention(other) for other in conventions]
         convention, full = conventions[0], filled[0]
         if any(other != full for other in filled):
-            notes.append(
+            notes.append(notice(
+                "mixed_conventions",
+                sum(other != full for other in filled),
                 "撮影ごとに座標の決まり (coordinate_convention) が違います. "
                 "説明には先頭の撮影のものを書きました"
-            )
+            ))
         lacking = [
             stem for (stem, _, _), other in zip(pairs + alone, conventions)
             if any(other.get(key) is None for key in DEFAULT_DEPTH)
         ]
         if lacking:
-            notes.append(
+            notes.append(notice(
+                "default_depth", len(lacking),
                 f"{len(lacking)} 件の撮影 ({', '.join(lacking[:EXAMPLES])}) "
                 "の座標の決まりに深度の測り方 (depth) か画素の中心 "
                 "(pixel_center) が無いので, depth: z (カメラの前の軸に沿った"
                 "距離), pixel_center: 0.5 としました"
-            )
+            ))
         info = {
             "format_version": (
                 ITEMS_STEPS_FORMAT_VERSION if steps else ITEMS_FORMAT_VERSION
@@ -2022,7 +2101,7 @@ def export_capture_clouds(
                 "clouds": source_name(clouds), "cloud_units": cloud_units,
                 "paths": "name_only", "note": SOURCE_NOTE,
             },
-            "notes": notes,
+            "notes": messages(notes),
         }
         for key, listed_steps in steps.items():
             info["entries"][key]["steps"] = listed_steps
@@ -2030,6 +2109,7 @@ def export_capture_clouds(
     except Exception:
         drop_writing(target, parent)
         raise
+    info = {**info, "notices": notes}
 
     return info
 
