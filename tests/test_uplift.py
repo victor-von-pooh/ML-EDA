@@ -244,6 +244,32 @@ def test_binary_outcome(tmp_path: Path) -> None:
     assert list(applied[dataset.features].columns) == dataset.features
 
 
+def test_fixed_split() -> None:
+    """
+    同じ種の分割が, 決めた行の並びと同じになることを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 40 行の記録の検証用とテスト用の行の id
+    prepared = prepare(table_data(make_coupons(40)), uplift_recipe())
+    valid = sorted(prepared.frames["valid"]["customer_id"])
+    test = sorted(prepared.frames["test"]["customer_id"])
+    assert valid == [
+        "c00000", "c00002", "c00016", "c00019", "c00025", "c00026",
+        "c00032", "c00034",
+    ]
+    assert test == [
+        "c00001", "c00004", "c00005", "c00006", "c00022", "c00029",
+        "c00031", "c00035",
+    ]
+
+
 def test_amount_outcome(tmp_path: Path) -> None:
     """
     買った額の結果の表で, 結果の種類が amount になり, 正解が float32 で

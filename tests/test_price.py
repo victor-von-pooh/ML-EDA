@@ -345,6 +345,112 @@ def test_price_layers() -> None:
     assert price_layers(np.zeros(0)).tolist() == []
 
 
+@pytest.mark.parametrize("count, sizes", [
+    (1, {"train": 1}),
+    (2, {"train": 1, "valid": 1}),
+    (3, {"train": 1, "valid": 1, "test": 1}),
+    (5, {"train": 3, "valid": 1, "test": 1}),
+])
+def test_few_rows(tmp_path: Path, count: int, sizes: dict) -> None:
+    """
+    行が少ない記録でも書き出して読め, 分割の行の数が割合のとおりで,
+    説明が分割と合うことを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+    count: int
+        行の数
+    sizes: dict
+        分割ごとの行の数
+
+    Returns
+    ----------
+    None
+    """
+    # 少ない行の書き出しと読み直し
+    frame = make_sales(count, 2)
+    info = export_dataset(table_data(frame), price_recipe(), tmp_path / "ds")
+    dataset = load_dataset(tmp_path / "ds")
+    assert {k: len(v) for k, v in dataset.frames.items()} == sizes
+    for name, entry in info["price"]["splits"].items():
+        assert entry["rows"] == sizes[name]
+        x = dataset.price_inputs(name, dataset.price(name))
+        assert x.shape == (sizes[name], len(dataset.features))
+
+
+def test_same_price(tmp_path: Path) -> None:
+    """
+    全ての行が同じ値段の記録を書き出して読め, 要約で値段の種類と幅の
+    気付きが出て, 相関と弾力性が None になることを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 同じ値段の書き出し (標準化の幅は 1 にそろう)
+    frame = make_sales()
+    frame["price"] = 100.0
+    info = export_dataset(table_data(frame), price_recipe(), tmp_path / "ds")
+    dataset = load_dataset(tmp_path / "ds")
+    for entry in info["price"]["splits"].values():
+        assert entry["price_min"] == entry["price_max"] == 100.0
+        assert entry["prices"] == 1
+    x, _ = dataset.arrays("test")
+    same = dataset.price_inputs("test", 100.0)
+    assert np.allclose(same, x, atol=1e-6)
+
+    # 商品の id を渡さない要約と, 渡した要約
+    summary = describe_price(table_data(frame), "price", "units")
+    codes = {item["code"] for item in summary["findings"]}
+    assert {"few_prices", "narrow_price_range"} <= codes
+    assert summary["price_stats"]["width"] == 0.0
+    assert summary["relation"]["correlation"] is None
+    assert summary["relation"]["elasticity"] is None
+    assert len(summary["relation"]["bins"]) == 1
+    summary = describe_price(
+        table_data(frame), "price", "units", product="product_id"
+    )
+    codes = {item["code"] for item in summary["findings"]}
+    assert {"few_prices", "single_price_products"} <= codes
+    assert summary["products"]["single_price"] == summary["products"]["count"]
+    assert summary["products"]["width"] is None
+
+
+def test_narrow_message_by_product() -> None:
+    """
+    商品の id を渡すと, 値段の幅の気付きの文が商品ごとの幅の中央値を
+    指すことを確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 商品ごとに 2 % だけ変えた記録
+    frame = make_sales()
+    base = frame.groupby("product_id")["price"].transform("median")
+    flags = np.arange(len(frame)) % 2 == 0
+    frame["price"] = np.where(flags, base, base * 1.02)
+    summary = describe_price(
+        table_data(frame), "price", "units", product="product_id"
+    )
+    codes = {item["code"]: item for item in summary["findings"]}
+    assert "商品ごと" in codes["narrow_price_range"]["message"]
+    plain = describe_price(table_data(frame), "price", "units")
+    for item in plain["findings"]:
+        assert "商品ごと" not in item["message"]
+
+
 def test_keep_unlabeled(tmp_path: Path) -> None:
     """
     売れた数の欠けた行を unlabeled の分割に残すと, 元の値段, 原価, 商品の
@@ -385,7 +491,9 @@ def test_keep_unlabeled(tmp_path: Path) -> None:
     ({"price": np.nan}, "値段の列 price に欠け"),
     ({"price": np.inf}, "値段の列 price に 0 以下か無限大"),
     ({"units": -1}, "売れた数の列 units に負"),
+    ({"units": np.inf}, "売れた数の列 units に負か無限大"),
     ({"unit_cost": -1.0}, "原価の列 unit_cost に負"),
+    ({"unit_cost": np.inf}, "原価の列 unit_cost に負か無限大"),
     ({"unit_cost": np.nan}, "原価の列 unit_cost に欠け"),
     ({"product_id": None}, "商品の id の列 product_id に欠け"),
 ])
@@ -404,8 +512,9 @@ def test_value_errors(change: dict, message: str) -> None:
     ----------
     None
     """
-    # 1 行目の値の誤り
+    # 1 行目の値の誤り (売れた数は無限大を入れられる float)
     frame = make_sales()
+    frame["units"] = frame["units"].astype(float)
     for name, value in change.items():
         frame.loc[0, name] = value
     with pytest.raises(ValueError, match=message):

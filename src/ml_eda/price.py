@@ -547,7 +547,7 @@ def range_findings(
     distinct: int
         使う行の値段の種類の数
     width: Optional[float]
-        値段の幅
+        値段の幅 (商品の id の列を渡した場合は商品ごとの幅の中央値)
     products: Optional[dict]
         商品ごとの要約 (商品の id の列を渡さなければ None)
     names: dict
@@ -580,12 +580,16 @@ def range_findings(
             [names["product"], price]
         ))
 
-    # 値段の幅
+    # 値段の幅 (商品の id の列を渡すと商品ごとの幅の中央値)
     if width is not None and width < NARROW_WIDTH:
+        kind = (
+            "商品ごとの値段を変えた幅の中央値" if products is not None
+            else "値段を変えた幅"
+        )
         findings.append(finding(
             "warning", "narrow_price_range",
-            f"値段を変えた幅が {width:.1%} です ({NARROW_WIDTH:.0%} 未満. "
-            "幅は (最大 − 最小) / 中央値). 候補の値段の多くが記録の外になり"
+            f"{kind}が {width:.1%} です ({NARROW_WIDTH:.0%} 未満. 幅は "
+            "(最大 − 最小) / 中央値). 候補の値段の多くが記録の外になり"
             "予測が当てにならないので, 値段を変える幅を広げてください",
             [price]
         ))
@@ -838,13 +842,13 @@ def describe_price(
     findings += confounded_findings(confounding, given["price"])
     costs = None
     if cost_array is not None:
-        costs, below = cost_summary(
+        costs, cost_findings = cost_summary(
             prices, np.where(
                 np.isfinite(cost_array) & (cost_array >= 0), cost_array,
                 np.nan
             )[used], given["cost"]
         )
-        findings += below
+        findings += cost_findings
     findings.sort(key=lambda item: item["severity"] != "warning")
     if products is not None:
         products = {k: v for k, v in products.items() if k != "singles"}
