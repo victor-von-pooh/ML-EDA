@@ -622,3 +622,41 @@ def test_text_unlabeled(tmp_path: Path) -> None:
     assert y is None and x.tolist() == [[1, 1, 0, 0]] * 2
     _, y = dataset.arrays("train")
     assert sorted(y.tolist()) == [0, 0, 1, 1]
+
+
+def test_sparse_classes(tmp_path: Path) -> None:
+    """
+    読めた写真が 2 枚未満の種類を, 種類の名前と枚数付きの気付き
+    sparse_classes にし, 全ての種類が 2 枚以上なら出さないことを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        pytest が用意する一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 12 枚のクラスごとのフォルダ (どの種類も 2 枚以上) は気付き無し
+    write_images(tmp_path / "pets")
+    result = profile(load_data(tmp_path / "pets"))
+    assert result["items"]["sparse_classes"] == []
+    assert "sparse_classes" not in {
+        item["code"] for item in result["findings"]
+    }
+
+    # 1 枚だけの種類と, 読めない写真だけの種類 (読めた写真は 0 枚)
+    copied = (tmp_path / "pets" / "cat" / "1.png").read_bytes()
+    (tmp_path / "pets" / "fox").mkdir()
+    (tmp_path / "pets" / "fox" / "1.png").write_bytes(copied)
+    (tmp_path / "pets" / "owl").mkdir()
+    (tmp_path / "pets" / "owl" / "1.png").write_bytes(b"not an image")
+    result = profile(load_data(tmp_path / "pets"))
+    assert result["items"]["sparse_classes"] == [
+        {"label": "fox", "count": 1}
+    ]
+    found = {item["code"]: item for item in result["findings"]}
+    assert found["sparse_classes"]["columns"] == ["label"]
+    assert "fox (1 枚)" in found["sparse_classes"]["message"]

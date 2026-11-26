@@ -25,6 +25,9 @@ POINT_EXTENSIONS = (".ply", ".pcd", ".xyz", ".pts", ".npy")
 # 1 つのディレクトリから読むファイルの上限
 MAX_FILES = 100_000
 
+# 種類ごとの写真の数の下限 (索引と問いの両方に 1 枚ずつ配れる数)
+SPARSE_CLASS = 2
+
 # 文として読む 1 ファイルの上限 (バイト)
 MAX_TEXT_BYTES = 1 << 20
 
@@ -967,6 +970,32 @@ def describe_items(data: Data, seed: int = 0, sample: int = 200) -> dict:
                         "[digest]) で落としてください"
                     ),
                     "columns": ["digest"],
+                })
+        if "label" in frame.columns:
+            # 読めた写真が 2 枚未満の種類 (索引と問いの両方に配れず, 同じ
+            # 種類を正解にする評価で正解が無くなる)
+            counts = valid["label"].astype(str).value_counts()
+            sparse = sorted(
+                (str(name), int(count)) for name, count in counts.items()
+                if count < SPARSE_CLASS
+            )
+            result["sparse_classes"] = [
+                {"label": name, "count": count} for name, count in sparse
+            ]
+            if sparse:
+                listed = ", ".join(
+                    f"{name} ({count} 枚)" for name, count in sparse[:5]
+                )
+                findings.append({
+                    "severity": "warning", "code": "sparse_classes",
+                    "message": (
+                        f"読めた写真が {SPARSE_CLASS} 枚未満の種類が "
+                        f"{len(sparse)} 個あります (例: {listed}). 似た写真を"
+                        "探すでは索引と問いの両方に配れず, 同じ種類を正解に"
+                        "する評価で正解が無くなるので, 写真を足すか種類を"
+                        "まとめてください"
+                    ),
+                    "columns": ["label"],
                 })
         if len(result["modes"]) > 1:
             findings.append({
