@@ -805,7 +805,7 @@ split:
 
 `task` は書かない. `task` は列の正解 (分類, 回帰, 予測, 正解なし) だけのもので, 版 2 の種類は `role` と `target.kind` で表す.
 
-**書き出しの注意の印**: `export_image_masks` と `export_capture_clouds` (と `normalize_capture` の要約) は, 返す辞書に `notes` の文と同じ順の注意の印の並び `notices` を足す. 印は `code` (種類), `count` (数), `message` (`notes` の文と同じ) と, 種類ごとの添え (`label` はファイルの呼び名 (画像, 領域, 撮影, 点群), `split` は分割の名前, `groups` はまたがったグループの数) の辞書. `dataset.yaml` には `notices` を書かず, `notes` は文のまま (約束の版を変えない. 読む側は今までどおり文を読める). 使う側 (ML-Fathom) は文の言い回しでなく `code` で見分ける (言い回しを直しても見分け方が変わらないように). 種類は `NOTICE_CODES` で, 公開の名前:
+**書き出しの注意の印**: `export_image_masks` と `export_capture_clouds` (と `normalize_capture` の要約) は, 返す辞書に `notes` の文と同じ順の注意の印の並び `notices` を足す. 印は `code` (種類), `count` (数), `message` (`notes` の文と同じ) と, 種類ごとの添え (`label` はファイルの呼び名 (画像, 領域, 撮影, 点群), `split` は分割の名前, `groups` はまたがったグループの数) の辞書. `dataset.yaml` には `notices` を書かず, `notes` は文のまま (約束の版を変えない. 読む側は今までどおり文を読める). 使う側 (ML-Fathom) は文の言い回しでなく `code` で見分ける (言い回しを直しても見分け方が変わらないように). 同じ種類の印は何度も出ることがある (`outside_links` と `unpaired` は呼び名ごと, `dropped_frames`, `cloud_missing`, `cloud_unreadable` は撮影ごと) ので, 使う側は種類で 1 つに引かず並びを見る. 種類は `NOTICE_CODES` で, 公開の名前:
 
 | `code` | 何の注意か | `count` |
 | --- | --- | --- |
@@ -818,7 +818,7 @@ split:
 | `unnamed_values` | `classes` に名前の無い領域の値がある | 名前の無い値の数 |
 | `jpeg_masks` | JPEG の領域がある | JPEG の領域の数 |
 | `unreadable_captures` | 読めない撮影を除いた | 除いた数 |
-| `capped_captures` | 撮影が上限を超え, 先頭だけを読んだ | 読んだ撮影の数 |
+| `capped_captures` | 撮影が上限を超え, 先頭だけを読んだ | 読んだ撮影の数 (読めなかった撮影も含む) |
 | `dropped_frames` | 撮影の, 画像の無いか外を指すリンクの枚を除いた | 除いた枚の数 |
 | `cloud_missing` | 撮影の点群が無いか外を指すので除いた | 1 |
 | `cloud_unreadable` | 撮影の点群を読めず除いた | 1 |
