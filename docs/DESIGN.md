@@ -20,7 +20,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 約束 | 持つか読むか | 版 | 使う側と中身 |
 | --- | --- | --- | --- |
 | 前処理のレシピ (YAML) | 持つ | `format_version` 1 | ML-Fathom, ML-Quest (雛形と書き戻し). 下の「前処理のレシピ」 |
-| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む. 異常の検知の骨組み (ML-Quest の docs/DESIGN.md の 11 節) は異常の検知の表 (`task: anomaly`) を読む. 下の「異常の検知の表」. 効果を見積もるの骨組み (ML-Quest の docs/DESIGN.md の「効果を見積もるの骨組み」) は介入の記録の表 (`task: uplift`) を読む. 下の「介入の記録の表」. 値段を変える判断の骨組み (ML-Quest の docs/DESIGN.md の「値段を変える判断の骨組み」) は値段を変えた記録の表 (`task: price`) を読む. 下の「値段を変えた記録の表」. 時間をまたぐ量の判断の学習 (課題の決まりは ML_tester の TASK_TYPES.md の「6. 決めたこと (相談の答え)」の 40) は需要の記録の表 (`task: demand`) を読む. 下の「需要の記録の表」. 群分けの表 (版 2 の `role: group`) は分析の保存で, 学習には使わない. 下の「群分けの表」), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
+| データセット (`dataset.yaml` と分割ごとのデータ) | 持つ | `format_version` 1 (列の正解), 2 (ファイルの組とまとまり) と 3 (版 2 に中身の手順を足したもの). 版 1 は `load_dataset`, 版 2 と 3 は `load_items` で読み, もう一方の版と知らない版は誤りで止まる | 学習のスクリプト (ML-Quest の骨組みを含む. 異常の検知の骨組み (ML-Quest の docs/DESIGN.md の 11 節) は異常の検知の表 (`task: anomaly`) を読む. 下の「異常の検知の表」. 効果を見積もるの骨組み (ML-Quest の docs/DESIGN.md の「効果を見積もるの骨組み」) は介入の記録の表 (`task: uplift`) を読む. 下の「介入の記録の表」. 値段を変える判断の骨組み (ML-Quest の docs/DESIGN.md の「値段を変える判断の骨組み」) は値段を変えた記録の表 (`task: price`) を読む. 下の「値段を変えた記録の表」. 時間をまたぐ量の判断の骨組み (ML-Quest の docs/DESIGN.md の「時間をまたぐ量の判断の骨組み」) は需要の記録の表 (`task: demand`) を読む. 下の「需要の記録の表」. 群分けの表 (版 2 の `role: group`) は分析の保存で, 学習には使わない. 下の「群分けの表」), ML-Found (`task_from_dataset` が版 2 の説明を読む), ML-Inference, ML-Fathom と ML-Provide (書き出しと見本. ML-Fathom はモデルの入力 `model_inputs` も見せる), ML-CreateArchitecture (`model_inputs` でモデルの定義の入力と出力をデータセットに合わせる). 下の「書き出し (学習との約束)」「書き出しの版 2」 |
 | データの読み方 (`Data.source` の `loader`, `options`, `size`, `modified`) | 持つ | 版を持たない (読み込みの名前と設定, 読んだときの大きさと更新時刻) | ML-Quest (問題の設定の `data` に残し, `size` と `modified` で入れた後にファイルが変わったかを確かめる), ML-Fathom. 下の「読み込み」と「データの形」の `source` |
 | 1 件の場所 (`Data.source` の `root` と `frame` の `path`) | 持つ | 版を持たない (下の形) | ML-Fathom (1 件の中身を読む前に, 読み込んだディレクトリの中かを確かめる), ML-Inference (撮影の 1 件の場所). 下の「データの形」の `source` |
 | 撮影の正規化の平行移動 (`shift`) | 持つ | データセットの版 2 に含む | 利用者の学習と推論のスクリプト (`normalize_capture` の `summary["shift"]`). 正規化した座標 = 元の座標 + shift. 元の座標に戻すには shift を引く. 下の「撮影と点群の対」. ML-Found の見本の値の決まり (`convention.shift`) は, 見本の一覧の版 2 でこれと同じ向き (ML-Found の `load_samples` は逆の向きの版 1 を版 2 の意味に写して返す) |
@@ -724,7 +724,7 @@ split:
 
 ### 需要の記録の表 (`task: demand`)
 
-商品ごとの日ごとの売れた数の記録の表 (商品の id の列, 日付の列, 売れた数の列, 商品の特徴の列, 在庫の数の列 (任意)) を, 先の決めた期間の需要 (売れる数の合計) を分位点で予測する学習 (時間をまたぐ量の判断. 課題の決まりは ML_tester の TASK_TYPES.md の「6. 決めたこと (相談の答え)」の 40. 品切れの損と売れ残りの損の比から決まる分位点で発注の数を決める) のために書き出す. 読み込む表は 1 行が (商品, 日) だが, 書き出す 1 件は (商品, 発注を決める日) の 1 行で, 正解は先の期間の売れた数の合計 1 つなので, 値段を変えた記録の表と同じく版 1 の `task: demand` で書く.
+商品ごとの日ごとの売れた数の記録の表 (商品の id の列, 日付の列, 売れた数の列, 商品の特徴の列, 在庫の数の列 (任意)) を, 先の決めた期間の需要 (売れる数の合計) を分位点で予測する学習 (時間をまたぐ量の判断. ML-Quest の docs/DESIGN.md の「時間をまたぐ量の判断の骨組み」. 品切れの損と売れ残りの損の比から決まる分位点で発注の数を決める) のために書き出す. 読み込む表は 1 行が (商品, 日) だが, 書き出す 1 件は (商品, 発注を決める日) の 1 行で, 正解は先の期間の売れた数の合計 1 つなので, 値段を変えた記録の表と同じく版 1 の `task: demand` で書く.
 
 ```yaml
 format_version: 1
@@ -962,7 +962,7 @@ split:
 
 ### 合成の見本 (`ml_eda.synthetic`)
 
-道具の確かめ用 (テストで使う. ML_tester の例でも使う). ml_eda の他は numpy と標準ライブラリだけで書く (PNG も自前で書くので Pillow も描く道具も要らない).
+道具の確かめ用 (テストで使う. 道具を試す例でも使える公開の関数). ml_eda の他は numpy と標準ライブラリだけで書く (PNG も自前で書くので Pillow も描く道具も要らない).
 
 - `write_image_masks(root, count, size, seed, sizes)`: 雑音の上に円か四角を 1 つ置いた画像と, その領域 (0 が背景, 1 が円, 2 が四角) を `images/` と `masks/` に書く. `sizes` に (高さ, 幅) の並びを渡すと, 件ごとに順に繰り返した大きさで書く (大きさの混ざった見本. 書き出しの `resize` の確かめに使う)
 - `write_shape_captures(root, shapes, views, size, points, seed, count)`: 球と箱の正確な点群 (面の上の一様な点) を `clouds/<名前>.ply` に書き, 物の周りの決まった姿勢から光線を当てて (解析的な交わり) 画像, 深度 (ミリの 16 bit の PNG), 信頼度を求め, 多視点の撮影の形で `captures/<名前>/` に書く. `shapes` を省くと既定の球 2 つと箱 2 つ. `count` を渡すと, `seed` から球か箱を `count` 個ばらつかせて作る (名前は `shape_000` から. 種類, 中心 (原点から水平に 0.5 から 1.5 m, 高さ 0.05 から 0.3 m), 大きさ (球の半径 0.08 から 0.18 m, 箱の各辺 0.1 から 0.3 m), 色が乱数. 1 つの撮影には 1 つの形だけが写るので, 中心の位置は正規化の平行移動にだけ効く. `shapes` と同時には渡せない. `count` は 1 以上の整数). `transforms.json` の `coordinate_convention` に `depth: z` と `pixel_center: 0.5` を書く
