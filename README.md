@@ -331,14 +331,16 @@ summary["per_user"]                   # 利用者ごとの反応の数の min, m
 summary["popularity"]                 # 上位 10% の品物の反応の割合, ジニ係数, 人気の品物
 summary["time"]                       # 時刻の型と範囲
 
-# 見せただけの印の列 (任意. 真は見せたが選ばれなかった品物の行)
+# 見せただけの印の列 (任意. 真は見せたが選ばれなかった品物の行, 偽と空は選んだ行)
+# 提示の列 (任意) を渡すと, 利用者と提示の組で 1 回の提示を決める
 reactions = load_reactions("impressions.csv", user="member",
-                           item="item_id", time="ts", shown="skipped")
-reactions.shown                       # 見せただけの記録の user, item, time の列 (負の例)
+                           item="item_id", time="ts", shown="skipped",
+                           presentation="impression_id")
+reactions.shown                       # 見せただけの記録の user, item, time, presentation の列 (負の例)
 describe_reactions(reactions)["shown"]      # 見せただけの行の数, 提示の数など
 ```
 
-ファイルは `load_data` と同じ読み方で読む (`loader` と読み込みの設定も渡せる. `load_data` で読んだ `Data` も渡せる). 時刻は数か日時. 利用者, 品物か時刻の欠けた行と, 反応の強さが 0 以下か数でない行は除く (ML-Quest の並べるの骨組みと同じ決まり). 見せただけの印の列は, 1 行が見せた品物 1 件の表で, 同じ利用者と時刻の行を 1 回の提示とみなす. 印を渡さなければ全ての行を選んだ反応として読む. 反応の表はファイル 1 つのまま骨組みに渡し, 分割は骨組みが時刻で行う. 決まりは [docs/DESIGN.md](docs/DESIGN.md) の「並べるの反応の表」と「見せただけの記録」.
+ファイルは `load_data` と同じ読み方で読む (`loader` と読み込みの設定も渡せる. `load_data` で読んだ `Data` も渡せる). 時刻は数か日時. 利用者, 品物か時刻の欠けた行と, 反応の強さが 0 以下か数でない行は除く (ML-Quest の並べるの骨組みと同じ決まり). 見せただけの印の列は, 1 行が見せた品物 1 件の表で, 提示の列があれば同じ利用者と提示の行を, 無ければ同じ利用者と時刻の行を 1 回の提示とみなす. 印を渡さなければ全ての行を選んだ反応として読む. ML-Quest の並べるの骨組みはまだ印の列を読まず, 印のある表を渡すと見せただけの行も正の反応として学ぶ. 反応の表はファイル 1 つのまま骨組みに渡し, 分割は骨組みが時刻で行う. 決まりは [docs/DESIGN.md](docs/DESIGN.md) の「並べるの反応の表」と「見せただけの記録」.
 
 ### 群分けの表
 

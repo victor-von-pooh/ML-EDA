@@ -12,10 +12,11 @@ from ml_eda.loaders import load_data
 from ml_eda.profile import to_json
 from ml_eda.trajectory import number_summary
 
-# 列の役割 (要る 3 つと任意の反応の強さと見せただけの印)
+# 列の役割 (要る 3 つと, 任意の反応の強さ, 見せただけの印と提示)
 REQUIRED_ROLES = ("user", "item", "time")
 STRENGTH_ROLE = "reaction"
 SHOWN_ROLE = "shown"
+PRESENTATION_ROLE = "presentation"
 
 # 見せただけの印として読む文字 (前後の空白と大文字小文字を問わない)
 SHOWN_TEXT = {"true": True, "1": True, "false": False, "0": False}
@@ -32,27 +33,32 @@ MAX_POPULAR_ITEMS = 10
 
 @dataclass
 class Reactions:
-    # 反応の表 (user, item, time と, 強さがあれば reaction. 時刻の順)
+    # 反応の表 (user, item, time と, 強さがあれば reaction, 提示の列が
+    # あれば presentation. 時刻の順)
     frame: pd.DataFrame
-    # 役割から元の列の名前 (user, item, time, reaction, shown. 強さが
-    # 無ければ reaction, 印が無ければ shown は None)
+    # 役割から元の列の名前 (user, item, time, reaction, shown,
+    # presentation. 渡さなかった役割は None)
     columns: dict
     # 時刻の型 (number か datetime)
     time_kind: str
     # 読んだ行の数 (除く前)
     rows: int
-    # 利用者, 品物か時刻の欠けで除いた行の数 (日時として読めない時刻も)
+    # 利用者, 品物, 時刻か提示の欠けで除いた行の数 (日時として読めない
+    # 時刻も)
     dropped_missing: int
     # 反応の強さが 0 以下か数でないので除いた行の数
     dropped_not_positive: int
     # 欠けでない値のうち, 日時として読めなかった時刻の数
     unreadable_time: int = 0
-    # 見せただけの記録の表 (user, item, time. 時刻の順. 印が無ければ None)
+    # 見せただけの記録の表 (user, item, time と, 提示の列があれば
+    # presentation. 時刻の順. 印が無ければ None)
     shown: Optional[pd.DataFrame] = None
     # 見せただけの印を読めないので除いた行の数
     dropped_shown: int = 0
-    # 選んだ反応と重なるので除いた見せただけの行の数
+    # 選んだ行と重なるので除いた見せただけの行の数
     dropped_conflict: int = 0
+    # 同じ見せただけの行の 2 行目からとして除いた行の数
+    dropped_duplicate: int = 0
     # 読み込んだ場所と読み方 (load_data の Data.source)
     source: dict = field(default_factory=dict)
     # 読むときに気付いたこと (日本語の文)
@@ -61,7 +67,8 @@ class Reactions:
 
 def role_columns(
     user: Hashable, item: Hashable, time: Hashable,
-    reaction: Optional[Hashable], shown: Optional[Hashable] = None
+    reaction: Optional[Hashable], shown: Optional[Hashable] = None,
+    presentation: Optional[Hashable] = None
 ) -> dict:
     """
     役割と列の名前の対応を作り, 同じ列が 2 つの役割に無いかを確かめる関数
@@ -78,20 +85,24 @@ def role_columns(
         反応の強さの列 (None は無し)
     shown: Optional[Hashable] = None
         見せただけの印の列 (None は無し)
+    presentation: Optional[Hashable] = None
+        提示の列 (None は無し. 印の列が要る)
 
     Returns
     ----------
     columns: dict
-        役割から列の名前 (reaction と shown は None もある)
+        役割から列の名前 (reaction, shown, presentation は None もある)
 
     Raises
     ----------
     ValueError
-        列の名前が None の場合と, 同じ列を 2 つの役割に渡した場合
+        列の名前が None の場合, 同じ列を 2 つの役割に渡した場合と, 印の
+        列無しで提示の列を渡した場合
     """
     # 要る 3 つの列は名前が要る
     columns = {"user": user, "item": item, "time": time,
-               STRENGTH_ROLE: reaction, SHOWN_ROLE: shown}
+               STRENGTH_ROLE: reaction, SHOWN_ROLE: shown,
+               PRESENTATION_ROLE: presentation}
     absent = [role for role in REQUIRED_ROLES if columns[role] is None]
     if absent:
         raise ValueError(
@@ -102,8 +113,14 @@ def role_columns(
     named = [name for name in columns.values() if name is not None]
     if len(set(named)) < len(named):
         raise ValueError(
-            "反応の表の利用者, 品物, 時刻, 反応の強さ, 見せただけの印には, "
-            "別々の列を渡してください"
+            "反応の表の利用者, 品物, 時刻, 反応の強さ, 見せただけの印, 提示"
+            "には, 別々の列を渡してください"
+        )
+
+    # 提示は見せただけの記録を結び付けるためのもの
+    if presentation is not None and shown is None:
+        raise ValueError(
+            "提示の列は, 見せただけの印の列と一緒に渡してください"
         )
 
     return columns
@@ -187,14 +204,16 @@ def read_time(series: pd.Series, name: Hashable) -> tuple[pd.Series, str]:
     return parsed, "datetime"
 
 
+
+
 def shown_value(value: Any) -> Optional[bool]:
     """
-    見せただけの印の値 1 つを真偽にする関数
+    見せただけの印の欠けでない値 1 つを真偽にする関数
 
     Parameters
     ----------
     value: Any
-        印の列の値
+        印の列の欠けでない値
 
     Returns
     ----------
@@ -206,7 +225,7 @@ def shown_value(value: Any) -> Optional[bool]:
     if isinstance(value, (bool, np.bool_)):
         mark = bool(value)
     elif isinstance(value, (int, np.integer, float, np.floating)):
-        mark = {1: True, 0: False}.get(value) if value == value else None
+        mark = {1: True, 0: False}.get(value)
     elif isinstance(value, str):
         mark = SHOWN_TEXT.get(value.strip().lower())
 
@@ -220,23 +239,33 @@ def read_shown(series: pd.Series, name: Hashable) -> pd.Series:
     Parameters
     ----------
     series: pd.Series
-        印の列
+        欠けた行を除いた後の印の列
     name: Hashable
         元の列の名前 (誤りの文に使う)
 
     Returns
     ----------
     marks: pd.Series
-        真, 偽か, 読めない値は None の列 (object)
+        真, 偽か, 読めない値は None の列 (object). 欠けた印は偽
 
     Raises
     ----------
     ValueError
-        欠けでない値があり, どれも印として読めない場合
+        全ての印が欠けている場合と, 欠けでない印がどれも読めない場合
     """
-    # 値ごとに読み, 読めない値は None
-    marks = series.map(shown_value).astype(object)
-    if marks.notna().sum() == 0 and series.notna().any():
+    # 欠けた印は偽 (見せた行だけに印を付けた表), 他は値ごとに読む
+    missing = series.isna().to_numpy()
+    if len(series) and missing.all():
+        raise ValueError(
+            f"見せただけの印の列 {name} の値が全て欠けています"
+        )
+    marks = pd.Series(
+        [False if absent else shown_value(value)
+         for value, absent in zip(series, missing)],
+        index=series.index, dtype=object
+    )
+    readable = marks.notna().to_numpy()
+    if (~missing).any() and not (readable & ~missing).any():
         raise ValueError(
             f"見せただけの印の列 {name} を true, false, 1, 0 として読めません"
         )
@@ -244,88 +273,85 @@ def read_shown(series: pd.Series, name: Hashable) -> pd.Series:
     return marks
 
 
-def split_shown(
-    table: pd.DataFrame, name: Hashable, notes: list
-) -> tuple[pd.DataFrame, pd.DataFrame, int]:
+def shown_keys(table: pd.DataFrame) -> list:
     """
-    見せただけの印で, 反応の行と見せただけの行に分ける関数
+    見せただけの行と選んだ行を照らす列の並びを返す関数
 
     Parameters
     ----------
     table: pd.DataFrame
-        欠けた行を除いた表 (shown の列を持つ)
-    name: Hashable
-        印の元の列の名前 (気付きの文に使う)
-    notes: list
-        気付きの並び (印を読めない行があれば足す)
+        反応の表か見せただけの記録の表
 
     Returns
     ----------
-    chosen: pd.DataFrame
-        印が偽の行 (shown の列は除く)
-    shown: pd.DataFrame
-        印が真の行の user, item, time
-    dropped: int
-        印を読めないので除いた行の数
+    keys: list
+        提示の列があれば user, item, presentation, 無ければ user, item,
+        time
     """
-    # 印を読めない行の除外と, 印の真偽での分け方
-    marks = table[SHOWN_ROLE]
-    readable = marks.notna()
-    dropped = int((~readable).sum())
-    if dropped:
-        notes.append(
-            f"見せただけの印 ({name}) を読めない {dropped} 行を除きました"
-        )
-    marked = np.array([mark is True for mark in marks], dtype=bool)
-    chosen = table[readable.to_numpy() & ~marked].drop(columns=SHOWN_ROLE)
-    shown = table[marked][list(REQUIRED_ROLES)]
+    # 提示の列があれば提示で, 無ければ時刻で 1 回の提示を決める
+    last = PRESENTATION_ROLE if PRESENTATION_ROLE in table else "time"
+    keys = ["user", "item", last]
 
-    return chosen, shown, dropped
+    return keys
 
 
-def drop_conflicts(
+def tidy_shown(
     shown: pd.DataFrame, chosen: pd.DataFrame, notes: list
-) -> tuple[pd.DataFrame, int]:
+) -> tuple[pd.DataFrame, int, int]:
     """
-    選んだ反応と利用者, 品物, 時刻の全てが同じ見せただけの行を除く関数
+    選んだ行と重なる見せただけの行と, 同じ見せただけの行の 2 行目からを
+    除く関数
 
     Parameters
     ----------
     shown: pd.DataFrame
         見せただけの行
     chosen: pd.DataFrame
-        残した反応の表
+        印が偽の行 (反応の強さで除く前)
     notes: list
         気付きの並び (除いた行があれば足す)
 
     Returns
     ----------
     kept: pd.DataFrame
-        残した見せただけの行 (時刻の順)
-    dropped: int
-        除いた行の数
+        残した見せただけの記録の表 (時刻の順)
+    conflict: int
+        選んだ行と重なるので除いた行の数
+    duplicate: int
+        同じ見せただけの行の 2 行目からとして除いた行の数
     """
-    # 反応の利用者, 品物, 時刻の組に入る行の除外
-    keys = list(REQUIRED_ROLES)
+    # 選んだ行と同じ提示の同じ品物の行の除外 (強さで反応から外れた行も
+    # 選んだ記録なので, 選ばなかった負の例にしない)
+    keys = shown_keys(shown)
     taken = pd.MultiIndex.from_frame(chosen[keys].drop_duplicates())
     inside = pd.MultiIndex.from_frame(shown[keys]).isin(taken)
-    dropped = int(inside.sum())
-    if dropped:
+    conflict = int(inside.sum())
+    if conflict:
         notes.append(
-            f"選んだ反応と利用者, 品物, 時刻が同じ見せただけの {dropped} 行を"
+            f"選んだ行と同じ提示の同じ品物の見せただけの {conflict} 行を"
             "除きました"
         )
-    kept = shown[~inside].sort_values("time", kind="stable")
+    kept = shown[~inside]
+
+    # 同じ提示の同じ品物の見せただけの行は 1 行に
+    repeated = kept.duplicated(keys).to_numpy()
+    duplicate = int(repeated.sum())
+    if duplicate:
+        notes.append(
+            f"同じ提示の同じ品物の見せただけの行の 2 行目から {duplicate} 行"
+            "を除きました"
+        )
+    kept = kept[~repeated].sort_values("time", kind="stable")
     kept = kept.reset_index(drop=True)
 
-    return kept, dropped
+    return kept, conflict, duplicate
 
 
 def load_reactions(
     source: Union[str, Path, Data], user: Hashable, item: Hashable,
     time: Hashable, reaction: Optional[Hashable] = None,
-    shown: Optional[Hashable] = None, loader: Optional[str] = None,
-    **options: Any
+    loader: Optional[str] = None, *, shown: Optional[Hashable] = None,
+    presentation: Optional[Hashable] = None, **options: Any
 ) -> Reactions:
     """
     1 行が 1 つの反応の表を読み, 並べるの反応の表の約束を確かめる関数
@@ -342,11 +368,14 @@ def load_reactions(
         時刻の列 (数か日時)
     reaction: Optional[Hashable] = None
         反応の強さの列, None の場合は全ての行を反応とみなす
-    shown: Optional[Hashable] = None
-        見せただけの印の列 (真は見せただけ, 偽は選んだ反応), None の
-        場合は全ての行を選んだ反応とみなす
     loader: Optional[str] = None
         読み込みの名前, None の場合は推定 (load_data と同じ)
+    shown: Optional[Hashable] = None
+        見せただけの印の列 (真は見せただけ, 偽と欠けは選んだ反応), None
+        の場合は全ての行を選んだ反応とみなす
+    presentation: Optional[Hashable] = None
+        提示の列 (印の列が要る), None の場合は利用者と時刻の組で 1 回の
+        提示を決める
     **options: Any
         読み込みの設定 (load_data と同じ)
 
@@ -360,10 +389,11 @@ def load_reactions(
     ----------
     ValueError
         列の名前の誤り, 表に列が無い場合, 時刻が数でも日時でもない場合と,
-        見せただけの印をどれも読めない場合
+        見せただけの印が全て欠けているかどれも読めない場合と, 印がある
+        表で選んだ反応が残らない場合
     """
     # 列の名前と表
-    columns = role_columns(user, item, time, reaction, shown)
+    columns = role_columns(user, item, time, reaction, shown, presentation)
     frame, place = read_frame(source, loader, options)
     roles = [role for role, name in columns.items() if name is not None]
     missing = [
@@ -373,7 +403,7 @@ def load_reactions(
     if missing:
         raise ValueError(
             f"反応の表に {', '.join(missing)} の列がありません. 利用者, "
-            "品物, 時刻, 反応の強さ, 見せただけの印の列の名前を直して"
+            "品物, 時刻, 反応の強さ, 見せただけの印, 提示の列の名前を直して"
             "ください"
         )
     repeated = [
@@ -393,30 +423,44 @@ def load_reactions(
     table["time"], time_kind = read_time(raw_time, columns["time"])
     unreadable = int((raw_time.notna() & table["time"].isna()).sum())
 
-    # 見せただけの印は真偽 (読めない値は None)
-    if SHOWN_ROLE in table:
-        table[SHOWN_ROLE] = read_shown(table[SHOWN_ROLE], columns[SHOWN_ROLE])
-
-    # 欠けた行, 印を読めない行と, 反応の強さが 0 以下か数でない行の除外.
-    # 印が真の行は見せただけの記録へ
+    # 利用者, 品物, 時刻か提示の欠けた行の除外
     notes = []
     rows = len(table)
-    table = table.dropna(subset=list(REQUIRED_ROLES))
+    needed = list(REQUIRED_ROLES)
+    if PRESENTATION_ROLE in table:
+        needed.append(PRESENTATION_ROLE)
+    table = table.dropna(subset=needed)
     dropped_missing = rows - len(table)
     if dropped_missing:
-        notes.append(
-            f"利用者, 品物か時刻の欠けた {dropped_missing} 行を除きました"
+        names = (
+            "利用者, 品物, 時刻か提示" if PRESENTATION_ROLE in table
+            else "利用者, 品物か時刻"
         )
+        notes.append(f"{names}の欠けた {dropped_missing} 行を除きました")
     if unreadable:
         notes.append(
             f"時刻の列 {columns['time']} の {unreadable} 個の値を日時として"
             "読めず, 欠けとみなしました"
         )
-    shown_table, dropped_shown = None, 0
+
+    # 見せただけの印を読めない行の除外と, 印での分け方 (欠けた印は偽)
+    shown_table, chosen_rows, dropped_shown = None, None, 0
     if SHOWN_ROLE in table:
-        table, shown_table, dropped_shown = split_shown(
-            table, columns[SHOWN_ROLE], notes
-        )
+        marks = read_shown(table[SHOWN_ROLE], columns[SHOWN_ROLE])
+        readable = marks.notna().to_numpy()
+        dropped_shown = int((~readable).sum())
+        if dropped_shown:
+            notes.append(
+                f"見せただけの印 ({columns[SHOWN_ROLE]}) を読めない "
+                f"{dropped_shown} 行を除きました"
+            )
+        marked = np.array([mark is True for mark in marks], dtype=bool)
+        shown_table = table[marked].drop(columns=SHOWN_ROLE)
+        shown_table = shown_table.drop(columns=STRENGTH_ROLE, errors="ignore")
+        table = table[readable & ~marked].drop(columns=SHOWN_ROLE)
+        chosen_rows = table
+
+    # 反応の強さが 0 以下か数でない行の除外
     dropped_not_positive = 0
     if STRENGTH_ROLE in table:
         strength = pd.to_numeric(table[STRENGTH_ROLE], errors="coerce")
@@ -431,14 +475,19 @@ def load_reactions(
             **{STRENGTH_ROLE: strength[kept].astype(float)}
         )
     table = table.sort_values("time", kind="stable").reset_index(drop=True)
+    if table.empty and shown_table is not None:
+        raise ValueError(
+            "見せただけの印がある表で, 選んだ反応が 1 行も残りません. 印の"
+            "列と値を確かめてください"
+        )
     if table.empty:
         notes.append("反応として残る行がありません")
 
-    # 残した反応と重なる見せただけの行の除外
-    dropped_conflict = 0
+    # 選んだ行と重なる見せただけの行と, 同じ見せただけの行の除外
+    dropped_conflict, dropped_duplicate = 0, 0
     if shown_table is not None:
-        shown_table, dropped_conflict = drop_conflicts(
-            shown_table, table, notes
+        shown_table, dropped_conflict, dropped_duplicate = tidy_shown(
+            shown_table, chosen_rows, notes
         )
     reactions = Reactions(
         frame=table, columns=columns, time_kind=time_kind, rows=rows,
@@ -446,7 +495,7 @@ def load_reactions(
         dropped_not_positive=dropped_not_positive,
         unreadable_time=unreadable, shown=shown_table,
         dropped_shown=dropped_shown, dropped_conflict=dropped_conflict,
-        source=place, notes=notes
+        dropped_duplicate=dropped_duplicate, source=place, notes=notes
     )
 
     return reactions
@@ -614,22 +663,24 @@ def describe_shown(reactions: Reactions) -> Optional[dict]:
     Returns
     ----------
     summary: Optional[dict]
-        negatives, users, items, presentations, chosen_presentations,
-        unseen_items. 印の列が無ければ None
+        negatives, users, items, by (提示の決め方), presentations,
+        chosen_presentations, unseen_items. 印の列が無ければ None
     """
     # 印の列が無い場合は要約無し
     shown, frame = reactions.shown, reactions.frame
     if shown is None:
         return None
 
-    # 1 回の提示は利用者と時刻の組
-    keys = ["user", "time"]
+    # 1 回の提示は利用者と提示の組か, 提示の列が無ければ利用者と時刻の組
+    by = PRESENTATION_ROLE if PRESENTATION_ROLE in shown else "time"
+    keys = ["user", by]
     chosen = frame[keys].drop_duplicates()
     every = pd.concat([chosen, shown[keys]]).drop_duplicates()
     summary = {
         "negatives": int(len(shown)),
         "users": int(shown["user"].nunique()),
         "items": int(shown["item"].nunique()),
+        "by": by,
         "presentations": int(len(every)),
         "chosen_presentations": int(len(chosen)),
         "unseen_items": int((~shown["item"].isin(frame["item"])).sum()),
@@ -678,9 +729,11 @@ def describe_reactions(reactions: Reactions) -> dict:
             "not_positive": int(reactions.dropped_not_positive),
             "unreadable_shown": int(reactions.dropped_shown),
             "conflict": int(reactions.dropped_conflict),
+            "duplicate_shown": int(reactions.dropped_duplicate),
             "total": int(
                 reactions.dropped_missing + reactions.dropped_not_positive
                 + reactions.dropped_shown + reactions.dropped_conflict
+                + reactions.dropped_duplicate
             ),
         },
         "users": users,
