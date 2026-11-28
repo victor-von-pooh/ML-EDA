@@ -89,8 +89,9 @@ def test_drops_like_the_skeleton(tmp_path: Path) -> None:
     assert reactions.frame["reaction"].tolist() == [2.0, 1.0, 1.0, 1.5]
     assert reactions.columns == {
         "user": "member", "item": "item_id", "time": "ts",
-        "reaction": "qty"
+        "reaction": "qty", "shown": None
     }
+    assert reactions.shown is None
     assert reactions.source["loader"] == "csv"
     assert len(reactions.notes) == 2
 
@@ -244,7 +245,8 @@ def test_summary(tmp_path: Path) -> None:
     assert summary["repeated"] == 1
     assert summary["density"] == pytest.approx(6 / 9)
     assert summary["dropped"] == {
-        "missing": 0, "unreadable_time": 0, "not_positive": 1, "total": 1
+        "missing": 0, "unreadable_time": 0, "not_positive": 1,
+        "unreadable_shown": 0, "conflict": 0, "total": 1
     }
 
     # 利用者ごとの数の分布 (4, 2, 1)
@@ -325,3 +327,161 @@ def test_number_ids_stay_numbers(tmp_path: Path) -> None:
     )
     json.dumps(summary)
     assert summary["popularity"]["popular"][0] == {"item": 10, "reactions": 2}
+
+
+def test_shown_rows(tmp_path: Path) -> None:
+    """
+    見せただけの印の列がある表で, 反応と見せただけの記録に分けるかを
+    確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 1 行 = 見せた品物 1 件. 印が真の行は反応の強さを読まない
+    path = write_csv(tmp_path / "r.csv", [
+        "u,i,t,qty,seen",
+        "a,x,2,1,0",
+        "a,y,2,,1",
+        "a,z,2,,TRUE",
+        "b,x,1,2,false",
+        "b,z,1,0,0",
+        "c,w,3,,1",
+    ])
+    reactions = load_reactions(
+        path, user="u", item="i", time="t", reaction="qty", shown="seen"
+    )
+    assert reactions.columns["shown"] == "seen"
+    assert reactions.frame["item"].tolist() == ["x", "x"]
+    assert reactions.frame["user"].tolist() == ["b", "a"]
+    assert list(reactions.shown.columns) == ["user", "item", "time"]
+    assert reactions.shown["item"].tolist() == ["y", "z", "w"]
+    assert reactions.dropped_not_positive == 1
+    assert reactions.dropped_shown == 0
+
+    # 提示は利用者と時刻の組. 反応の表に無い品物 (w) は数える
+    summary = describe_reactions(reactions)
+    json.dumps(summary)
+    assert summary["columns"]["shown"] == "seen"
+    assert summary["shown"] == {
+        "negatives": 3, "users": 2, "items": 3, "presentations": 3,
+        "chosen_presentations": 2, "unseen_items": 3,
+    }
+    assert (summary["rows"] == summary["reactions"]
+            + summary["shown"]["negatives"] + summary["dropped"]["total"])
+    assert any("反応の表に無い品物" in note for note in summary["notes"])
+
+
+def test_without_shown_column(tmp_path: Path) -> None:
+    """
+    印を渡さない読み方が, 選んだ記録だけの今の読み方と同じかを確かめる
+    関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 印の列の無い表と, 印の列があっても渡さない場合
+    plain = write_csv(tmp_path / "plain.csv", ["u,i,t", "a,x,1", "b,y,2"])
+    marked = write_csv(
+        tmp_path / "marked.csv", ["u,i,t,seen", "a,x,1,0", "b,y,2,1"]
+    )
+    for path in (plain, marked):
+        reactions = load_reactions(path, user="u", item="i", time="t")
+        assert reactions.shown is None
+        assert reactions.frame["item"].tolist() == ["x", "y"]
+        summary = describe_reactions(reactions)
+        assert summary["shown"] is None
+        assert summary["columns"]["shown"] is None
+        assert summary["dropped"]["unreadable_shown"] == 0
+        assert summary["dropped"]["conflict"] == 0
+        assert summary["dropped"]["total"] == 0
+
+
+def test_shown_broken_values(tmp_path: Path) -> None:
+    """
+    見せただけの印の壊れた値を除くか, 誤りで止まるかを確かめる関数
+
+    Parameters
+    ----------
+    tmp_path: Path
+        一時ディレクトリ
+
+    Returns
+    ----------
+    None
+    """
+    # 読めない印と欠けた印の行を除いて数える
+    path = write_csv(tmp_path / "r.csv", [
+        "u,i,t,seen", "a,x,1,0", "a,y,1,yes", "a,z,1,", "a,w,1,2",
+        "b,y,2, 1 ",
+    ])
+    reactions = load_reactions(
+        path, user="u", item="i", time="t", shown="seen"
+    )
+    assert reactions.dropped_shown == 3
+    assert reactions.frame["item"].tolist() == ["x"]
+    assert reactions.shown["item"].tolist() == ["y"]
+    summary = describe_reactions(reactions)
+    assert summary["dropped"]["unreadable_shown"] == 3
+    assert summary["dropped"]["total"] == 3
+    assert any("印 (seen) を読めない 3 行" in note
+               for note in summary["notes"])
+
+    # どの値も読めない印の列, 無い列, 他の役割と同じ列は誤り
+    broken = write_csv(
+        tmp_path / "broken.csv", ["u,i,t,seen", "a,x,1,yes", "b,y,2,no"]
+    )
+    with pytest.raises(ValueError, match="見せただけの印の列"):
+        load_reactions(broken, user="u", item="i", time="t", shown="seen")
+    with pytest.raises(ValueError, match="flag"):
+        load_reactions(path, user="u", item="i", time="t", shown="flag")
+    with pytest.raises(ValueError, match="別々の列"):
+        load_reactions(path, user="u", item="i", time="t", shown="t")
+
+
+def test_shown_typed_and_conflict() -> None:
+    """
+    真偽と数の印を読み, 選んだ反応と重なる見せただけの行を除くかを
+    確かめる関数
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ----------
+    None
+    """
+    # 真偽の列. 同じ利用者, 品物, 時刻の行が選んだ反応にもある
+    frame = pd.DataFrame({
+        "u": [1, 1, 1, 2], "i": [10, 10, 11, 10],
+        "t": [1.0, 1.0, 1.0, 2.0], "seen": [False, True, True, True],
+    })
+    data = ml_eda.Data(kind="table", frame=frame)
+    reactions = load_reactions(data, user="u", item="i", time="t",
+                               shown="seen")
+    assert reactions.dropped_conflict == 1
+    assert reactions.shown["item"].tolist() == [11, 10]
+    summary = describe_reactions(reactions)
+    assert summary["dropped"]["conflict"] == 1
+    assert summary["shown"]["unseen_items"] == 1
+
+    # 数の 1 と 0 の列 (欠けは読めない印)
+    numbers = frame.assign(seen=[0.0, 1.0, float("nan"), 1.0])
+    data = ml_eda.Data(kind="table", frame=numbers)
+    reactions = load_reactions(data, user="u", item="i", time="t",
+                               shown="seen")
+    assert reactions.dropped_shown == 1
+    assert reactions.dropped_conflict == 1
+    assert reactions.shown["user"].tolist() == [2]
