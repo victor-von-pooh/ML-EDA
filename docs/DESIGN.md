@@ -29,7 +29,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | 画像 1 枚の読み方 (`read_image`) | 持つ | 版を持たない | ML-Fathom (撮影の 1 枚). 下の「公開の名前」 |
 | 記録した軌跡 (`<名前>.csv` か `<名前>.parquet` と, 説明の `<名前>.json`) | 読む | 説明の `format_version` 1 (`TRAJECTORY_FORMAT_VERSION`). 新しい版は読める項目だけを使い, 気付きに書く | 出どころは ML-Found の評価の軌跡 (実験のディレクトリの `trajectories/`. 形の出どころは ML-Found の `docs/FORMAT.md` の「trajectories」) と, 利用者の手元の表. 読む形の決まりは下の「記録した軌跡」 |
 | 軌跡の要約 (`load_trajectory`, `describe_trajectory`) | 持つ | 版を持たない (下の形) | 利用者が直接呼ぶ. 下の「記録した軌跡」 |
-| 並べるの反応の表 (1 行が 1 つの反応の表のファイル 1 つ) | 読む | 版を持たない (列の名前は問題の設定の答え) | 形の出どころは ML-Quest の `docs/DESIGN.md` の「並べるの骨組み」の反応の表. ML-Quest の骨組みの学習のスクリプトと同じ決まりで読み, 除く行を数える. 下の「並べるの反応の表」 |
+| 並べるの反応の表 (1 行が 1 つの反応か, 見せただけの記録の表のファイル 1 つ) | 読む | 版を持たない (列の名前は問題の設定の答え. 見せただけの印と提示の列は任意で, 利用者が渡す) | 形の出どころは ML-Quest の `docs/DESIGN.md` の「並べるの骨組み」の反応の表. ML-Quest の骨組みの学習のスクリプトと同じ決まりで読み, 除く行を数える. 見せただけの印の列の置き方と, 学習のスクリプトがそれを読むときの約束はこのリポジトリが決める (ML-Quest の問題の設定と骨組みはまだ印の列を読まない). 下の「並べるの反応の表」と「見せただけの記録」 |
 | 反応の要約 (`load_reactions`, `describe_reactions`) | 持つ | 版を持たない (下の形) | 利用者が直接呼ぶ. 下の「並べるの反応の表」 |
 | 群分けの表 (版 2 の `role: group` のデータセット) | 持つ | データセットの版 2 に含む | 分析の保存. ML-Fathom (書き出し), 利用者 (`load_items` で読み直し, `describe_groups` に渡す). 群分けの学習には使わない (学習には表のファイルを渡し, ML-Quest のまとめるの骨組みが `load_data` で読む). 下の「群分けの表」 |
 | 群の要約 (`describe_groups`) | 持つ | 版を持たない (下の形). 群の行は ML-Quest のまとめるの骨組みの `evaluations/group_summary.json` の行と同じ形 | ML-Fathom (分析の段階で群を見せる), ML-Inference (群の要約の形). 下の「群の要約」 |
@@ -51,7 +51,7 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 - `PLACEMENTS`: `load_items` が読める項目の置き方 (`dataset.yaml` の `entries.<名前>.placement`) の名前の組 (`tuple[str, ...]`. 今は `("file", "directory", "column")`. 意味は「書き出しの版 2」の `placement`). これに無い置き方の項目を持つデータセットは `load_items` が誤りで止まる
 - `TRAJECTORY_FORMAT_VERSION`: `load_trajectory` が知る軌跡の説明の版 (`int`. 今は 1)
 - `load_trajectory(path)`, `describe_trajectory(trajectory)`, `Trajectory`: 記録した軌跡を読み, 要約する. 形は下の「記録した軌跡」
-- `load_reactions(source, user, item, time, reaction=None, loader=None, **options)`, `describe_reactions(reactions)`, `Reactions`: 並べるの反応の表を読んで約束を確かめ, 要約する. 形は下の「並べるの反応の表」
+- `load_reactions(source, user, item, time, reaction=None, loader=None, *, shown=None, presentation=None, **options)`, `describe_reactions(reactions)`, `Reactions`: 並べるの反応の表を読んで約束を確かめ, 要約する. 形は下の「並べるの反応の表」
 - `export_group_rows(source, path, columns, id=None, split=None, name=None, overwrite=False, loader=None, **options)`: 群分けの表を版 2 で書き出す. 形は下の「群分けの表」
 - `describe_groups(source, columns=None, k=None, labels=None, seed=0, repeats=5, stability="seed", fraction=0.8, loader=None, **options)`: 学習に通さず群の要約を返す. 形は下の「群の要約」
 - `describe_uplift(source, treatment, outcome, outcome_kind=None, columns=None, id=None, loader=None, **options)`: 介入の記録の表の処置の群と対照の群の行の数, 結果の平均と差, 特徴の釣り合いと気付きを返す. 形は下の「介入の記録の要約」
@@ -70,7 +70,8 @@ ML-EDA の今の設計と決まりをまとめる. まだやっていないこ�
 | レシピ (recipe) | 前処理の手順の並び. YAML に書き, 版を付ける |
 | データセット (dataset) | 前処理をして分割したデータを, 学習用に書き出したディレクトリ |
 | 軌跡 (trajectory) | 強化学習で, 方策を環境で走らせた記録. 1 歩が 1 行の表 (エピソードの番号, 歩数, 観測, 行動, 報酬, 終わったか). 下の「記録した軌跡」 |
-| 反応の表 | 並べる (推薦) の学習に使う, 1 行が 1 つの反応 (利用者が品物を買った, 見たなど) の表. 利用者, 品物, 時刻の列と, 任意の反応の強さの列. 下の「並べるの反応の表」 |
+| 反応の表 | 並べる (推薦) の学習に使う, 1 行が 1 つの反応 (利用者が品物を買った, 見たなど) の表. 利用者, 品物, 時刻の列と, 任意の反応の強さの列と, 任意の見せただけの印の列. 下の「並べるの反応の表」 |
+| 見せただけの記録 | 並べるで, 利用者に見せたが選ばれなかった品物の行. 反応の表の見せただけの印の列が真の行で, 負の例と, 1 回の提示の中で並べる評価に使う. 下の「並べるの反応の表」 |
 | 群の要約 | 群分け (まとめる) で, 群ごとの行の数, 割合, 安定性と, 群を作った列の要約 (数の列は平均, 他の列は最も多い値と割合) を並べた表. 下の「群の要約」 |
 | 行の id | 異常の検知の表, 介入の記録の表, 値段を変えた記録の表と需要の記録の表で 1 行を見分ける列. 人の確認の記録や行ごとの効果の表が行を指すのに使う. 下の「異常の検知の表」「介入の記録の表」「値段を変えた記録の表」「需要の記録の表」 |
 | 処置の群, 対照の群 | 介入の記録の表で, 行動した (クーポンを配った) 行と, しなかった行. 処置の列の 1 と 0. 下の「介入の記録の表」 |
@@ -237,21 +238,21 @@ AR の端末などで物体の周りを撮った 1 回の撮影を 1 件とす�
 
 並べる (推薦) の学習に使う, 1 行が 1 つの反応の表を読み, 約束を確かめて, 利用者, 品物, 反応の数, 偏り, 時刻の範囲, 除いた行を要約する. 形は ML-Quest の並べるの骨組みが読む反応の表と同じで, 除く行の決まりも骨組みの学習のスクリプトと同じにする (画面で見せた数と学習の `train.log` の数が合うように). 読み込みの登録簿には入れない (表は `load_data` で普通の表として読む).
 
-- `load_reactions(source, user, item, time, reaction=None, loader=None, **options)`: `source` は表のファイルか, `load_data` で読んだ `Data`. ファイルは `load_data(source, loader=loader, **options)` で読む (骨組みが問題の設定の読み方 `data.loader` と `data.options` で読むのと同じ). `Data` を渡した場合は, その表と読み方 (`Data.source`) を使い, `loader` と `options` を渡すと誤り. `user`, `item`, `time` は問題の設定で答えた列の名前 (ML-Quest の `ml.parts.<n>.rank` の `user`, `item`, `time`), `reaction` は反応の強さの列 (答えていなければ None)
-- **列**: 4 つの役割に同じ列を渡した場合, 要る列の名前が None の場合, 表に列が無い場合, 表に同じ名前の列が 2 つ以上ある場合は誤り. 他の列は読まない
+- `load_reactions(source, user, item, time, reaction=None, loader=None, *, shown=None, presentation=None, **options)`: `source` は表のファイルか, `load_data` で読んだ `Data`. ファイルは `load_data(source, loader=loader, **options)` で読む (骨組みが問題の設定の読み方 `data.loader` と `data.options` で読むのと同じ). `Data` を渡した場合は, その表と読み方 (`Data.source`) を使い, `loader` と `options` を渡すと誤り. `user`, `item`, `time` は問題の設定で答えた列の名前 (ML-Quest の `ml.parts.<n>.rank` の `user`, `item`, `time`), `reaction` は反応の強さの列 (答えていなければ None). `shown` (見せただけの印の列) と `presentation` (提示の列) は利用者が渡す任意の列で, キーワードだけで渡す (ML-Quest の問題の設定にはまだ答えが無い. 下の「見せただけの記録」)
+- **列**: 6 つの役割に同じ列を渡した場合, 要る列の名前が None の場合, 表に列が無い場合, 表に同じ名前の列が 2 つ以上ある場合, 印の列無しで提示の列を渡した場合は誤り. 他の列は読まない. 見せただけの印と提示の列は決まった名前を探さない
 - **時刻**: 数の型の列は数のまま (`time_kind` は `number`). 他は日時として読み (`datetime`), 日時として読めない値は欠けにする. 欠けでない値があり, どれも読めない列は誤り
-- **除く行**: 利用者, 品物か時刻の欠けた行 (日時として読めない時刻を含む) を除き, 次に, 反応の強さの列があれば, 強さが 0 以下か数でない行を除く (強さを渡さなければ全ての行を反応とみなす). 除いた数は 2 つに分けて数え, 1 行以上なら気付きに書く. 同じ利用者と品物の行が何行あってもよい
+- **除く行**: 利用者, 品物か時刻の欠けた行 (日時として読めない時刻を含む) を除き, 次に, 反応の強さの列があれば, 強さが 0 以下か数でない行を除く (強さを渡さなければ全ての行を反応とみなす). 除いた数は 2 つに分けて数え, 1 行以上なら気付きに書く. 同じ利用者と品物の行が何行あってもよい. 見せただけの印の列がある表では, 下の「見せただけの記録」の決まりが加わる
 - **分割は持たない**: 反応の表はデータセット (`dataset.yaml` と分割ごとのデータ) にせず, ファイル 1 つのまま骨組みに渡す. 分割は骨組みが時刻で行う (反応を時刻の順に並べ, 古い反応を学習用, 新しい反応を検証用とテスト用にする). 並べるの分割は時刻で全体を切るのが決まりで, 割合は骨組みの config で変えるので, データセットの側で分けると決まりが 2 か所に分かれるため. 書き出しの前処理 (レシピ) もかけない
-- `Reactions` の欄: `frame` (残した反応の表. 列は `user`, `item`, `time` と, 強さがあれば `reaction` (float). 時刻の順で, 同じ時刻は元の行の順), `columns` (役割から元の列の名前. 強さが無ければ `reaction` は None), `time_kind` (`number` か `datetime`), `rows` (除く前の行の数), `dropped_missing` (欠けで除いた行の数), `dropped_not_positive` (強さで除いた行の数), `unreadable_time` (欠けでない値のうち, 日時として読めなかった時刻の数), `source` (読み込んだ場所と読み方. `Data.source`), `notes` (気付きの日本語の文の並び)
+- `Reactions` の欄: `frame` (残した反応の表. 列は `user`, `item`, `time` と, 強さがあれば `reaction` (float), 提示の列があれば `presentation`. 時刻の順で, 同じ時刻は元の行の順), `columns` (役割から元の列の名前. 渡さなかった `reaction`, `shown`, `presentation` は None), `time_kind` (`number` か `datetime`), `rows` (除く前の行の数), `dropped_missing` (利用者, 品物, 時刻か提示の欠けで除いた行の数), `dropped_not_positive` (強さで除いた行の数), `unreadable_time` (欠けでない値のうち, 日時として読めなかった時刻の数), `shown` (残した見せただけの記録の表. 列は `user`, `item`, `time` と, 提示の列があれば `presentation` で, `frame` と同じ順の決まり. 印の列が無ければ None), `dropped_shown` (印を読めずに除いた行の数), `dropped_conflict` (選んだ行と重なるので除いた見せただけの行の数), `dropped_duplicate` (同じ見せただけの行の 2 行目からとして除いた行の数), `source` (読み込んだ場所と読み方. `Data.source`), `notes` (気付きの日本語の文の並び)
 
 `describe_reactions(reactions)` は JSON にできる辞書を返す (nan と無限大は None). 鍵は次のとおり.
 
 | 鍵 | 中身 |
 | --- | --- |
-| `columns` | 役割 (`user`, `item`, `time`, `reaction`) から元の列の名前 |
+| `columns` | 役割 (`user`, `item`, `time`, `reaction`, `shown`, `presentation`) から元の列の名前 |
 | `source` | 読み込んだ場所と読み方 (`Data.source`) |
 | `rows`, `reactions` | 除く前の行の数と, 残した反応の数 |
-| `dropped` | `missing` (欠けで除いた行), `unreadable_time` (`missing` のうち, 日時として読めなかった時刻), `not_positive` (強さが 0 以下か数でない行), `total` (`missing` と `not_positive` の和) |
+| `dropped` | `missing` (欠けで除いた行), `unreadable_time` (`missing` のうち, 日時として読めなかった時刻), `not_positive` (強さが 0 以下か数でない行), `unreadable_shown` (見せただけの印を読めない行), `conflict` (選んだ行と重なる見せただけの行), `duplicate_shown` (同じ見せただけの行の 2 行目から), `total` (`missing`, `not_positive`, `unreadable_shown`, `conflict`, `duplicate_shown` の和). 印の列が無ければ `unreadable_shown`, `conflict`, `duplicate_shown` は 0 |
 | `users`, `items` | 残した反応の利用者と品物の数 |
 | `pairs`, `repeated` | 異なる利用者と品物の組の数と, 同じ組の 2 行目からの数 (`reactions` − `pairs`) |
 | `density` | `pairs` を利用者の数 × 品物の数で割った値 (反応が無ければ None) |
@@ -259,7 +260,22 @@ AR の端末などで物体の周りを撮った 1 回の撮影を 1 件とす�
 | `popularity` | 品物の人気の偏り. `top_items` (反応の多い上位 10% の品物の数. 切り上げ), `top_share` (その品物の反応の割合. 反応が無ければ None), `gini` (品物ごとの反応の数のジニ係数. 0 はどの品物も同じ数で, 1 に近いほど偏る. 品物が無ければ None), `popular` (多い順の先頭 10 件の `{"item", "reactions"}`. 品物の値は数, 真偽値, 文字はそのまま, 他は文字) |
 | `time` | `kind` (`number` か `datetime`), `min`, `max` (日時は ISO 8601 の文字. 反応が無ければ None), `distinct` (異なる時刻の数) |
 | `reaction` | 残した反応の強さの `min`, `max`, `mean`, `std`, `median`. 強さの列が無ければ None |
-| `notes` | `Reactions` の `notes` と, 要約で気付いたこと (反応が残らない, 利用者か品物が 1 つだけで並べて確かめられない) |
+| `shown` | 見せただけの記録の要約. `negatives` (残した見せただけの行の数), `users`, `items` (その利用者と品物の数), `by` (提示の決め方. 提示の列があれば `presentation`, 無ければ `time`), `presentations` (反応と見せただけの行の, 異なる提示の数), `chosen_presentations` (そのうち反応のある組の数), `unseen_items` (反応の表に無い品物の見せただけの行の数). 印の列が無ければ None. `rows` は `reactions`, `negatives` と `dropped.total` の和 |
+| `notes` | `Reactions` の `notes` と, 要約で気付いたこと (反応が残らない, 利用者か品物が 1 つだけで並べて確かめられない, 反応の表に無い品物の見せただけの行がある) |
+
+### 見せただけの記録 (`load_reactions` の `shown`)
+
+見せたが選ばれなかった記録は無いデータもあるので, 要る前提にしない. 見せただけの印の列 (`shown`) を渡したときだけ読み, 負の例と評価に使える表 (`Reactions.shown`) にする. 渡さなければ, 上の決まりのとおり選んだ反応だけを読む (印の無い表の読み方と結果は変わらない).
+
+- **1 行 = 見せた品物 1 件**: 印の列のある表は, 提示で見せた品物ごとに 1 行を持つ. 選んだ品物の行は印が偽か欠け (反応の行), 見せただけの品物の行は印が真. 1 行に見せた品物を並べる形 (1 行 = 1 回の提示) は使わない (CSV で並びを書く決まりが要り, 反応の表の 1 行 = 1 つの反応と合わないため)
+- **1 つの表に置く**: 選んだ反応と見せただけの記録を別々の表に持つ形は読まない. その場合は利用者が 2 つの表を縦に結合し, 見せただけの行に印を付けてから渡す (選んだ行の印は空のままでよい)
+- **印の値**: 真は `true`, `1`, 偽は `false`, `0` (真偽の型 (nullable の `boolean` を含む), 数の 1 と 0 (nullable の `Int64` を含む), 文字の `true`, `false`, `1`, `0`. 文字は前後の空白と大文字小文字を問わない). 欠けた印は偽 (見せた行だけに 1 を付け, 選んだ行を空にした表がよくあるため). 他の値は読めない印
+- **提示との結び付け**: 1 回の提示は, 提示の列 (`presentation`. 提示の ID) を渡せば利用者と提示の組で, 渡さなければ利用者と時刻の組で決める. 選んだ行と見せただけの行の照らし合わせ (下の重なり) と, 要約の提示の数はこの組で数える. 選んだ行の無い提示 (見せたが何も選ばれなかった) もよい
+- **時刻の意味と粒度**: 時刻の列は, 反応の表としては反応の時刻 (選んだ行ならクリックや購入の時刻) で, 分割の順に使う. 提示の列を渡さないときは, 同じ提示の選んだ行と見せただけの行が同じ時刻の値 (提示の時刻か, 提示ごとに同じ値) を持つことを前提にする. 時刻は丸めずに値が等しいかで比べる (数は数の等しさ, 日時は読んだ精度のままの等しさ. 1 秒でも違えば別の提示). 選んだ行の時刻が提示の時刻より後になる表では, 提示の列を渡す
+- **決まりの順**: 1. 利用者, 品物, 時刻の欠けた行 (提示の列を渡せば提示の欠けた行も) を除く (`dropped_missing`). 2. 残った行で印を読み, 読めない行を除く (`dropped_shown`). 3. 印が偽の行に反応の強さの決まりをかけて反応の表 (`frame`) にする (`dropped_not_positive`). 印が真の行は反応の強さを読まない. 4. 印が真の行のうち, 印が偽の行 (反応の強さで除いた行も含む) と同じ提示の同じ品物の行を除く (`dropped_conflict`). 強さで反応から外れた行も利用者が選んだ記録なので, 選ばなかった負の例にはしない. 5. 同じ提示の同じ品物の見せただけの行は 1 行にまとめる (2 行目からを `dropped_duplicate`). 残りを見せただけの記録の表 (`shown`) にする. 除いた数は 1 行以上なら気付きに書く. 要約の `rows` は `reactions`, `shown.negatives` と `dropped.total` の和
+- **誤り**: 2 の時点で残った行の印が全て欠けている場合 (どの行も見せただけにならない), 欠けでない印があり, どれも読めない場合, 3 の後で選んだ反応が 1 行も残らない場合は誤りで止める
+- **学習のスクリプトが読むときの約束**: ML-Quest の問題の設定 (`ml.parts.<n>.rank`) には印と提示の列の答えが無く, 並べるの骨組みは印の列を読まない. 今の骨組みに印のある表を渡すと, 見せただけの行も他の行と同じく正の反応として学ぶので, 印のある表は印の列を読むようになった学習のスクリプトに渡す. 学習のスクリプトが印を読むときは, 同じ表のファイルを上の決まり (列, 値, 提示の決め方, 決まりの順と誤り) で読み, 除く行の数を `load_reactions` と合わせる. 見せただけの記録は, 学習では同じ利用者の負の例 (選ばなかった品物) にし, 評価では 1 回の提示の中で選んだ品物を見せただけの品物より上に並べられたかを測るのに使う. 反応の表に無い品物の見せただけの行は品物の番号が無いので使えない (要約の `shown.unseen_items` で数える). 分割は反応と同じく時刻で全体を切り, 見せただけの行も自分の時刻の側に入る
+- **版**: 反応の表は版を持たず, 印と提示の列は任意の列を足すだけなので, 印の無い表と, 印を渡さない読み方は前と同じに読める. 2 つの引数はキーワードだけで渡すので, 位置で渡す今の呼び出しの意味も変わらない. データセットの版 (`format_version`) は変えない
 
 ## 6. 分析
 
